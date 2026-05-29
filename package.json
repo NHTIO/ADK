@@ -156,5 +156,13 @@
       "import": "./dist/index.mjs",
       "require": "./dist/index.cjs"
     }
+  },
+  "homepage": "https://github.com/NHTIO/ADK#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NHTIO/ADK.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NHTIO/ADK/issues"
   }
 }

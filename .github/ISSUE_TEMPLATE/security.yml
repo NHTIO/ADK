@@ -1,0 +1,102 @@
+name: Security issue
+description: Report a security concern or vulnerability in @nhtio/adk
+title: "[Security]: "
+labels:
+  - security
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping keep @nhtio/adk secure.
+
+        If this report contains an actively exploitable vulnerability, private exploit details, credentials, tokens, or user data, do not post those details publicly. Share only a high-level summary here and coordinate sensitive details through the project's preferred private disclosure channel.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit hash
+      description: Provide the released package version or exact commit hash where the issue occurs.
+      placeholder: "0.0.1 or 0123456789abcdef"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Security category
+      description: Select the closest category for the issue.
+      options:
+        - Prompt injection or trust-boundary bypass
+        - Data leakage or unintended disclosure
+        - Authentication or authorization issue
+        - Unsafe tool execution
+        - Dependency or supply-chain issue
+        - Denial of service or resource exhaustion
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the concern at a high level. Do not include secrets, live exploit payloads, or private user data.
+      placeholder: "A trust-tier boundary can be bypassed when ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Explain what an attacker or unsafe input could do, and who or what is affected.
+      placeholder: "An attacker could cause ... affecting ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: minimal-repro
+    attributes:
+      label: Minimal safe reproduction
+      description: Provide the smallest safe reproduction, redacted proof, or step-by-step setup. Avoid posting active exploit details publicly.
+      placeholder: |
+        1. Configure ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected secure behavior
+      description: What security boundary or safe behavior did you expect?
+      placeholder: "Untrusted content should remain isolated from ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+      placeholder: "The untrusted content was treated as ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and evidence
+      description: Paste relevant redacted logs, stack traces, or terminal output. Remove secrets, tokens, and private user data.
+      render: shell
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: disclosure-safety
+    attributes:
+      label: Disclosure safety
+      options:
+        - label: I have not included secrets, tokens, private user data, or active exploit details in this public issue.
+          required: true

@@ -23,4 +23,5 @@ junit.xml
 TODO.md
 docs/.vitepress/sidebar.json
 docs/.vitepress/config.mts.timestamp-*
-
+.pnpm/
+.pnpm-store/

@@ -99,9 +99,11 @@ Use the canonical docs when the user needs complete examples, API-adjacent prose
 ## Common Failure Checks
 
 - Missing one of the 25 callbacks or using `async () => []` where ADK requires `(ctx) => []`.
+- Forgetting that every executor invocation must call exactly one terminal signal: `ctx.ack()` on success or `ctx.nack(error)` on failure.
 - Expecting `runner.run()` to return the assistant text; it returns `Promise<void>` and output comes through events.
 - Forgetting `autoAck: true` when directly wiring an LLM battery for a simple one-shot turn.
 - Putting primary model reasoning in middleware or event listeners instead of the executor.
 - Loading no messages because `turnInputPipeline` never calls `ctx.fetchMessages()` and `.add()`s results into `ctx.turnMessages`.
+- Doing turn-scoped work such as history, retrieval, memory, or standing-instruction hydration in dispatch pipelines; dispatch middleware runs once per executor iteration.
 - Treating first-party, public third-party, and private/user-supplied retrievables as equivalent trust sources.
 - Relying on `turnOutputPipeline` for cleanup that must run after failures.

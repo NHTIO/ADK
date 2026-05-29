@@ -1,0 +1,58 @@
+name: Bug report
+description: Report a reproducible bug in @nhtio/adk
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please include enough detail for maintainers to reproduce the issue.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit hash
+      description: Provide the released package version or exact commit hash where the bug occurs.
+      placeholder: "0.0.1 or 0123456789abcdef"
+    validations:
+      required: true
+
+  - type: textarea
+    id: minimal-repro
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest code sample, repository, or step-by-step setup that reproduces the bug.
+      placeholder: |
+        1. Install ...
+        2. Create ...
+        3. Run ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+      placeholder: "The turn should complete and emit a message event."
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened instead?
+      placeholder: "The turn hangs without ack/nack, or throws ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and error output
+      description: Paste relevant stack traces, console output, debug logs, or terminal output.
+      render: shell
+    validations:
+      required: true

@@ -22,6 +22,22 @@ const doCopyFile = async (src: string, dest: string) => {
 
 const docsUrl = () => (process.env.CI_PAGES_URL || '').replace(/\/+$/, '')
 
+const githubMirrorRepositoryUrls = () => {
+  const repository = process.env.GITHUB_MIRROR_REPOSITORY?.replace(/^\/+|\/+$/g, '')
+  if (!repository) return undefined
+  const publicRepositoryUrl = `https://github.com/${repository}`
+  return {
+    homepage: `${publicRepositoryUrl}#readme`,
+    repository: {
+      type: 'git',
+      url: `git+${publicRepositoryUrl}.git`,
+    },
+    bugs: {
+      url: `${publicRepositoryUrl}/issues`,
+    },
+  }
+}
+
 const textSkillExtensions = new Set(['.md', '.txt', '.json', '.jsonc', '.yaml', '.yml'])
 
 const rewriteSkillContent = (content: string, packageVersion: string, resolvedDocsUrl: string) => {
@@ -35,7 +51,12 @@ const rewriteSkillContent = (content: string, packageVersion: string, resolvedDo
     .replace(/^(-\s+Version:\s+`)[^`]+(`\s*)$/mu, `$1${packageVersion}$2`)
 }
 
-const copySkills = async (src: string, dest: string, packageVersion: string, resolvedDocsUrl: string) => {
+const copySkills = async (
+  src: string,
+  dest: string,
+  packageVersion: string,
+  resolvedDocsUrl: string
+) => {
   if (!existsSync(src)) return
   await mkdir(dest, { recursive: true })
   const entries = await readdir(src, { withFileTypes: true })
@@ -54,7 +75,7 @@ const copySkills = async (src: string, dest: string, packageVersion: string, res
       }
       const content = await readFile(srcPath, 'utf-8')
       await writeFile(destPath, rewriteSkillContent(content, packageVersion, resolvedDocsUrl))
-    }),
+    })
   )
 }
 
@@ -94,6 +115,7 @@ readFile(packageJsonPath, 'utf-8').then(async (packageJson) => {
   const exportKeys = Object.keys(entries)
   parsedPackageJson.module = './index.mjs'
   parsedPackageJson.main = './index.cjs'
+  Object.assign(parsedPackageJson, githubMirrorRepositoryUrls())
   const exports: Record<string, { import: string; require: string; types: string }> = {
     '.': {
       import: './index.mjs',

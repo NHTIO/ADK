@@ -4,7 +4,7 @@ This repository is a read-only, sanitized GitHub mirror of the open source relea
 
 The primary maintenance repository is a private GitLab repository maintained by the NHT team. Development, issue triage, pull requests, release preparation, and CI workflows happen there before updates are mirrored here.
 
-This mirror is provided for source availability and public visibility only. It is not the maintenance repository. Pull requests will not be accepted here. Issues may be reviewed and handled by NHT at our convenience, but no response or resolution timeline is guaranteed.
+This mirror is provided for source availability and public visibility only. It is not the maintenance repository. We don’t take PRs here; please fork. Issues may be reviewed and handled by NHT at our convenience, but no response or resolution timeline is guaranteed.
 
 ## TL;DR
 
