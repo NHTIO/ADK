@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["**/src/**/*.ts", "./vite-env.d.ts"],
+  "compilerOptions": {
+    "skipLibCheck": true,
+    "emitDeclarationOnly": true,
+    "declaration": true,
+    "stripInternal": true,
+    "outDir": "./types-temp",
+    "noEmit": false
+  }
+}

@@ -1,0 +1,44 @@
+/**
+ * Swappable translation helpers for rendering ADK state into WebLLM Chat Completions requests.
+ *
+ * @module @nhtio/adk/batteries/llm/webllm_chat_completions/helpers
+ */
+
+export {
+  descriptionToChatCompletionsJsonSchema,
+  defaultDescriptionToChatCompletionsJsonSchema,
+  renderUntrustedContent,
+  defaultRenderUntrustedContent,
+  renderTrustedContent,
+  defaultRenderTrustedContent,
+  renderStandingInstructions,
+  defaultRenderStandingInstructions,
+  renderMemories,
+  defaultRenderMemories,
+  renderRetrievables,
+  defaultRenderRetrievables,
+  renderRetrievableSafetyDirective,
+  defaultRenderRetrievableSafetyDirective,
+  renderFirstPartyRetrievables,
+  defaultRenderFirstPartyRetrievables,
+  renderThirdPartyPublicRetrievables,
+  defaultRenderThirdPartyPublicRetrievables,
+  renderThirdPartyPrivateRetrievables,
+  defaultRenderThirdPartyPrivateRetrievables,
+  renderTimelineMessage,
+  defaultRenderTimelineMessage,
+  renderThought,
+  defaultRenderThought,
+  filterThoughts,
+  defaultFilterThoughts,
+  toolsToChatCompletionsTools,
+  defaultToolsToChatCompletionsTools,
+  renderChatCompletionsSystemPrompt,
+  defaultRenderChatCompletionsSystemPrompt,
+  renderChatCompletionsToolCallResult,
+  defaultRenderChatCompletionsToolCallResult,
+  buildChatCompletionsHistory,
+  defaultBuildChatCompletionsHistory,
+  createChatCompletionsToolCallDeltaAccumulator,
+  defaultCreateChatCompletionsToolCallDeltaAccumulator,
+} from '../openai_chat_completions/helpers'
