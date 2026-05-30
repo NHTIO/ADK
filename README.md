@@ -12,7 +12,7 @@ This is a work product that NHT is open sourcing because we think it may be usef
 
 ## Documentation
 
-Read the full documentation at <https://adk-c04022.gitlab.io>.
+Read the full documentation at <https://adk.nht.io>.
 
 ## License
 

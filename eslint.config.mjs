@@ -9,6 +9,10 @@ export default [
       '**/docs/**/*.md',
       '**/README.md',
       '**/tmp/**/*',
+      // Generated static assets served by VitePress — includes the multi-MB
+      // precompiled ADK REPL bundle (docs/public/repl/adk-repl.es.js). Never lint
+      // targets, and large enough to crash eslint's parser.
+      '**/docs/public/**/*',
     ],
   }),
   {

@@ -20,29 +20,32 @@ const doCopyFile = async (src: string, dest: string) => {
   return await copyFile(src, dest)
 }
 
-const docsUrl = () => (process.env.CI_PAGES_URL || '').replace(/\/+$/, '')
+const docsUrl = () =>
+  (process.env.DOCS_SITE_URL || process.env.CI_PAGES_URL || '').replace(/\/+$/, '')
 
-const githubMirrorRepositoryUrls = () => {
+const packageUrls = (resolvedDocsUrl: string) => {
   const repository = process.env.GITHUB_MIRROR_REPOSITORY?.replace(/^\/+|\/+$/g, '')
-  if (!repository) return undefined
-  const publicRepositoryUrl = `https://github.com/${repository}`
-  return {
-    homepage: `${publicRepositoryUrl}#readme`,
-    repository: {
-      type: 'git',
-      url: `git+${publicRepositoryUrl}.git`,
-    },
-    bugs: {
-      url: `${publicRepositoryUrl}/issues`,
-    },
+  const urls: Record<string, unknown> = {}
+  if (resolvedDocsUrl) {
+    urls.homepage = resolvedDocsUrl
   }
+  if (!repository) return urls
+  const publicRepositoryUrl = `https://github.com/${repository}`
+  urls.repository = {
+    type: 'git',
+    url: `git+${publicRepositoryUrl}.git`,
+  }
+  urls.bugs = {
+    url: `${publicRepositoryUrl}/issues`,
+  }
+  return urls
 }
 
 const textSkillExtensions = new Set(['.md', '.txt', '.json', '.jsonc', '.yaml', '.yml'])
 
 const rewriteSkillContent = (content: string, packageVersion: string, resolvedDocsUrl: string) => {
   if (content.includes('$CI_PAGES_URL') && !resolvedDocsUrl) {
-    throw new Error('Set CI_PAGES_URL before packaging skills.')
+    throw new Error('Set DOCS_SITE_URL or CI_PAGES_URL before packaging skills.')
   }
 
   return content
@@ -113,9 +116,10 @@ readFile(packageJsonPath, 'utf-8').then(async (packageJson) => {
     return `./${rel.replace(/\.ts$/, '.d.ts')}`
   }
   const exportKeys = Object.keys(entries)
+  const resolvedDocsUrl = docsUrl()
   parsedPackageJson.module = './index.mjs'
   parsedPackageJson.main = './index.cjs'
-  Object.assign(parsedPackageJson, githubMirrorRepositoryUrls())
+  Object.assign(parsedPackageJson, packageUrls(resolvedDocsUrl))
   const exports: Record<string, { import: string; require: string; types: string }> = {
     '.': {
       import: './index.mjs',
@@ -140,6 +144,6 @@ readFile(packageJsonPath, 'utf-8').then(async (packageJson) => {
     writeFile(destPackageJsonPath, JSON.stringify(parsedPackageJson, null, 2)),
     doCopyFile(srcReadmePath, destReadmePath),
     doCopyFile(srcLicensePath, destLicensePath),
-    copySkills(skillsDir, destSkillsDir, parsedPackageJson.version, docsUrl()),
+    copySkills(skillsDir, destSkillsDir, parsedPackageJson.version, resolvedDocsUrl),
   ])
 })
