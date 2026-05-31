@@ -19,15 +19,21 @@
  * everything lives in process memory and is lost on exit.
  */
 
-import type { SpoolReader } from '@nhtio/adk/common'
+import { isInstanceOf } from '@nhtio/adk/guards'
+import type { SpoolReader, SpoolStore } from '@nhtio/adk/common'
 
 /**
- * Sync in-memory {@link @nhtio/adk!SpoolReader} over a `string` body.
+ * Sync in-memory {@link @nhtio/adk!SpoolReader} over a byte-faithful `Uint8Array` body.
  *
  * @remarks
- * Splits the supplied content on `\n` at construction time and caches the resulting line array
- * plus the UTF-8 byte length. All three `SpoolReader` methods resolve synchronously from the
- * cache — no I/O happens after construction.
+ * Stores the raw bytes and decodes them as UTF-8 once at construction, then splits the decoded
+ * string on `\n` and caches the resulting line array. All four `SpoolReader` methods resolve
+ * synchronously from the cache — no I/O happens after construction. `byteLength()` reports the
+ * true stored byte count (not the decoded character count), so it stays correct for multi-byte
+ * content; `line()`/`readAll()` operate on the decoded text.
+ *
+ * The reader accepts a `string` or a `Uint8Array`. A `string` is encoded as UTF-8 for the byte
+ * count; a `Uint8Array` is held byte-faithfully (no lossy re-encode) and decoded for text reads.
  *
  * Empty input yields a reader with `lineCount() === 0` and `byteLength() === 0`. A trailing
  * newline produces a final empty line: `"a\nb\n".split('\n') === ['a', 'b', '']`. This matches
@@ -39,10 +45,15 @@ export class InMemorySpoolReader implements SpoolReader {
   readonly #lines: string[]
   readonly #bytes: number
 
-  constructor(content: string) {
-    this.#content = content
-    this.#lines = content === '' ? [] : content.split('\n')
-    this.#bytes = new TextEncoder().encode(content).length
+  constructor(content: string | Uint8Array) {
+    if (typeof content === 'string') {
+      this.#content = content
+      this.#bytes = new TextEncoder().encode(content).length
+    } else {
+      this.#content = new TextDecoder().decode(content)
+      this.#bytes = content.byteLength
+    }
+    this.#lines = this.#content === '' ? [] : this.#content.split('\n')
   }
 
   line(index: number): string | undefined {
@@ -63,46 +74,100 @@ export class InMemorySpoolReader implements SpoolReader {
 }
 
 /**
+ * Drains a `ReadableStream<Uint8Array>` into a single concatenated `Uint8Array`.
+ *
+ * @remarks
+ * In-memory storage cannot stream-to-disk, so a stream input is buffered fully — the documented
+ * trade-off for {@link InMemorySpoolStore}. Use {@link @nhtio/adk/batteries/storage/opfs!OpfsSpoolStore}
+ * or a Flydrive-backed store when true streaming persistence is required.
+ */
+const drainStream = async (stream: ReadableStream<Uint8Array>): Promise<Uint8Array> => {
+  const chunks: Uint8Array[] = []
+  let total = 0
+  const reader = stream.getReader()
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value) {
+        chunks.push(value)
+        total += value.byteLength
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    out.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return out
+}
+
+/**
  * In-memory "give bytes, get a reader" persistence layer keyed by `callId`.
  *
  * @remarks
- * Stores the canonical UTF-8 string form of each value. `Uint8Array` inputs are decoded via
- * `TextDecoder` once at write time — subsequent `read()` calls return a reader over the cached
- * string with no further decoding.
+ * Stores each value byte-faithfully as a `Uint8Array`. `string` inputs are encoded as UTF-8;
+ * `Uint8Array` inputs are held verbatim (no lossy text round-trip, so binary payloads survive
+ * intact); `ReadableStream<Uint8Array>` inputs are drained fully into a buffer — in-memory storage
+ * cannot stream to disk, so the stream form resolves asynchronously and is the documented
+ * trade-off for this battery.
  *
  * Each `write()` and each `read()` returns a *fresh* {@link InMemorySpoolReader} — the store
  * owns the bytes, the reader is a view. Mutating the store after handing out a reader does not
  * invalidate the reader.
  *
+ * Implements {@link @nhtio/adk!SpoolStore} (i.e. `ByteStore<SpoolReader>`).
+ *
  * @example
  * ```ts
  * const store = new InMemorySpoolStore()
  * const bytes = await tool.executor(ctx)(args)
- * const reader = store.write(callId, bytes)
+ * const reader = await store.write(callId, bytes)
  * const Ctor = tool.artifactConstructor?.() ?? SpooledArtifact
  * const artifact = new Ctor(reader)
  * ```
  */
-export class InMemorySpoolStore {
-  readonly #entries = new Map<string, string>()
-  readonly #decoder = new TextDecoder()
+export class InMemorySpoolStore implements SpoolStore {
+  readonly #entries = new Map<string, Uint8Array>()
 
   /**
    * Persists `bytes` under `callId` and returns a reader over them.
    *
    * @remarks
-   * `Uint8Array` inputs are decoded as UTF-8. Re-writing the same `callId` replaces the prior
-   * entry; readers handed out before the rewrite continue to view the old bytes (they hold their
-   * own snapshot via the `InMemorySpoolReader` constructor).
+   * `string` input is encoded as UTF-8; `Uint8Array` is stored byte-faithfully;
+   * `ReadableStream<Uint8Array>` is drained fully (and `write` returns a `Promise`). Re-writing the
+   * same `callId` replaces the prior entry; readers handed out before the rewrite continue to view
+   * the old bytes (they hold their own snapshot via the `InMemorySpoolReader` constructor).
    *
    * @param callId - Identifier used to retrieve the bytes via {@link InMemorySpoolStore.read}.
-   * @param bytes - The bytes to store, as a `string` or `Uint8Array`.
-   * @returns A fresh {@link InMemorySpoolReader} bound to the stored bytes.
+   * @param bytes - The bytes to store, as a `string`, `Uint8Array`, or `ReadableStream<Uint8Array>`.
+   * @returns A fresh {@link InMemorySpoolReader} bound to the stored bytes — a `Promise` for stream
+   *   input, synchronous otherwise.
    */
-  write(callId: string, bytes: string | Uint8Array): InMemorySpoolReader {
-    const text = typeof bytes === 'string' ? bytes : this.#decoder.decode(bytes)
-    this.#entries.set(callId, text)
-    return new InMemorySpoolReader(text)
+  write(callId: string, bytes: string): InMemorySpoolReader
+  write(callId: string, bytes: Uint8Array): InMemorySpoolReader
+  write(callId: string, bytes: ReadableStream<Uint8Array>): Promise<InMemorySpoolReader>
+  write(
+    callId: string,
+    bytes: string | Uint8Array | ReadableStream<Uint8Array>
+  ): InMemorySpoolReader | Promise<InMemorySpoolReader>
+  write(
+    callId: string,
+    bytes: string | Uint8Array | ReadableStream<Uint8Array>
+  ): InMemorySpoolReader | Promise<InMemorySpoolReader> {
+    if (isInstanceOf(bytes, 'ReadableStream', ReadableStream)) {
+      return drainStream(bytes).then((buffer) => {
+        this.#entries.set(callId, buffer)
+        return new InMemorySpoolReader(buffer)
+      })
+    }
+    const buffer = typeof bytes === 'string' ? new TextEncoder().encode(bytes) : bytes
+    this.#entries.set(callId, buffer)
+    return new InMemorySpoolReader(buffer)
   }
 
   /**
@@ -113,9 +178,9 @@ export class InMemorySpoolStore {
    * @returns A fresh {@link InMemorySpoolReader} bound to the stored bytes, or `undefined`.
    */
   read(callId: string): InMemorySpoolReader | undefined {
-    const text = this.#entries.get(callId)
-    if (text === undefined) return undefined
-    return new InMemorySpoolReader(text)
+    const buffer = this.#entries.get(callId)
+    if (buffer === undefined) return undefined
+    return new InMemorySpoolReader(buffer)
   }
 
   /**

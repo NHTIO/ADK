@@ -595,10 +595,13 @@ export class WebLLMChatCompletionsAdapter {
         return
       }
 
-      // Per-dispatch spool store used to back string / Uint8Array tool returns. Bytes are
-      // written under the call id; the resulting SpooledArtifact (or tool-configured subclass)
-      // is the model-visible handle for the rest of the turn.
-      const spoolStore = new InMemorySpoolStore()
+      // Spool store used to back string / Uint8Array tool returns. Bytes are written under the
+      // call id; the resulting SpooledArtifact (or tool-configured subclass) is the model-visible
+      // handle for the rest of the turn. Injectable via the `spoolStore` option so consumers can
+      // back artifacts with durable storage (OPFS, Flydrive); defaults to an ephemeral per-dispatch
+      // in-memory store. NOTE: an injected durable store persists across turns, so call ids must be
+      // globally unique for that store (see the `spoolStore` option docs).
+      const spoolStore = merged.spoolStore ?? new InMemorySpoolStore()
 
       // ── Inner helper: persist + execute one assembled tool call ───────────
       const executeAndPersistToolCall = async (call: AssembledToolCall): Promise<void> => {
@@ -713,12 +716,12 @@ export class WebLLMChatCompletionsAdapter {
           } else if (Array.isArray(raw) && raw.length > 0 && raw.every((m) => Media.isMedia(m))) {
             results = raw as Media[]
           } else if (typeof raw === 'string' || isInstanceOf(raw, 'Uint8Array', Uint8Array)) {
-            const reader = spoolStore.write(call.id, raw as string | Uint8Array)
+            const reader = await spoolStore.write(call.id, raw as string | Uint8Array)
             const ArtifactCtor = (tool as Tool).artifactConstructor?.() ?? SpooledArtifact
             results = new ArtifactCtor(reader)
           } else {
             // Defensive fallback — wrap stringified value so the model gets *something*.
-            const reader = spoolStore.write(call.id, String(raw))
+            const reader = await spoolStore.write(call.id, String(raw))
             const ArtifactCtor = (tool as Tool).artifactConstructor?.() ?? SpooledArtifact
             results = new ArtifactCtor(reader)
           }

@@ -34,7 +34,8 @@
 
 import { Disk } from 'flydrive'
 import { Readable } from 'node:stream'
-import type { SpoolReader } from '@nhtio/adk/common'
+import { isInstanceOf } from '@nhtio/adk/guards'
+import type { SpoolReader, SpoolStore } from '@nhtio/adk/common'
 
 const DEFAULT_STREAM_THRESHOLD_BYTES = 10 * 1024 * 1024 // 10 MiB
 
@@ -310,7 +311,7 @@ export interface FlydriveSpoolStoreOptions {
  * const artifact = new Ctor(reader)
  * ```
  */
-export class FlydriveSpoolStore {
+export class FlydriveSpoolStore implements SpoolStore {
   readonly #disk: Disk
   readonly #prefix: string
   readonly #defaultThreshold: number
@@ -324,18 +325,31 @@ export class FlydriveSpoolStore {
   /**
    * Persists `bytes` under `callId` and returns a reader bound to the stored key.
    *
+   * @remarks
+   * `string`/`Uint8Array` input goes through `disk.put`; `ReadableStream<Uint8Array>` is forwarded
+   * to `disk.putStream` (via `Readable.fromWeb`) so the payload streams straight to the backing
+   * driver — to disk for `FSDriver`, to the object store for S3/GCS — without being materialized
+   * in memory first.
+   *
    * @param callId - Identifier used to retrieve the bytes via {@link FlydriveSpoolStore.read}.
-   * @param bytes - The bytes to store, as a `string` or `Uint8Array`.
+   * @param bytes - The bytes to store, as a `string`, `Uint8Array`, or `ReadableStream<Uint8Array>`.
    * @param opts - Per-call override for `streamThresholdBytes`.
    * @returns A {@link FlydriveSpoolReader} over the stored bytes.
    */
   async write(
     callId: string,
-    bytes: string | Uint8Array,
+    bytes: string | Uint8Array | ReadableStream<Uint8Array>,
     opts?: FlydriveSpoolReaderOptions
   ): Promise<FlydriveSpoolReader> {
     const key = this.#prefix + callId
-    await this.#disk.put(key, bytes)
+    if (isInstanceOf(bytes, 'ReadableStream', ReadableStream)) {
+      await this.#disk.putStream(
+        key,
+        Readable.fromWeb(bytes as Parameters<typeof Readable.fromWeb>[0])
+      )
+    } else {
+      await this.#disk.put(key, bytes)
+    }
     return new FlydriveSpoolReader(this.#disk, key, {
       streamThresholdBytes: opts?.streamThresholdBytes ?? this.#defaultThreshold,
     })

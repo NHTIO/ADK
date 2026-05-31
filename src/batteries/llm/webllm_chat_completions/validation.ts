@@ -5,6 +5,7 @@
  */
 
 import { isError } from '@nhtio/adk/guards'
+import { byteStoreSchema } from '@nhtio/adk/common'
 import { validator, ValidationError } from '@nhtio/validation'
 import { E_INVALID_WEBLLM_CHAT_COMPLETIONS_OPTIONS } from './exceptions'
 import type { WebLLMChatCompletionsAdapterOptions } from './types'
@@ -140,6 +141,7 @@ export const webLLMChatCompletionsOptionsSchema = validator
     tokenEncoding: tokenEncodingSchema,
     replayCompatibility: validator.array().items(validator.string().min(1)).default([]),
     helpers: helpersSchema.optional(),
+    spoolStore: byteStoreSchema.optional(),
     strictToolChoice: validator.boolean().default(false),
     // Opt-in: executor self-acks tool-call-free responses only when true.
     // Default false hands turn completion to the implementor (see

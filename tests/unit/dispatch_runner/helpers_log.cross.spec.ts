@@ -34,6 +34,12 @@ const makeRaw = (): Omit<RawDispatchContext, 'hooks'> => ({
   storeToolCall: async () => {},
   mutateToolCall: async () => {},
   deleteToolCall: async () => {},
+  storeMediaBytes: () => {
+    throw new Error('storeMediaBytes not used in this test')
+  },
+  storeRetrievableBytes: () => {
+    throw new Error('storeRetrievableBytes not used in this test')
+  },
 })
 
 describe('DispatchExecutorHelpers.log — structured observability channel', () => {

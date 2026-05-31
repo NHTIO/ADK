@@ -297,6 +297,8 @@ export class DispatchRunner {
         storeToolCall: (_c, v) => source.storeToolCall(v),
         mutateToolCall: (_c, v) => source.mutateToolCall(v),
         deleteToolCall: (_c, id) => source.deleteToolCall(id),
+        storeMediaBytes: (_c, id, bytes) => source.storeMediaBytes(id, bytes),
+        storeRetrievableBytes: (_c, id, bytes) => source.storeRetrievableBytes(id, bytes),
         waitFor: source.waitFor,
       }
       return new DispatchContext(builtRaw)

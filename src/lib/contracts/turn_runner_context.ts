@@ -9,7 +9,10 @@ import type { Tool } from '../classes/tool'
 import type { Memory } from '../classes/memory'
 import type { Message } from '../classes/message'
 import type { Thought } from '../classes/thought'
+import type { SpoolReader } from './spool_reader'
+import type { MediaReader } from './media_reader'
 import type { ToolCall } from '../classes/tool_call'
+import type { ConduitBytes } from './dispatch_context'
 import type { Retrievable } from '../classes/retrievable'
 import type { ToolRegistry } from '../classes/tool_registry'
 import type {
@@ -214,6 +217,26 @@ export type ToolCallMutateFn = (ctx: TurnContext, v: ToolCall) => void | Promise
 export type ToolCallDeleteFn = (ctx: TurnContext, id: string) => void | Promise<void>
 
 /**
+ * Persists tool-generated media bytes into consumer storage and returns a {@link @nhtio/adk!MediaReader}.
+ * A byte-persistence conduit, not a mutation — returns a value and touches no turn state.
+ */
+export type MediaBytesStoreFn = (
+  ctx: TurnContext,
+  id: string,
+  bytes: ConduitBytes
+) => MediaReader | Promise<MediaReader>
+
+/**
+ * Persists extracted retrievable text bytes into consumer storage and returns a
+ * {@link @nhtio/adk!SpoolReader}. A byte-persistence conduit, not a mutation.
+ */
+export type RetrievableBytesStoreFn = (
+  ctx: TurnContext,
+  id: string,
+  bytes: ConduitBytes
+) => SpoolReader | Promise<SpoolReader>
+
+/**
  * Callbacks injected into a {@link TurnContext} by `TurnRunner` at run time.
  *
  * @remarks
@@ -275,6 +298,10 @@ interface TurnRunnerInjected {
   mutateToolCall: ToolCallMutateFn
   /** Removes a tool call from the persistence layer by ID. */
   deleteToolCall: ToolCallDeleteFn
+  /** Persists tool-generated media bytes; returns a `MediaReader`. */
+  storeMediaBytes: MediaBytesStoreFn
+  /** Persists extracted retrievable text bytes; returns a `SpoolReader`. */
+  storeRetrievableBytes: RetrievableBytesStoreFn
   /** Emits a `message` event on the runner. */
   emitMessage: EmitMessageFn
   /** Emits a `thought` event on the runner. */
@@ -574,6 +601,18 @@ export class TurnContext {
         configurable: false,
         writable: false,
       },
+      storeMediaBytes: {
+        value: (id: string, bytes: ConduitBytes) => injected.storeMediaBytes(this, id, bytes),
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
+      storeRetrievableBytes: {
+        value: (id: string, bytes: ConduitBytes) => injected.storeRetrievableBytes(this, id, bytes),
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
       emitMessage: {
         value: injected.emitMessage,
         enumerable: true,
@@ -699,6 +738,24 @@ export class TurnContext {
   declare readonly mutateToolCall: (v: ToolCall) => void | Promise<void>
   /** Removes a tool call from the persistence layer by ID. */
   declare readonly deleteToolCall: (id: string) => void | Promise<void>
+  /**
+   * Persists tool-generated media bytes into consumer storage and returns a {@link @nhtio/adk!MediaReader}.
+   * Low-level conduit — returns a value, touches no turn state; build a {@link @nhtio/adk!Media} from the
+   * reader and persist the owning primitive separately.
+   */
+  declare readonly storeMediaBytes: (
+    id: string,
+    bytes: ConduitBytes
+  ) => MediaReader | Promise<MediaReader>
+  /**
+   * Persists extracted retrievable text bytes into consumer storage and returns a
+   * {@link @nhtio/adk!SpoolReader}. Wrap it in a {@link @nhtio/adk!SpooledArtifact} for `Retrievable.content`
+   * and persist the record via {@link TurnContext.storeRetrievable} separately.
+   */
+  declare readonly storeRetrievableBytes: (
+    id: string,
+    bytes: ConduitBytes
+  ) => SpoolReader | Promise<SpoolReader>
   /** Emits a `message` event on the runner; may be called at any point during the turn. */
   declare readonly emitMessage: EmitMessageFn
   /** Emits a `thought` event on the runner; may be called at any point during the turn. */

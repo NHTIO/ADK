@@ -1,9 +1,11 @@
 import { Tokenizable } from './tokenizable'
 import { validator } from '@nhtio/validation'
+import { SpooledArtifact } from './spooled_artifact'
 import { validateOrThrow } from '../utils/validation'
 import { isInstanceOf, isError } from '../utils/guards'
 import { E_INVALID_INITIAL_RETRIEVABLE_VALUE } from '../exceptions/runtime'
 import type { DateTime } from 'luxon'
+import type { TokenEncoding } from './tokenizable'
 
 /**
  * Trust-tier discriminator declared by the retrieval middleware at construction time. Drives
@@ -39,8 +41,15 @@ export interface RawRetrievable {
    * rendered envelope, so it must be unguessable from the payload.
    */
   id: string
-  /** The retrieved content as a plain string or an existing {@link @nhtio/adk!Tokenizable} instance. */
-  content: string | Tokenizable
+  /**
+   * The retrieved content. A plain `string` or {@link @nhtio/adk!Tokenizable} for small inline text, or a
+   * {@link @nhtio/adk!SpooledArtifact} when the extracted text is large and lives in a consumer
+   * {@link @nhtio/adk!ByteStore} (persist it via {@link @nhtio/adk!DispatchContext.storeRetrievableBytes}, wrap
+   * the returned reader in a `SpooledArtifact`, and pass it here). Reader-backed content keeps the
+   * body out of the permanent heap, but token estimation and render still materialise it
+   * transiently (see {@link Retrievable.estimateTokens}).
+   */
+  content: string | Tokenizable | SpooledArtifact
   /**
    * Trust tier declared by the retrieval middleware at construction time. Required — there is
    * NO default. The decision must be conscious. See {@link RetrievableTrustTier}.
@@ -64,7 +73,7 @@ export interface RawRetrievable {
  */
 interface ResolvedRetrievable {
   id: string
-  content: Tokenizable
+  content: Tokenizable | SpooledArtifact
   trustTier: RetrievableTrustTier
   source?: string
   kind?: string
@@ -89,9 +98,19 @@ interface ResolvedRetrievable {
  * Throws {@link @nhtio/adk/exceptions!E_INVALID_INITIAL_RETRIEVABLE_VALUE} (via the {@link Retrievable} constructor)
  * when validation fails.
  */
+const contentSchema = validator.alternatives(
+  validator.string(),
+  validator.custom((value, helpers) => {
+    if (Tokenizable.isTokenizable(value) || SpooledArtifact.isSpooledArtifact(value)) {
+      return value
+    }
+    return helpers.error('any.invalid')
+  })
+)
+
 const rawRetrievableSchema = validator.object<RawRetrievable>({
   id: validator.string().required(),
-  content: Tokenizable.schema.required(),
+  content: contentSchema.required(),
   trustTier: validator
     .string()
     .valid('first-party', 'third-party-public', 'third-party-private')
@@ -133,8 +152,13 @@ export class Retrievable {
 
   /** Stable unique identifier for this retrieved record. */
   declare readonly id: string
-  /** The retrieved content as a {@link @nhtio/adk!Tokenizable} for inline token estimation. */
-  declare readonly content: Tokenizable
+  /**
+   * The retrieved content: a {@link @nhtio/adk!Tokenizable} (inline text) or a
+   * {@link @nhtio/adk!SpooledArtifact} (reader-backed, large text living in a consumer store). Use
+   * {@link Retrievable.estimateTokens} for budgeting and {@link Retrievable.contentString} to
+   * materialise the body at render time.
+   */
+  declare readonly content: Tokenizable | SpooledArtifact
   /** Trust tier declared by the retrieval middleware. */
   declare readonly trustTier: RetrievableTrustTier
   /** Optional provenance string. */
@@ -149,7 +173,7 @@ export class Retrievable {
   declare readonly updatedAt: DateTime
 
   #id: string
-  #content: Tokenizable
+  #content: Tokenizable | SpooledArtifact
   #trustTier: RetrievableTrustTier
   #source: string | undefined
   #kind: string | undefined
@@ -169,9 +193,11 @@ export class Retrievable {
       throw new E_INVALID_INITIAL_RETRIEVABLE_VALUE({ cause: isError(err) ? err : undefined })
     }
     this.#id = resolved.id
-    this.#content = Tokenizable.isTokenizable(resolved.content)
-      ? resolved.content
-      : new Tokenizable(resolved.content)
+    this.#content =
+      Tokenizable.isTokenizable(resolved.content) ||
+      SpooledArtifact.isSpooledArtifact(resolved.content)
+        ? resolved.content
+        : new Tokenizable(resolved.content)
     this.#trustTier = resolved.trustTier
     this.#source = resolved.source
     this.#kind = resolved.kind
@@ -221,5 +247,42 @@ export class Retrievable {
         configurable: false,
       },
     })
+  }
+
+  /**
+   * Estimates the token count of the content under `encoding`.
+   *
+   * @remarks
+   * Delegates to the content's own `estimateTokens`: synchronous for a {@link @nhtio/adk!Tokenizable}
+   * (returns `number`), asynchronous for a {@link @nhtio/adk!SpooledArtifact} (returns
+   * `Promise<number>`, reading the bytes from the backing store on demand). Both shapes satisfy the
+   * adapter's token-budget path, which already awaits estimates.
+   *
+   * Note: the `SpooledArtifact` branch materialises the full decoded string transiently to count
+   * tokens — reader-backing keeps the body off the *permanent* heap, but does not eliminate the
+   * transient allocation at budgeting time.
+   *
+   * @param encoding - The encoding identifier to use for counting.
+   * @returns The estimated token count.
+   */
+  estimateTokens(encoding: TokenEncoding): number | Promise<number> {
+    return this.#content.estimateTokens(encoding)
+  }
+
+  /**
+   * Returns the content body as a single string.
+   *
+   * @remarks
+   * For a {@link @nhtio/adk!Tokenizable} this is synchronous in effect (resolved immediately); for a
+   * {@link @nhtio/adk!SpooledArtifact} it reads the full body from the backing store via
+   * {@link @nhtio/adk!SpooledArtifact.asString}. Always returns a `Promise` so callers have one
+   * code path; render helpers `await` it at the point the trust-tier envelope is built.
+   *
+   * @returns The full content body as a string.
+   */
+  async contentString(): Promise<string> {
+    return SpooledArtifact.isSpooledArtifact(this.#content)
+      ? this.#content.asString()
+      : this.#content.toString()
   }
 }

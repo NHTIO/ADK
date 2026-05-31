@@ -91,6 +91,8 @@ export type {
   RetrievableStoreFn,
   RetrievableMutateFn,
   RetrievableDeleteFn,
+  MediaBytesStoreFn,
+  RetrievableBytesStoreFn,
 } from './lib/contracts/turn_runner_context'
 
 // ── TurnRunner config + event types ───────────────────────────────────────────
@@ -148,6 +150,9 @@ export type {
   DispatchToolCallStoreFn,
   DispatchToolCallMutateFn,
   DispatchToolCallDeleteFn,
+  DispatchMediaBytesStoreFn,
+  DispatchRetrievableBytesStoreFn,
+  ConduitBytes,
 } from './lib/contracts/dispatch_context'
 
 /**

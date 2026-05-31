@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { Memory } from '../../../src/lib/classes/memory'
 import { Retrievable } from '../../../src/lib/classes/retrievable'
 import { Tokenizable } from '../../../src/lib/classes/tokenizable'
+import { SpooledArtifact } from '../../../src/lib/classes/spooled_artifact'
+import { InMemorySpoolStore } from '../../../src/batteries/storage/in_memory'
 import { E_INVALID_INITIAL_RETRIEVABLE_VALUE } from '../../../src/lib/exceptions/runtime'
 
 const validRaw = () => ({
@@ -233,6 +235,41 @@ describe('Retrievable', () => {
     it('is exposed as a static for reuse in other schemas', () => {
       expect(Retrievable.schema).toBeDefined()
       expect(typeof Retrievable.schema.validate).toBe('function')
+    })
+  })
+
+  describe('reader-backed content (SpooledArtifact)', () => {
+    const makeArtifact = (body: string): SpooledArtifact =>
+      new SpooledArtifact(new InMemorySpoolStore().write('art-1', body))
+
+    it('accepts a SpooledArtifact as content and passes it through unwrapped', () => {
+      const artifact = makeArtifact('extracted RAG body')
+      const r = new Retrievable({ ...validRaw(), content: artifact })
+      expect(r.content).toBe(artifact)
+      expect(SpooledArtifact.isSpooledArtifact(r.content)).toBe(true)
+    })
+
+    it('contentString() materialises the artifact body on demand', async () => {
+      const r = new Retrievable({ ...validRaw(), content: makeArtifact('line one\nline two') })
+      expect(await r.contentString()).toBe('line one\nline two')
+    })
+
+    it('estimateTokens() delegates to the artifact (async, per-encoding)', async () => {
+      const r = new Retrievable({ ...validRaw(), content: makeArtifact('some retrieved text') })
+      const tokens = await r.estimateTokens('cl100k_base')
+      expect(typeof tokens).toBe('number')
+      expect(tokens).toBeGreaterThan(0)
+    })
+
+    it('estimateTokens() on inline Tokenizable content stays synchronous', () => {
+      const r = new Retrievable({ ...validRaw(), content: 'inline body' })
+      const tokens = r.estimateTokens('cl100k_base')
+      expect(typeof tokens).toBe('number')
+    })
+
+    it('contentString() on inline content returns the string', async () => {
+      const r = new Retrievable({ ...validRaw(), content: new Tokenizable('inline body') })
+      expect(await r.contentString()).toBe('inline body')
     })
   })
 })

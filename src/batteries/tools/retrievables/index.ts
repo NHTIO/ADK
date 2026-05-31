@@ -40,9 +40,9 @@ import { Retrievable, SpooledJsonArtifact, Tool } from '@nhtio/adk/common'
 const TRUST_TIERS = ['first-party', 'third-party-public', 'third-party-private'] as const
 type TrustTier = (typeof TRUST_TIERS)[number]
 
-const serialiseRetrievable = (r: Retrievable): Record<string, unknown> => ({
+const serialiseRetrievable = async (r: Retrievable): Promise<Record<string, unknown>> => ({
   id: r.id,
-  content: r.content.toString(),
+  content: await r.contentString(),
   trustTier: r.trustTier,
   source: r.source,
   kind: r.kind,
@@ -67,7 +67,8 @@ export const listRetrievablesTool = new Tool({
   handler: async (_args, ctx) => {
     try {
       const retrievables = await ctx.fetchRetrievables()
-      return JSON.stringify(retrievables.map(serialiseRetrievable), null, 2)
+      const serialised = await Promise.all(retrievables.map(serialiseRetrievable))
+      return JSON.stringify(serialised, null, 2)
     } catch (err) {
       return `Error: ${isError(err) ? err.message : String(err)}`
     }
@@ -142,7 +143,11 @@ export const storeRetrievableTool = new Tool({
         updatedAt: now,
       })
       await ctx.storeRetrievable(retrievable)
-      return JSON.stringify({ ok: true, retrievable: serialiseRetrievable(retrievable) }, null, 2)
+      return JSON.stringify(
+        { ok: true, retrievable: await serialiseRetrievable(retrievable) },
+        null,
+        2
+      )
     } catch (err) {
       return `Error: ${isError(err) ? err.message : String(err)}`
     }
@@ -201,7 +206,7 @@ export const updateRetrievableTool = new Tool({
         updatedAt: DateTime.now(),
       })
       await ctx.mutateRetrievable(updated)
-      return JSON.stringify({ ok: true, retrievable: serialiseRetrievable(updated) }, null, 2)
+      return JSON.stringify({ ok: true, retrievable: await serialiseRetrievable(updated) }, null, 2)
     } catch (err) {
       return `Error: ${isError(err) ? err.message : String(err)}`
     }

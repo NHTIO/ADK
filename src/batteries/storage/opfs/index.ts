@@ -47,7 +47,7 @@
  */
 
 import { isInstanceOf } from '@nhtio/adk/guards'
-import type { SpoolReader } from '@nhtio/adk/common'
+import type { SpoolReader, SpoolStore } from '@nhtio/adk/common'
 
 // The project's tsconfig limits `lib` to `ESNext`, so the DOM and File System Access types
 // referenced below are not in scope by default — neither `tsc --noEmit` nor the downstream dts
@@ -428,7 +428,7 @@ export interface OpfsSpoolStoreOptions {
  * const artifact = new Ctor(reader)
  * ```
  */
-export class OpfsSpoolStore {
+export class OpfsSpoolStore implements SpoolStore {
   readonly #resolveRoot: () => Promise<OpfsDirectoryHandle>
   readonly #prefix: string
   readonly #defaultThreshold: number
@@ -456,24 +456,38 @@ export class OpfsSpoolStore {
   /**
    * Persists `bytes` under `callId` and returns a reader bound to the stored key.
    *
+   * @remarks
+   * `string` input is encoded as UTF-8; `Uint8Array` is stored byte-faithfully;
+   * `ReadableStream<Uint8Array>` is written incrementally — the stream is consumed chunk-by-chunk
+   * straight to OPFS without first materializing the whole payload in memory, which is the point
+   * of accepting a stream for a durable store.
+   *
    * @param callId - Identifier used to retrieve the bytes via {@link OpfsSpoolStore.read}.
-   * @param bytes - The bytes to store, as a `string` or `Uint8Array`.
+   * @param bytes - The bytes to store, as a `string`, `Uint8Array`, or `ReadableStream<Uint8Array>`.
    * @param opts - Per-call override for `streamThresholdBytes`.
    * @returns An {@link OpfsSpoolReader} over the stored bytes.
    */
   async write(
     callId: string,
-    bytes: string | Uint8Array,
+    bytes: string | Uint8Array | ReadableStream<Uint8Array>,
     opts?: OpfsSpoolReaderOptions
   ): Promise<OpfsSpoolReader> {
     const name = this.#keyFor(callId)
     const root = await this.#getRoot()
     const handle = await root.getFileHandle(name, { create: true })
-    const payload = typeof bytes === 'string' ? new TextEncoder().encode(bytes) : bytes
-    if (isWorkerScope()) {
-      await this.#writeViaSyncHandle(handle, payload)
+    if (isInstanceOf(bytes, 'ReadableStream', ReadableStream)) {
+      if (isWorkerScope()) {
+        await this.#writeStreamViaSyncHandle(handle, bytes)
+      } else {
+        await this.#writeStreamViaWritable(handle, bytes)
+      }
     } else {
-      await this.#writeViaWritable(handle, payload)
+      const payload = typeof bytes === 'string' ? new TextEncoder().encode(bytes) : bytes
+      if (isWorkerScope()) {
+        await this.#writeViaSyncHandle(handle, payload)
+      } else {
+        await this.#writeViaWritable(handle, payload)
+      }
     }
     return new OpfsSpoolReader(handle, {
       streamThresholdBytes: opts?.streamThresholdBytes ?? this.#defaultThreshold,
@@ -578,6 +592,54 @@ export class OpfsSpoolStore {
       await writable.write(payload)
     } finally {
       await writable.close()
+    }
+  }
+
+  async #writeStreamViaWritable(
+    handle: OpfsFileHandle,
+    stream: ReadableStream<Uint8Array>
+  ): Promise<void> {
+    const writable = await handle.createWritable()
+    try {
+      const reader = stream.getReader()
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (value) await writable.write(value)
+        }
+      } finally {
+        reader.releaseLock()
+      }
+    } finally {
+      await writable.close()
+    }
+  }
+
+  async #writeStreamViaSyncHandle(
+    handle: OpfsFileHandle,
+    stream: ReadableStream<Uint8Array>
+  ): Promise<void> {
+    const sync = await (handle as OpfsFileHandleWithSyncAccess).createSyncAccessHandle()
+    try {
+      sync.truncate(0)
+      let at = 0
+      const reader = stream.getReader()
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (value && value.byteLength > 0) {
+            sync.write(value, { at })
+            at += value.byteLength
+          }
+        }
+      } finally {
+        reader.releaseLock()
+      }
+      sync.flush()
+    } finally {
+      sync.close()
     }
   }
 

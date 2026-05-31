@@ -102,6 +102,15 @@ export type { SpoolReader } from './lib/contracts/spool_reader'
 /**
  * @primaryExport
  */
+export { implementsByteStore, byteStoreSchema } from './lib/contracts/byte_store'
+/**
+ * @primaryExport
+ */
+export type { ByteStore, SpoolStore, MediaStore } from './lib/contracts/byte_store'
+
+/**
+ * @primaryExport
+ */
 export { Media, isMedia } from './lib/classes/media'
 /**
  * @primaryExport

@@ -1,5 +1,29 @@
+import { isInstanceOf } from '../../src/lib/utils/guards'
+import { inMemoryMediaReader } from '../../src/lib/helpers/media_readers'
 import { DispatchContext } from '../../src/lib/contracts/dispatch_context'
-import type { RawDispatchContext } from '../../src/lib/contracts/dispatch_context'
+import { InMemorySpoolStore } from '../../src/batteries/storage/in_memory'
+import type { ConduitBytes, RawDispatchContext } from '../../src/lib/contracts/dispatch_context'
+
+/** Drains a `ConduitBytes` value to a `Uint8Array` for the stub media conduit. */
+const toBytes = async (bytes: ConduitBytes): Promise<Uint8Array> => {
+  if (typeof bytes === 'string') return new TextEncoder().encode(bytes)
+  if (!isInstanceOf(bytes, 'ReadableStream', ReadableStream)) return bytes
+  const chunks: Uint8Array[] = []
+  const reader = bytes.getReader()
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (value) chunks.push(value)
+  }
+  const total = chunks.reduce((n, c) => n + c.byteLength, 0)
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const c of chunks) {
+    out.set(c, offset)
+    offset += c.byteLength
+  }
+  return out
+}
 
 /**
  * Overrides accepted by {@link makeDispatchContext}. Anything you pass replaces the
@@ -52,6 +76,8 @@ export const makeDispatchContext = (overrides: DispatchContextOverrides = {}): D
     storeToolCall: async () => {},
     mutateToolCall: async () => {},
     deleteToolCall: async () => {},
+    storeMediaBytes: async (_ctx, _id, bytes) => inMemoryMediaReader(await toBytes(bytes)),
+    storeRetrievableBytes: (_ctx, id, bytes) => new InMemorySpoolStore().write(id, bytes),
     ...overrides,
   }
   return new DispatchContext(raw)

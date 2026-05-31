@@ -25,3 +25,4 @@ docs/.vitepress/sidebar.json
 docs/.vitepress/config.mts.timestamp-*
 .pnpm/
 .pnpm-store/
+.claude/

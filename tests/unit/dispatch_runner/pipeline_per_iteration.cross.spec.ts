@@ -33,6 +33,12 @@ const makeRaw = (): Omit<RawDispatchContext, 'hooks'> => ({
   storeToolCall: async () => {},
   mutateToolCall: async () => {},
   deleteToolCall: async () => {},
+  storeMediaBytes: () => {
+    throw new Error('storeMediaBytes not used in this test')
+  },
+  storeRetrievableBytes: () => {
+    throw new Error('storeRetrievableBytes not used in this test')
+  },
 })
 
 // Regression: the dispatch loop runs the input/output pipelines once PER

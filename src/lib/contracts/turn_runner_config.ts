@@ -28,6 +28,8 @@ import type {
   ToolCallStoreFn,
   ToolCallMutateFn,
   ToolCallDeleteFn,
+  MediaBytesStoreFn,
+  RetrievableBytesStoreFn,
 } from './turn_runner_context'
 
 /**
@@ -97,6 +99,10 @@ export interface TurnRunnerConfig {
   mutateToolCallCallback: ToolCallMutateFn
   /** Removes a tool call from the persistence layer by ID. */
   deleteToolCallCallback: ToolCallDeleteFn
+  /** Persists tool-generated media bytes into consumer storage; returns a `MediaReader`. */
+  storeMediaBytesCallback: MediaBytesStoreFn
+  /** Persists extracted retrievable text bytes into consumer storage; returns a `SpoolReader`. */
+  storeRetrievableBytesCallback: RetrievableBytesStoreFn
   /** Baseline tools available on every turn. Middleware may trim or extend this per-turn via `ctx.tools`. Defaults to `[]`. */
   tools?: Tool[]
   /** Turn-level input middleware, executed in order against the {@link @nhtio/adk!TurnContext} before the LLM dispatch. Defaults to `[]`. */
@@ -155,6 +161,8 @@ export const turnRunnerConfigSchema = validator.object<TurnRunnerConfig>({
   storeToolCallCallback: validator.function().arity(2).required(),
   mutateToolCallCallback: validator.function().arity(2).required(),
   deleteToolCallCallback: validator.function().arity(2).required(),
+  storeMediaBytesCallback: validator.function().arity(3).required(),
+  storeRetrievableBytesCallback: validator.function().arity(3).required(),
   tools: validator
     .array()
     .items(

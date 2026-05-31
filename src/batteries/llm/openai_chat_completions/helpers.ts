@@ -242,12 +242,12 @@ export const defaultRenderRetrievableSafetyDirective = renderRetrievableSafetyDi
 
 // ─── renderFirstPartyRetrievables ─────────────────────────────────────────────
 
-export const renderFirstPartyRetrievables = (
+export const renderFirstPartyRetrievables = async (
   items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>
-): string => {
+): Promise<string> => {
   const children: string[] = []
   for (const { retrievable, attrs } of items) {
-    const body = retrievable.content.toString()
+    const body = await retrievable.contentString()
     if (body.length === 0 && !attrs.nonce) {
       continue
     }
@@ -271,13 +271,13 @@ export const defaultRenderFirstPartyRetrievables = renderFirstPartyRetrievables
 
 // ─── renderThirdPartyPublicRetrievables ───────────────────────────────────────
 
-export const renderThirdPartyPublicRetrievables = (
+export const renderThirdPartyPublicRetrievables = async (
   items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
   deps: { renderUntrustedContent: ChatCompletionsHelpers['renderUntrustedContent'] }
-): string => {
+): Promise<string> => {
   const blocks: string[] = []
   for (const { retrievable, attrs } of items) {
-    const body = retrievable.content.toString()
+    const body = await retrievable.contentString()
     blocks.push(
       deps.renderUntrustedContent(body, {
         nonce: attrs.nonce,
@@ -292,13 +292,13 @@ export const defaultRenderThirdPartyPublicRetrievables = renderThirdPartyPublicR
 
 // ─── renderThirdPartyPrivateRetrievables ──────────────────────────────────────
 
-export const renderThirdPartyPrivateRetrievables = (
+export const renderThirdPartyPrivateRetrievables = async (
   items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
   deps: { renderUntrustedContent: ChatCompletionsHelpers['renderUntrustedContent'] }
-): string => {
+): Promise<string> => {
   const blocks: string[] = []
   for (const { retrievable, attrs } of items) {
-    const body = retrievable.content.toString()
+    const body = await retrievable.contentString()
     blocks.push(
       deps.renderUntrustedContent(body, {
         nonce: attrs.nonce,
@@ -326,7 +326,7 @@ const retrievableToAttrs = (
   },
 })
 
-export const renderRetrievables = (
+export const renderRetrievables = async (
   items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
   deps: {
     renderRetrievableSafetyDirective: ChatCompletionsHelpers['renderRetrievableSafetyDirective']
@@ -335,7 +335,7 @@ export const renderRetrievables = (
     renderThirdPartyPrivateRetrievables: ChatCompletionsHelpers['renderThirdPartyPrivateRetrievables']
     renderUntrustedContent: ChatCompletionsHelpers['renderUntrustedContent']
   }
-): string => {
+): Promise<string> => {
   const firstParty: { retrievable: Retrievable; attrs: RetrievableAttrs }[] = []
   const thirdPartyPublic: { retrievable: Retrievable; attrs: RetrievableAttrs }[] = []
   const thirdPartyPrivate: { retrievable: Retrievable; attrs: RetrievableAttrs }[] = []
@@ -358,13 +358,13 @@ export const renderRetrievables = (
   const parts: string[] = []
   const directive = deps.renderRetrievableSafetyDirective()
   if (directive.length > 0) parts.push(directive)
-  const fp = deps.renderFirstPartyRetrievables(firstParty)
+  const fp = await deps.renderFirstPartyRetrievables(firstParty)
   if (fp.length > 0) parts.push(fp)
-  const tpub = deps.renderThirdPartyPublicRetrievables(thirdPartyPublic, {
+  const tpub = await deps.renderThirdPartyPublicRetrievables(thirdPartyPublic, {
     renderUntrustedContent: deps.renderUntrustedContent,
   })
   if (tpub.length > 0) parts.push(tpub)
-  const tpriv = deps.renderThirdPartyPrivateRetrievables(thirdPartyPrivate, {
+  const tpriv = await deps.renderThirdPartyPrivateRetrievables(thirdPartyPrivate, {
     renderUntrustedContent: deps.renderUntrustedContent,
   })
   if (tpriv.length > 0) parts.push(tpriv)
@@ -776,7 +776,7 @@ const memoryToAttrs = (m: Memory): { memory: Memory; attrs: MemoryAttrs } => ({
   },
 })
 
-export const renderChatCompletionsSystemPrompt = (input: {
+export const renderChatCompletionsSystemPrompt = async (input: {
   systemPrompt: Tokenizable
   standingInstructions: Iterable<Tokenizable>
   memories: Iterable<Memory>
@@ -790,7 +790,7 @@ export const renderChatCompletionsSystemPrompt = (input: {
   renderThirdPartyPublicRetrievables: ChatCompletionsHelpers['renderThirdPartyPublicRetrievables']
   renderThirdPartyPrivateRetrievables: ChatCompletionsHelpers['renderThirdPartyPrivateRetrievables']
   renderUntrustedContent: ChatCompletionsHelpers['renderUntrustedContent']
-}): string => {
+}): Promise<string> => {
   const parts: string[] = []
   const base = input.systemPrompt.toString()
   if (base.length > 0) {
@@ -820,7 +820,7 @@ export const renderChatCompletionsSystemPrompt = (input: {
       for (const r of input.retrievables) {
         wrapped.push(retrievableToAttrs(r))
       }
-      const block = input.renderRetrievables(wrapped, {
+      const block = await input.renderRetrievables(wrapped, {
         renderRetrievableSafetyDirective: input.renderRetrievableSafetyDirective,
         renderFirstPartyRetrievables: input.renderFirstPartyRetrievables,
         renderThirdPartyPublicRetrievables: input.renderThirdPartyPublicRetrievables,
@@ -1089,7 +1089,7 @@ export const buildChatCompletionsHistory = async (input: {
   const timelineIdx = buckets.indexOf('timeline')
 
   // Build leading system content from base prompt + before-timeline buckets.
-  const leadingSystem = input.renderChatCompletionsSystemPrompt({
+  const leadingSystem = await input.renderChatCompletionsSystemPrompt({
     systemPrompt: input.systemPrompt,
     standingInstructions: input.standingInstructions,
     memories: input.memories,
@@ -1262,7 +1262,7 @@ export const buildChatCompletionsHistory = async (input: {
         for (const r of input.retrievables) {
           wrapped.push(retrievableToAttrs(r))
         }
-        const block = input.renderRetrievables(wrapped, {
+        const block = await input.renderRetrievables(wrapped, {
           renderRetrievableSafetyDirective: input.renderRetrievableSafetyDirective,
           renderFirstPartyRetrievables: input.renderFirstPartyRetrievables,
           renderThirdPartyPublicRetrievables: input.renderThirdPartyPublicRetrievables,

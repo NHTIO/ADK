@@ -15,6 +15,8 @@ import type { Tool } from '../classes/tool'
 import type { Memory } from '../classes/memory'
 import type { Message } from '../classes/message'
 import type { Thought } from '../classes/thought'
+import type { SpoolReader } from './spool_reader'
+import type { MediaReader } from './media_reader'
 import type { ToolCall } from '../classes/tool_call'
 import type { Retrievable } from '../classes/retrievable'
 import type {
@@ -29,6 +31,9 @@ import type {
   EmitToolExecutionEndFn,
   OpenGateFn,
 } from '../types/turn_runner'
+
+/** Payload accepted by the byte-persistence conduits — text, raw bytes, or a stream. */
+export type ConduitBytes = string | Uint8Array | ReadableStream<Uint8Array>
 
 // ── LLM-scoped callback fn types ─────────────────────────────────────────────
 
@@ -126,6 +131,30 @@ export type DispatchToolCallMutateFn = (ctx: DispatchContext, v: ToolCall) => vo
 /** Removes a tool call by ID (LLM execution context variant). */
 export type DispatchToolCallDeleteFn = (ctx: DispatchContext, id: string) => void | Promise<void>
 
+/**
+ * Persists tool-generated media bytes into consumer storage and returns a {@link @nhtio/adk!MediaReader}
+ * (LLM execution context variant). Unlike the `store*` mutation callbacks this returns a value and
+ * does NOT add anything to the turn Sets — the handler builds a {@link @nhtio/adk!Media} from the reader
+ * and persists it via `storeMessage`/`storeToolCall` separately.
+ */
+export type DispatchMediaBytesStoreFn = (
+  ctx: DispatchContext,
+  id: string,
+  bytes: ConduitBytes
+) => MediaReader | Promise<MediaReader>
+
+/**
+ * Persists extracted retrievable text bytes into consumer storage and returns a
+ * {@link @nhtio/adk!SpoolReader} (LLM execution context variant). The handler wraps the reader in a
+ * {@link @nhtio/adk!SpooledArtifact} for `new Retrievable({ content })` and persists the record via
+ * `storeRetrievable` separately. Returns a value; does NOT touch the turn Sets.
+ */
+export type DispatchRetrievableBytesStoreFn = (
+  ctx: DispatchContext,
+  id: string,
+  bytes: ConduitBytes
+) => SpoolReader | Promise<SpoolReader>
+
 // ── RawDispatchContext ────────────────────────────────────────────────────
 
 /**
@@ -214,6 +243,10 @@ export interface RawDispatchContext {
   mutateToolCall: DispatchToolCallMutateFn
   /** Removes a tool call by ID. */
   deleteToolCall: DispatchToolCallDeleteFn
+  /** Persists tool-generated media bytes; returns a `MediaReader`. */
+  storeMediaBytes: DispatchMediaBytesStoreFn
+  /** Persists extracted retrievable text bytes; returns a `SpoolReader`. */
+  storeRetrievableBytes: DispatchRetrievableBytesStoreFn
 
   /** Optional hook registrations for emit events. */
   hooks?: DispatchContextHookRegistrations
@@ -262,6 +295,8 @@ const rawDispatchContextSchema = validator.object<RawDispatchContext>({
   storeToolCall: validator.function().required(),
   mutateToolCall: validator.function().required(),
   deleteToolCall: validator.function().required(),
+  storeMediaBytes: validator.function().required(),
+  storeRetrievableBytes: validator.function().required(),
   hooks: validator.object().optional(),
   waitFor: validator.function().optional(),
 })
@@ -331,6 +366,8 @@ export class DispatchContext {
   #storeToolCall: DispatchToolCallStoreFn
   #mutateToolCall: DispatchToolCallMutateFn
   #deleteToolCall: DispatchToolCallDeleteFn
+  #storeMediaBytes: DispatchMediaBytesStoreFn
+  #storeRetrievableBytes: DispatchRetrievableBytesStoreFn
   #waitFor: OpenGateFn | undefined
 
   // Checksum frequency index for this execution
@@ -411,6 +448,8 @@ export class DispatchContext {
     this.#storeToolCall = resolved.storeToolCall
     this.#mutateToolCall = resolved.mutateToolCall
     this.#deleteToolCall = resolved.deleteToolCall
+    this.#storeMediaBytes = resolved.storeMediaBytes
+    this.#storeRetrievableBytes = resolved.storeRetrievableBytes
     this.#waitFor = resolved.waitFor
 
     this.#signalled = undefined
@@ -669,6 +708,18 @@ export class DispatchContext {
       },
       deleteToolCall: {
         value: (id: string) => this.#doDeleteToolCall(id),
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
+      storeMediaBytes: {
+        value: (id: string, bytes: ConduitBytes) => this.#storeMediaBytes(this, id, bytes),
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
+      storeRetrievableBytes: {
+        value: (id: string, bytes: ConduitBytes) => this.#storeRetrievableBytes(this, id, bytes),
         enumerable: true,
         configurable: false,
         writable: false,
@@ -1090,6 +1141,34 @@ export class DispatchContext {
   declare readonly mutateToolCall: (v: ToolCall) => Promise<void>
   /** Removes a tool call from the local Set and persistence layer by ID. */
   declare readonly deleteToolCall: (id: string) => Promise<void>
+  /**
+   * Persists tool-generated media bytes into consumer storage and returns a {@link @nhtio/adk!MediaReader}.
+   *
+   * @remarks
+   * This is a low-level persistence conduit, NOT a mutation: it does not add to `turnMessages`/
+   * `turnToolCalls` or fire a `stored*` hook. The handler builds a {@link @nhtio/adk!Media} from the
+   * returned reader (`Media.toolGenerated({ reader })`) and stores the owning primitive — a
+   * {@link @nhtio/adk!Message} attachment or {@link @nhtio/adk!ToolCall} result — via the relevant
+   * `store*` method separately. Persisting bytes without storing the primitive means the framework
+   * never sees the media.
+   */
+  declare readonly storeMediaBytes: (
+    id: string,
+    bytes: ConduitBytes
+  ) => MediaReader | Promise<MediaReader>
+  /**
+   * Persists extracted retrievable text bytes into consumer storage and returns a
+   * {@link @nhtio/adk!SpoolReader}.
+   *
+   * @remarks
+   * Low-level persistence conduit, same posture as {@link DispatchContext.storeMediaBytes}: returns a
+   * value, touches no Sets, fires no hook. Wrap the reader in a {@link @nhtio/adk!SpooledArtifact} and
+   * pass it as `Retrievable.content`, then persist the record via {@link DispatchContext.storeRetrievable}.
+   */
+  declare readonly storeRetrievableBytes: (
+    id: string,
+    bytes: ConduitBytes
+  ) => SpoolReader | Promise<SpoolReader>
   /** Emits a `message` hook; fires registered handlers synchronously. */
   declare readonly emitMessage: EmitMessageFn
   /** Emits a `thought` hook; fires registered handlers synchronously. */

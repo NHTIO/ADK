@@ -1,6 +1,29 @@
-import type { Tool } from '@nhtio/adk'
+import { isInstanceOf, inMemoryMediaReader } from '@nhtio/adk'
+import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
+import type { Tool, ConduitBytes } from '@nhtio/adk'
 import type { TurnRunnerConfig, TurnPipelineMiddlewareFn } from '@nhtio/adk/turn_runner'
 import type { DispatchPipelineMiddlewareFn, DispatchExecutorFn } from '@nhtio/adk/dispatch_runner'
+
+/** Drains a `ConduitBytes` value to a `Uint8Array` for the stub media conduit. */
+const toBytes = async (bytes: ConduitBytes): Promise<Uint8Array> => {
+  if (typeof bytes === 'string') return new TextEncoder().encode(bytes)
+  if (!isInstanceOf(bytes, 'ReadableStream', ReadableStream)) return bytes
+  const chunks: Uint8Array[] = []
+  const reader = bytes.getReader()
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (value) chunks.push(value)
+  }
+  const total = chunks.reduce((n, c) => n + c.byteLength, 0)
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const c of chunks) {
+    out.set(c, offset)
+    offset += c.byteLength
+  }
+  return out
+}
 
 /**
  * Overrides accepted by {@link makeFixtureConfig}.
@@ -96,6 +119,8 @@ export const makeFixtureConfig = (overrides: FixtureConfigOverrides): TurnRunner
     storeToolCallCallback: async (_ctx, _v) => {},
     mutateToolCallCallback: async (_ctx, _v) => {},
     deleteToolCallCallback: async (_ctx, _id) => {},
+    storeMediaBytesCallback: async (_ctx, _id, bytes) => inMemoryMediaReader(await toBytes(bytes)),
+    storeRetrievableBytesCallback: (_ctx, id, bytes) => new InMemorySpoolStore().write(id, bytes),
 
     tools: overrides.tools ?? [],
     turnInputPipeline: overrides.turnInputPipeline ?? [],

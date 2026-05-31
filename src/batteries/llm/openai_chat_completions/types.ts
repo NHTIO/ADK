@@ -10,7 +10,7 @@
  */
 
 import type { TokenEncoding } from '@nhtio/adk/common'
-import type { SpooledArtifact, Media } from '@nhtio/adk/common'
+import type { SpooledArtifact, Media, SpoolStore } from '@nhtio/adk/common'
 import type {
   Tokenizable,
   Memory,
@@ -278,15 +278,15 @@ export interface ChatCompletionsHelpers {
   renderRetrievableSafetyDirective: () => string
   renderFirstPartyRetrievables: (
     items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>
-  ) => string
+  ) => Promise<string>
   renderThirdPartyPublicRetrievables: (
     items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
     deps: { renderUntrustedContent: ChatCompletionsHelpers['renderUntrustedContent'] }
-  ) => string
+  ) => Promise<string>
   renderThirdPartyPrivateRetrievables: (
     items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
     deps: { renderUntrustedContent: ChatCompletionsHelpers['renderUntrustedContent'] }
-  ) => string
+  ) => Promise<string>
   renderRetrievables: (
     items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
     deps: {
@@ -296,7 +296,7 @@ export interface ChatCompletionsHelpers {
       renderThirdPartyPrivateRetrievables: ChatCompletionsHelpers['renderThirdPartyPrivateRetrievables']
       renderUntrustedContent: ChatCompletionsHelpers['renderUntrustedContent']
     }
-  ) => string
+  ) => Promise<string>
   renderTimelineMessage: (input: {
     message: Message
     selfIdentity: string
@@ -328,7 +328,7 @@ export interface ChatCompletionsHelpers {
     renderThirdPartyPublicRetrievables: ChatCompletionsHelpers['renderThirdPartyPublicRetrievables']
     renderThirdPartyPrivateRetrievables: ChatCompletionsHelpers['renderThirdPartyPrivateRetrievables']
     renderUntrustedContent: ChatCompletionsHelpers['renderUntrustedContent']
-  }) => string
+  }) => Promise<string>
   renderChatCompletionsToolCallResult: (input: {
     toolCall: ToolCall
     results: Tokenizable | SpooledArtifact | SpooledArtifact[] | Media | Media[]
@@ -409,6 +409,27 @@ export interface OpenAIChatCompletionsAdapterOptions {
   tokenEncoding?: TokenEncoding | null
   replayCompatibility?: ReadonlyArray<string>
   helpers?: Partial<ChatCompletionsHelpers>
+
+  /**
+   * Backing store for `string` / `Uint8Array` tool returns. Tool output bytes are written under the
+   * tool call's id; the resulting {@link @nhtio/adk!SpooledArtifact} (or the tool's configured
+   * subclass) is the model-visible handle for the rest of the turn.
+   *
+   * @remarks
+   * Defaults to a fresh, ephemeral per-dispatch {@link @nhtio/adk/batteries/storage/in_memory!InMemorySpoolStore}.
+   * Inject an {@link @nhtio/adk/batteries/storage/opfs!OpfsSpoolStore} or a Flydrive-backed store to
+   * persist artifacts to durable storage (and to stream large/binary tool output to disk rather than
+   * buffering it in memory).
+   *
+   * **Lifetime / namespacing:** the default store is per-dispatch, so tool-call ids only need to be
+   * unique within a dispatch. An injected durable store persists across turns and dispatches, so the
+   * tool-call ids used as keys must be globally unique for that store (or the store must apply its
+   * own `keyPrefix`); the adapter does not namespace keys for you, and it does not delete entries —
+   * lifetime and cleanup of an injected store are the consumer's responsibility.
+   *
+   * @defaultValue a new `InMemorySpoolStore` per dispatch
+   */
+  spoolStore?: SpoolStore
   /**
    * When `tool_choice` (or the `allowed_tools` variant) forces the model onto a specific tool
    * name, and that name resolves to an ephemeral, forged artifact-query tool (one produced by

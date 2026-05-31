@@ -15,6 +15,9 @@ const destReadmePath = resolve(BASE_DIR, 'dist/README.md')
 const srcLicensePath = resolve(BASE_DIR, 'LICENSE.md')
 const destLicensePath = resolve(BASE_DIR, 'dist/LICENSE.md')
 
+const srcChangelogPath = resolve(BASE_DIR, 'CHANGELOG.md')
+const destChangelogPath = resolve(BASE_DIR, 'dist/CHANGELOG.md')
+
 const doCopyFile = async (src: string, dest: string) => {
   if (!existsSync(src)) return
   return await copyFile(src, dest)
@@ -144,6 +147,7 @@ readFile(packageJsonPath, 'utf-8').then(async (packageJson) => {
     writeFile(destPackageJsonPath, JSON.stringify(parsedPackageJson, null, 2)),
     doCopyFile(srcReadmePath, destReadmePath),
     doCopyFile(srcLicensePath, destLicensePath),
+    doCopyFile(srcChangelogPath, destChangelogPath),
     copySkills(skillsDir, destSkillsDir, parsedPackageJson.version, resolvedDocsUrl),
   ])
 })

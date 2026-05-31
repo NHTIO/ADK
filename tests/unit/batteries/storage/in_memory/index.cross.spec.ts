@@ -1,9 +1,18 @@
 import { describe, expect, it } from 'vitest'
+import { implementsByteStore } from '../../../../../src/lib/contracts/byte_store'
 import { implementsSpoolReader } from '../../../../../src/lib/contracts/spool_reader'
 import {
   InMemorySpoolReader,
   InMemorySpoolStore,
 } from '../../../../../src/batteries/storage/in_memory'
+
+const streamOf = (...chunks: Uint8Array[]): ReadableStream<Uint8Array> =>
+  new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk)
+      controller.close()
+    },
+  })
 
 describe('InMemorySpoolReader', () => {
   it('returns each line by 0-based index', () => {
@@ -58,6 +67,14 @@ describe('InMemorySpoolReader', () => {
 
   it('implements the SpoolReader interface', () => {
     expect(implementsSpoolReader(new InMemorySpoolReader('x'))).toBe(true)
+  })
+
+  it('accepts a Uint8Array and decodes it as UTF-8 for text reads', () => {
+    const r = new InMemorySpoolReader(new TextEncoder().encode('héllo\nwörld'))
+    expect(r.line(0)).toBe('héllo')
+    expect(r.line(1)).toBe('wörld')
+    // byteLength reflects the true stored byte count (8 + 1 + 6), not the char count
+    expect(r.byteLength()).toBe(new TextEncoder().encode('héllo\nwörld').byteLength)
   })
 
   describe('readAll', () => {
@@ -193,5 +210,48 @@ describe('InMemorySpoolStore', () => {
     const reader = store.write('call-empty', new Uint8Array(0))
     expect(reader.lineCount()).toBe(0)
     expect(reader.byteLength()).toBe(0)
+  })
+
+  it('stores binary Uint8Array byte-faithfully (no lossy UTF-8 round-trip)', () => {
+    // 0xFF 0xFE 0x00 is not valid UTF-8 — the old store decode-on-write would have
+    // corrupted these bytes via U+FFFD replacement. Byte-faithful storage preserves the count.
+    const store = new InMemorySpoolStore()
+    const binary = new Uint8Array([0xff, 0xfe, 0x00, 0x01, 0x80])
+    const reader = store.write('bin-1', binary)
+    expect(reader.byteLength()).toBe(5)
+    expect(store.read('bin-1')!.byteLength()).toBe(5)
+  })
+
+  it('implements the ByteStore contract', () => {
+    expect(implementsByteStore(new InMemorySpoolStore())).toBe(true)
+  })
+
+  describe('ReadableStream input', () => {
+    it('drains a stream into a reader (async write)', async () => {
+      const store = new InMemorySpoolStore()
+      const enc = new TextEncoder()
+      const reader = await store.write(
+        'stream-1',
+        streamOf(enc.encode('hello\n'), enc.encode('world'))
+      )
+      expect(reader.line(0)).toBe('hello')
+      expect(reader.line(1)).toBe('world')
+      expect(reader.byteLength()).toBe(enc.encode('hello\nworld').byteLength)
+    })
+
+    it('persists the drained stream for later read()', async () => {
+      const store = new InMemorySpoolStore()
+      await store.write('stream-2', streamOf(new Uint8Array([1, 2, 3])))
+      expect(store.read('stream-2')!.byteLength()).toBe(3)
+    })
+
+    it('concatenates multiple chunks in order, byte-faithfully', async () => {
+      const store = new InMemorySpoolStore()
+      const reader = await store.write(
+        'stream-3',
+        streamOf(new Uint8Array([0xff, 0x00]), new Uint8Array([0xfe]))
+      )
+      expect(reader.byteLength()).toBe(3)
+    })
   })
 })
