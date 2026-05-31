@@ -13,7 +13,23 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "keywords": [],
+  "keywords": [
+    "agent",
+    "agents",
+    "ai-agent",
+    "ai-agents",
+    "agent-framework",
+    "agent-development-kit",
+    "adk",
+    "llm",
+    "generative-ai",
+    "typescript",
+    "middleware",
+    "tool-calling",
+    "retrieval",
+    "memory",
+    "token-counting"
+  ],
   "author": "Jak Giveon <jak@nht.io>",
   "copyright": "© 2025-present New Horizon Technology LTD",
   "license": "MIT",
