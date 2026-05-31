@@ -12,6 +12,7 @@ const SRC_DIR = resolve(BASE_DIR, 'src')
 const externals = new Set<string>([
   'node:util',
   'node:path',
+  'node:process',
   'node:url',
   'node:fs',
   'node:fs/promises',
@@ -99,6 +100,7 @@ export default defineConfig(async ({ mode }) => {
       lib: {
         entry: {
           ...entries,
+          'adk-mcp': resolve(SRC_DIR, 'mcp/server.ts'),
         },
         name: LIB_NAME,
         formats: ['es', 'cjs'],

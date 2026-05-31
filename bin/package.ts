@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { getEntries } from './utils'
+import { buildMcpCorpus, getEntries } from './utils'
 import { extname, relative, resolve } from 'node:path'
 import { copyFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 
@@ -9,6 +9,7 @@ const skillsDir = resolve(BASE_DIR, 'skills')
 const destSkillsDir = resolve(BASE_DIR, 'dist/skills')
 const packageJsonPath = resolve(BASE_DIR, 'package.json')
 const destPackageJsonPath = resolve(BASE_DIR, 'dist/package.json')
+const destMcpCorpusPath = resolve(BASE_DIR, 'dist/mcp/adk-docs-corpus.json')
 
 const srcReadmePath = resolve(BASE_DIR, 'README.md')
 const destReadmePath = resolve(BASE_DIR, 'dist/README.md')
@@ -122,6 +123,9 @@ readFile(packageJsonPath, 'utf-8').then(async (packageJson) => {
   const resolvedDocsUrl = docsUrl()
   parsedPackageJson.module = './index.mjs'
   parsedPackageJson.main = './index.cjs'
+  parsedPackageJson.bin = {
+    adk: './adk-mcp.mjs',
+  }
   Object.assign(parsedPackageJson, packageUrls(resolvedDocsUrl))
   const exports: Record<string, { import: string; require: string; types: string }> = {
     '.': {
@@ -149,5 +153,12 @@ readFile(packageJsonPath, 'utf-8').then(async (packageJson) => {
     doCopyFile(srcLicensePath, destLicensePath),
     doCopyFile(srcChangelogPath, destChangelogPath),
     copySkills(skillsDir, destSkillsDir, parsedPackageJson.version, resolvedDocsUrl),
+    buildMcpCorpus(
+      BASE_DIR,
+      destMcpCorpusPath,
+      parsedPackageJson.name,
+      parsedPackageJson.version,
+      resolvedDocsUrl
+    ),
   ])
 })

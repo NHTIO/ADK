@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Packaged ADK Assembly MCP server** (`src/mcp/server.ts`) — `@nhtio/adk` now ships a local
+  stdio MCP server that can be launched with `npx -y @nhtio/adk`. The server exposes ADK assembly
+  guidance, packaged documentation search, document reads, generated API lookup, and pasted-code
+  assembly review through MCP tools, resources, and prompts.
+- **Version-aligned MCP documentation corpus** (`dist/mcp/adk-docs-corpus.json`) — package
+  generation now copies hand-written docs, generated TypeDoc API pages, changelog content, and the
+  ADK assembly Skill into a read-only corpus for the MCP server. The corpus is built from the docs
+  available at package time so MCP answers match the installed package version.
+- **ADK MCP documentation page** (`docs/mcp.md`) — added a VitePress guide for installing and using
+  the ADK MCP across common coding-agent clients, including VS Code / Copilot, Claude Code, Claude
+  Desktop, Cursor, Windsurf, Cline / Roo Code, and Continue.
 - **Unified `ByteStore<R>` storage contract** (`src/lib/contracts/byte_store.ts`) — the single
   low-level "give bytes, get a reader" shape every storage layer implements, with `SpoolStore`
   (`ByteStore<SpoolReader>`) and `MediaStore` (`ByteStore<MediaReader>`) semantic aliases. `write`
@@ -38,6 +49,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (BREAKING)
 
+- **Documentation now builds before the library package in CI.** The package build consumes the
+  generated docs, API reference, and changelog artifact so the npm package always includes the MCP
+  documentation corpus when built from tagged/default-branch CI jobs.
+- **The generated npm package now exposes an `adk` binary.** `bin/package.ts` writes
+  `bin.adk = "./adk-mcp.mjs"` into the packaged manifest and bundles the MCP SDK/Zod-backed server
+  entry while keeping those MCP implementation dependencies out of the published runtime dependency
+  list.
 - **Render helpers are now async.** `renderFirstPartyRetrievables`,
   `renderThirdPartyPublicRetrievables`, `renderThirdPartyPrivateRetrievables`, `renderRetrievables`,
   and `renderChatCompletionsSystemPrompt` on `ChatCompletionsHelpers` now return `Promise<string>`

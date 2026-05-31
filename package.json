@@ -101,6 +101,7 @@
     "@arothuis/markdown-it-biblatex": "^2.1.0",
     "@inquirer/prompts": "^8.4.2",
     "@mlc-ai/web-llm": "^0.2.83",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@nhtio/eslint-config": "^1.20251104.0",
     "@nhtio/swarm": "^1.20260111.0",
     "@nhtio/vite-plugins": "^1.20251202.1",
@@ -164,7 +165,8 @@
     "vitepress-plugin-llms": "^1.12.1",
     "vitepress-plugin-mermaid": "^2.0.17",
     "vitest": "^4.1.5",
-    "vue": "^3.5.33"
+    "vue": "^3.5.33",
+    "zod": "^4.4.3"
   },
   "module": "./dist/index.mjs",
   "main": "./dist/index.cjs",
