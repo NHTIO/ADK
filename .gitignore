@@ -9,6 +9,7 @@ node_modules/
 docs/.vitepress/dist
 docs/.vitepress/cache
 .cache/transformers
+docs/changelog.md
 docs/api/*
 !docs/api/.gitkeep
 docs/public
