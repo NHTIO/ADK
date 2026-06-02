@@ -5,6 +5,33 @@ All notable changes to `@nhtio/adk` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2026-06-01
+
+### Added
+
+- **Embeddings batteries** (`@nhtio/adk/batteries/embeddings/openai`,
+  `@nhtio/adk/batteries/embeddings/webllm`) — two opt-in embedders that share one shape and differ
+  only in their engine. `OpenAIEmbeddingsAdapter` POSTs to any OpenAI-`/v1/embeddings`-compatible
+  endpoint over raw `fetch` (Node/browser/edge/workers); `WebLLMEmbeddingsAdapter` embeds in-process
+  on WebGPU via `@mlc-ai/web-llm`. Both expose `embed` / `embedMany` / `dimensions` / `preload` /
+  `reset` / `isAvailable`, return wire-native `number[]` / `number[][]`, require an explicit `model`
+  (no default), and handle query/document instruction prefixes identically via a shared
+  `kind: 'query' | 'document'` option. The environment-neutral OpenAI battery is re-exported from
+  `@nhtio/adk/batteries/embeddings`; the WebGPU-only WebLLM battery is reachable only via its own
+  subpath. Embedders are tools you call from your own retrieval middleware — they do not plug into
+  an executor slot. See the new `docs/assembly/batteries-embeddings.md`.
+
+### Fixed
+
+- **`E_INVALID_TURN_RUNNER_CONFIG` now names the offending field.** A misconfigured `TurnRunner`
+  previously threw a generic "cannot be instantiated with the provided configuration" with no
+  indication of which field failed. The exception now carries the validator's field-level detail
+  (e.g. `…: storeMediaBytesCallback is required`) and attaches the raw `ValidationError` on `cause`.
+- **Unknown-tool errors now list the available tools.** When the model calls a tool that is not in
+  the registry, the OpenAI and WebLLM Chat Completions batteries persist a tool-call error reading
+  `Tool not found: <name>. Available tools: <a, b, c>.` (or `No tools are available this turn.`) so
+  the model can self-correct on the next iteration instead of dead-ending on an opaque "not found".
+
 ## 2026-05-31
 
 ### Added

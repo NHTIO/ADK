@@ -632,4 +632,54 @@ describe('OpenAIChatCompletionsAdapter — invalid tool args (validation failure
       expect(await okResults.asString()).toContain('echoed: works')
     })
   })
+
+  describe('unknown tool (not in registry)', () => {
+    it('persists isError: true and lists the available tool names so the model can self-correct', async () => {
+      // Two real tools registered; the model calls a third that does not exist.
+      const fetchFn = vi.fn(async () =>
+        toolCallResponse([
+          { id: 'call-missing', name: 'web_search', arguments: JSON.stringify({ q: 'x' }) },
+        ])
+      )
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: 'm',
+        fetch: fetchFn as never,
+        stream: false,
+      })
+      const ctx = makeCtx(new ToolRegistry([echoTool(), calculatorTool()]))
+
+      await adapter.executor()(ctx, makeHelpers())
+
+      expect(ctx.storeToolCall).toHaveBeenCalledTimes(1)
+      const stored = ctx._stored.toolCalls[0]
+      expect(stored.isError).toBe(true)
+      expect(stored.tool).toBe('web_search')
+      const text = stored.results.toString()
+      expect(text).toContain('Tool not found: web_search')
+      // The remediation: the names of the tools that DO exist, sorted.
+      expect(text).toContain('Available tools:')
+      expect(text).toContain('add')
+      expect(text).toContain('echo')
+    })
+
+    it('states no tools are available when the registry is empty', async () => {
+      const fetchFn = vi.fn(async () =>
+        toolCallResponse([{ id: 'call-missing-2', name: 'ghost', arguments: '{}' }])
+      )
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: 'm',
+        fetch: fetchFn as never,
+        stream: false,
+      })
+      const ctx = makeCtx(new ToolRegistry([]))
+
+      await adapter.executor()(ctx, makeHelpers())
+
+      const stored = ctx._stored.toolCalls[0]
+      expect(stored.isError).toBe(true)
+      const text = stored.results.toString()
+      expect(text).toContain('Tool not found: ghost')
+      expect(text).toContain('No tools are available this turn.')
+    })
+  })
 })

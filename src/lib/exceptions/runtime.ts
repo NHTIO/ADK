@@ -7,11 +7,15 @@ import { createException } from '../utils/exceptions'
  * @remarks
  * Marked fatal — a misconfigured runner must not be allowed to execute turns.
  *
+ * The single printf argument carries the validator's field-level detail (e.g.
+ * `"storeMediaBytesCallback is required"`) so a misconfiguration names the offending field
+ * instead of failing opaquely. The underlying `ValidationError` is also attached on `cause`.
+ *
  * @group Turn Runner Construction
  */
-export const E_INVALID_TURN_RUNNER_CONFIG = createException(
+export const E_INVALID_TURN_RUNNER_CONFIG = createException<[string]>(
   'E_INVALID_TURN_RUNNER_CONFIG',
-  'The turn runner cannot be instantiated with the provided configuration.',
+  'The turn runner cannot be instantiated with the provided configuration: %s',
   'E_INVALID_TURN_RUNNER_CONFIG',
   529,
   true

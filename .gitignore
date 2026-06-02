@@ -27,3 +27,4 @@ docs/.vitepress/config.mts.timestamp-*
 .pnpm/
 .pnpm-store/
 .claude/
+.DS_Store

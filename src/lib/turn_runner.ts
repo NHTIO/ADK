@@ -2,10 +2,10 @@ import { DateTime } from 'luxon'
 import { Middleware } from '@nhtio/middleware'
 import { TurnGate } from './classes/turn_gate'
 import { DispatchRunner } from './dispatch_runner'
+import { validateOrThrow } from './utils/validation'
 import { ToolRegistry } from './classes/tool_registry'
 import { isInstanceOf, isError } from './utils/guards'
 import { TypedEventEmitter } from '@nhtio/tiny-typed-emitter'
-import { passesSchema, validateOrThrow } from './utils/validation'
 import { turnRunnerConfigSchema } from './contracts/turn_runner_config'
 import { TurnContext, RawTurnContext } from './contracts/turn_runner_context'
 import {
@@ -124,9 +124,12 @@ export class TurnRunner {
    * @throws {@link @nhtio/adk!E_INVALID_TURN_RUNNER_CONFIG} when `config` does not satisfy the schema.
    */
   constructor(config: TurnRunnerConfig) {
-    const isValid = passesSchema(turnRunnerConfigSchema, config)
-    if (!isValid) {
-      throw new E_INVALID_TURN_RUNNER_CONFIG()
+    // Validate once, capturing the field-level error so the thrown exception can name the
+    // offending field(s) (e.g. a missing required callback) instead of failing opaquely.
+    const { error } = turnRunnerConfigSchema.validate(config, { abortEarly: false })
+    if (error) {
+      const detail = error.details.map((d) => d.message).join('; ')
+      throw new E_INVALID_TURN_RUNNER_CONFIG([detail], { cause: error })
     }
     // Store the resolved config so optional fields (e.g. tools) are always present.
     this.#config = validateOrThrow<ResolvedTurnRunnerConfig>(turnRunnerConfigSchema, config, true)

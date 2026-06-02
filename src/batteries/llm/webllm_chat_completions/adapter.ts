@@ -666,7 +666,17 @@ export class WebLLMChatCompletionsAdapter {
           return
         }
         if (!tool) {
-          const errText = `Tool not found: ${call.name}`
+          // List the tools that DO exist so the model can self-correct on the next iteration
+          // instead of guessing. Without this, a single typo'd / hallucinated tool name yields
+          // a dead-end "not found" with no path forward.
+          const available = mergedRegistry
+            .all()
+            .map((t) => t.name)
+            .sort()
+          const errText =
+            available.length > 0
+              ? `Tool not found: ${call.name}. Available tools: ${available.join(', ')}.`
+              : `Tool not found: ${call.name}. No tools are available this turn.`
           const results = new Tokenizable(errText)
           helpers.reportToolCall(call.id, { tool: call.name, args })
           helpers.reportToolCall(call.id, {

@@ -57,6 +57,12 @@ import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
 import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import {
+  computeBackoff,
+  sleepWithJitter,
+  parseRetryAfter,
+  linkAbortSignals,
+} from '../../../lib/utils/retry'
+import {
   Tokenizable,
   ToolRegistry,
   ToolCall,
@@ -230,80 +236,9 @@ const resolveHelpers = (
 }
 
 // ─── Retry / timeout helpers ──────────────────────────────────────────────────
-
-const computeBackoff = (attempt: number, cfg: ChatCompletionsRetryConfig): number => {
-  const base = cfg.baseDelayMs ?? 500
-  const max = cfg.maxDelayMs ?? 30_000
-  return Math.min(base * Math.pow(2, attempt - 1), max)
-}
-
-// Abort-aware jittered sleep used for retry backoff. Resolves (does not reject)
-// the instant `signal` aborts, so an aborted turn does not stay parked in a
-// backoff delay — the retry loop re-checks `ctx.abortSignal.aborted` immediately
-// after and returns. The timer and the abort listener are both torn down on
-// whichever fires first, so nothing leaks.
-const sleepWithJitter = (ms: number, signal?: AbortSignal): Promise<void> => {
-  const jittered = ms * (0.9 + Math.random() * 0.2)
-  return new Promise((resolve) => {
-    if (signal?.aborted) {
-      resolve()
-      return
-    }
-    let onAbort: (() => void) | undefined
-    const timer = setTimeout(() => {
-      if (onAbort && signal) signal.removeEventListener('abort', onAbort)
-      resolve()
-    }, jittered)
-    if (signal) {
-      onAbort = () => {
-        clearTimeout(timer)
-        resolve()
-      }
-      signal.addEventListener('abort', onAbort, { once: true })
-    }
-  })
-}
-
-const parseRetryAfter = (raw: string): number => {
-  const asNum = Number(raw)
-  if (Number.isFinite(asNum)) return asNum * 1000
-  const asDate = Date.parse(raw)
-  if (Number.isFinite(asDate)) return Math.max(0, asDate - Date.now())
-  return 0
-}
-
-// Combine several abort signals into one. Returns the linked signal plus a
-// `dispose` that detaches any listeners the fallback path attached, so repeated
-// links on a long-lived signal (one per retry attempt) do not accumulate
-// listeners. The native `AbortSignal.any` path self-manages its listeners and
-// needs no disposal (dispose is a no-op there).
-const linkAbortSignals = (
-  signals: ReadonlyArray<AbortSignal>
-): { signal: AbortSignal; dispose: () => void } => {
-  const anyFn = (AbortSignal as unknown as { any?: (sigs: AbortSignal[]) => AbortSignal }).any
-  if (typeof anyFn === 'function') {
-    return { signal: anyFn(signals as AbortSignal[]), dispose: () => {} }
-  }
-  // Fallback for older runtimes: hand-link via a fresh controller.
-  const ctrl = new AbortController()
-  const links: Array<{ sig: AbortSignal; handler: () => void }> = []
-  for (const sig of signals) {
-    if (sig.aborted) {
-      ctrl.abort()
-      break
-    }
-    const handler = () => ctrl.abort()
-    sig.addEventListener('abort', handler, { once: true })
-    links.push({ sig, handler })
-  }
-  return {
-    signal: ctrl.signal,
-    dispose: () => {
-      for (const { sig, handler } of links) sig.removeEventListener('abort', handler)
-      links.length = 0
-    },
-  }
-}
+// Shared with the OpenAI Embeddings battery — see `../../../lib/utils/retry`. These are pure,
+// environment-neutral primitives; the import keeps retry behavior identical across batteries
+// without duplication.
 
 // ─── ID helpers ───────────────────────────────────────────────────────────────
 
@@ -852,7 +787,17 @@ export class OpenAIChatCompletionsAdapter {
           return
         }
         if (!tool) {
-          const errText = `Tool not found: ${call.name}`
+          // List the tools that DO exist so the model can self-correct on the next iteration
+          // instead of guessing. Without this, a single typo'd / hallucinated tool name yields
+          // a dead-end "not found" with no path forward.
+          const available = mergedRegistry
+            .all()
+            .map((t) => t.name)
+            .sort()
+          const errText =
+            available.length > 0
+              ? `Tool not found: ${call.name}. Available tools: ${available.join(', ')}.`
+              : `Tool not found: ${call.name}. No tools are available this turn.`
           const results = new Tokenizable(errText)
           helpers.reportToolCall(call.id, { tool: call.name, args })
           helpers.reportToolCall(call.id, {
