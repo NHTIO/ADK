@@ -5,6 +5,19 @@ All notable changes to `@nhtio/adk` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2026-06-02
+
+### Fixed
+
+- **Corrected the `callId` documentation on the tool-execution events.** `ToolExecutionStartEvent.callId`
+  and `ToolExecutionEndEvent.callId` were documented as correlating with `ToolCall.id`. They do not:
+  `callId` is `sha256({ tool, args })` — the same value as `TurnToolCallContent.checksum` and
+  `ToolCall.checksum`. The two buses join on **`toolCall.checksum === toolExecution*.callId`**, never
+  on `toolCall.id`. The hash collides by design for identical `(tool, args)` (that is what
+  `DispatchContext.toolCallCount` counts), so order or disambiguate repeated calls by the `DateTime`
+  fields (`createdAt` / `updatedAt`, `startedAt` / `endedAt`). TSDoc and the Events guides now state
+  this contract; no runtime behavior changed.
+
 ## 2026-06-01
 
 ### Added

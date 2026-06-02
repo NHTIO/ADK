@@ -54,13 +54,23 @@ export interface TurnStreamableContent {
  * execution fails, `isError` is `true` and `results` contains the error detail.
  */
 export interface TurnToolCallContent {
-  /** Stable identifier for this tool call; correlates the initial request with its result. */
+  /**
+   * Stable stream id for this tool call; ties the initial request to its result on **this** bus
+   * (the announce emission and the completion emission share it). This is the model/stream id, not
+   * a cross-bus key — to correlate with the observability `toolExecution*` events, use `checksum`.
+   */
   id: string
   /** Name of the tool the model has requested. */
   tool: string
   /** Arguments the model supplied for the tool call. */
   args: unknown
-  /** Integrity checksum over `tool` and `args`; can be used to detect tampering before execution. */
+  /**
+   * `sha256({ tool, args })` over the raw arguments. Doubles as the **cross-bus join key**: equal to
+   * {@link ToolExecutionStartEvent.callId} / {@link ToolExecutionEndEvent.callId} and to
+   * {@link @nhtio/adk!ToolCall.checksum}. Collides by design for identical `(tool, args)` within a
+   * turn — that is what {@link @nhtio/adk!DispatchContext.toolCallCount} counts — so order or
+   * disambiguate repeated calls by `createdAt` / `updatedAt`, not by `checksum` alone.
+   */
   checksum: string
   /** Timestamp when this tool call was first emitted. */
   createdAt: DateTime
@@ -121,16 +131,22 @@ export interface TurnEndEvent {
  *
  * @remarks
  * Fired after arg validation passes and immediately before the handler is called.
- * `callId` correlates the event with the {@link @nhtio/adk!ToolCall} record if one is being tracked. Fires
- * for both {@link @nhtio/adk!Tool} and
- * {@link @nhtio/adk!ArtifactTool} invocations — the payload is identical.
+ * `callId` is the cross-bus join key — equal to {@link TurnToolCallContent.checksum} and
+ * {@link @nhtio/adk!ToolCall.checksum}, **not** {@link @nhtio/adk!ToolCall.id}. Fires for both
+ * {@link @nhtio/adk!Tool} and {@link @nhtio/adk!ArtifactTool} invocations — the payload is identical.
  */
 export interface ToolExecutionStartEvent {
   /** Name of the tool being executed. */
   toolName: string
   /** ID of the turn in which the tool is being executed. */
   turnId: string
-  /** Correlates with the associated ToolCall id, if known. Empty string when not provided. */
+  /**
+   * Cross-bus join key: `sha256({ tool, args })`, identical to {@link TurnToolCallContent.checksum}
+   * and {@link @nhtio/adk!ToolCall.checksum}. This is **not** {@link @nhtio/adk!ToolCall.id}. It
+   * collides by design for identical `(tool, args)` within a turn — that is what
+   * {@link @nhtio/adk!DispatchContext.toolCallCount} counts. Order or disambiguate repeated calls by
+   * `startedAt`. Empty string when not provided.
+   */
   callId: string
   /** The validated arguments that will be passed to the handler. */
   args: unknown
@@ -143,16 +159,22 @@ export interface ToolExecutionStartEvent {
  *
  * @remarks
  * Fired after the handler returns or throws. When `isError` is `true`, the handler threw and the
- * error has been wrapped in {@link @nhtio/adk!E_TOOL_DOWNSTREAM_ERROR}. Fires for both
- * {@link @nhtio/adk!Tool} and
- * {@link @nhtio/adk!ArtifactTool} invocations — the payload is identical.
+ * error has been wrapped in {@link @nhtio/adk!E_TOOL_DOWNSTREAM_ERROR}. `callId` carries the same
+ * cross-bus join key as {@link ToolExecutionStartEvent.callId}. Fires for both
+ * {@link @nhtio/adk!Tool} and {@link @nhtio/adk!ArtifactTool} invocations — the payload is identical.
  */
 export interface ToolExecutionEndEvent {
   /** Name of the tool that was executed. */
   toolName: string
   /** ID of the turn in which the tool was executed. */
   turnId: string
-  /** Correlates with the associated ToolCall id, if known. Empty string when not provided. */
+  /**
+   * Cross-bus join key: `sha256({ tool, args })`, identical to {@link TurnToolCallContent.checksum}
+   * and {@link @nhtio/adk!ToolCall.checksum}. This is **not** {@link @nhtio/adk!ToolCall.id}. It
+   * collides by design for identical `(tool, args)` within a turn — that is what
+   * {@link @nhtio/adk!DispatchContext.toolCallCount} counts. Order or disambiguate repeated calls by
+   * `startedAt` / `endedAt`. Empty string when not provided.
+   */
   callId: string
   /** When execution started. */
   startedAt: DateTime
