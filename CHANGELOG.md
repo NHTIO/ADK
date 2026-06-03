@@ -5,6 +5,16 @@ All notable changes to `@nhtio/adk` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2026-06-03
+
+### Changed
+
+- **MCP install examples now render the current package version at docs build time.** The ADK MCP
+  guide uses a `{{ADK_VERSION}}` token for pinned `@nhtio/adk@...` examples, and the docs build
+  rewrites it from `package.json` for VitePress pages, LLM artifacts, the Ask ADK index, and the
+  packaged MCP corpus. Release docs now stay aligned with the published package version without
+  hand-editing install snippets before every tag.
+
 ## 2026-06-02
 
 ### Fixed

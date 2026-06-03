@@ -5,6 +5,7 @@ import { Tokenizable } from '@nhtio/adk'
 import { default as path } from 'node:path'
 import { toString } from 'mdast-util-to-string'
 import { routeFromPath } from '../docs/.vitepress/utils/route_from_path'
+import { rewriteAdkVersionTokens } from '../docs/.vitepress/utils/adk_version_tokens'
 import type { Heading, Root, RootContent } from 'mdast'
 
 interface ChunkRecord {
@@ -20,6 +21,7 @@ interface ChunkRecord {
 const repoRoot = path.resolve(__dirname, '..')
 const docsRoot = path.join(repoRoot, 'docs')
 const outDir = path.join(docsRoot, '.vitepress', 'dist')
+const packageJsonPath = path.join(repoRoot, 'package.json')
 const maxTokens = 400
 const overlapTokens = 40
 const stopwords = new Set(
@@ -159,6 +161,8 @@ async function embed(contents: string[]): Promise<Float32Array> {
 
 async function main() {
   const start = Date.now()
+  const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'))
+  const packageVersion = String(packageJson.version)
   console.log(`scanning ${docsRoot}...`)
   const walked = await walk(docsRoot)
   const mdFiles = walked
@@ -167,7 +171,7 @@ async function main() {
   console.log(`found ${mdFiles.length} markdown files; chunking...`)
   const chunks: ChunkRecord[] = []
   for (const file of mdFiles) {
-    const raw = await fs.readFile(file, 'utf-8')
+    const raw = rewriteAdkVersionTokens(await fs.readFile(file, 'utf-8'), packageVersion)
     if (frontmatterDraft(raw)) continue
     const before = chunks.length
     chunks.push(...(await buildChunks(file, raw)))
