@@ -228,6 +228,12 @@ describe('evaluateKatexTool', () => {
       const out = await runEvaluateKatex('2 + 3 \\text{hello}')
       expect(out).toMatch(/Result: 5/)
     })
+
+    it('maps inverse trig to mathjs names: `\\arctan(1)` ~ 0.7853 (asin/acos/atan, not arc*)', async () => {
+      const out = await runEvaluateKatex('\\arctan(1)')
+      expect(out).toMatch(/Result: 0\.7853/)
+      expect(out).not.toMatch(/arctan/)
+    })
   })
 
   describe('Greek letter macros', () => {
@@ -285,6 +291,129 @@ describe('evaluateKatexTool', () => {
 
     it('has a description that mentions KaTeX or LaTeX', () => {
       expect(evaluateKatexTool.description.toLowerCase()).toMatch(/katex|latex/)
+    })
+  })
+
+  // ── Numeric calculus ────────────────────────────────────────────────────────
+  //
+  // Calculus is computed numerically (Simpson quadrature, central finite difference, two-sided
+  // limits), so results are approximations surfaced under a `Result (numeric):` label. Detection
+  // runs on the raw LaTeX before the scalar flattener strips subscripts, which would otherwise
+  // mangle bounds (`\int_{0}^{1}` -> `\int^(1)`).
+
+  describe('definite integrals', () => {
+    it('evaluates `\\int_{0}^{1} x dx` to 0.5', async () => {
+      const out = await runEvaluateKatex('\\int_{0}^{1} x dx')
+      expect(out).toMatch(/Result \(numeric\): 0\.5\b/)
+    })
+
+    it('evaluates `\\int_{0}^{1} x^2 dx` to ~0.3333', async () => {
+      const out = await runEvaluateKatex('\\int_{0}^{1} x^2 dx')
+      expect(out).toMatch(/Result \(numeric\): 0\.3333/)
+    })
+
+    it('evaluates `\\int_{0}^{\\pi} \\sin(x) dx` to 2', async () => {
+      const out = await runEvaluateKatex('\\int_{0}^{\\pi} \\sin(x) dx')
+      expect(out).toMatch(/Result \(numeric\): 2\b/)
+    })
+
+    it('handles bare bounds and a nested fraction integrand: `\\int_0^1 \\frac{1}{x+1} dx` ~ ln2', async () => {
+      const out = await runEvaluateKatex('\\int_0^1 \\frac{1}{x+1} dx')
+      expect(out).toMatch(/Result \(numeric\): 0\.69314/)
+    })
+
+    it('evaluates `\\int_{0}^{1} e^x dx` to ~1.71828', async () => {
+      const out = await runEvaluateKatex('\\int_{0}^{1} e^x dx')
+      expect(out).toMatch(/Result \(numeric\): 1\.71828/)
+    })
+
+    it('accepts swapped script order `\\int^{1}_{0} x dx`', async () => {
+      const out = await runEvaluateKatex('\\int^{1}_{0} x dx')
+      expect(out).toMatch(/Result \(numeric\): 0\.5\b/)
+    })
+
+    it('uses the integration variable from the differential: `\\int_{0}^{2} t dt` = 2', async () => {
+      const out = await runEvaluateKatex('\\int_{0}^{2} t dt')
+      expect(out).toMatch(/Result \(numeric\): 2\b/)
+    })
+
+    it('rejects an indefinite integral with guidance', async () => {
+      const out = await runEvaluateKatex('\\int x dx')
+      expect(out).toMatch(/indefinite integral/i)
+      expect(out).toContain('\\int_{0}^{1} x dx')
+    })
+
+    it('reports a singular integrand rather than NaN: `\\int_{0}^{1} \\frac{1}{x} dx`', async () => {
+      const out = await runEvaluateKatex('\\int_{0}^{1} \\frac{1}{x} dx')
+      expect(out).toMatch(/singularity|not finite/i)
+    })
+
+    it('rejects infinite bounds: `\\int_{0}^{\\infty} x dx`', async () => {
+      const out = await runEvaluateKatex('\\int_{0}^{\\infty} x dx')
+      expect(out).toMatch(/Infinite integration bounds/i)
+    })
+  })
+
+  describe('derivatives at a point', () => {
+    it('evaluates `\\frac{d}{dx} (x^2) \\Big|_{x=3}` to 6', async () => {
+      const out = await runEvaluateKatex('\\frac{d}{dx} (x^2) \\Big|_{x=3}')
+      expect(out).toMatch(/Result \(numeric\): 6\b/)
+    })
+
+    it('supports the `\\left. … \\right|_{x=3}` evaluation-bar form', async () => {
+      const out = await runEvaluateKatex('\\left. \\frac{d}{dx} x^2 \\right|_{x=3}')
+      expect(out).toMatch(/Result \(numeric\): 6\b/)
+    })
+
+    it('evaluates `\\frac{d}{dx} \\sin(x) \\Big|_{x=0}` to 1', async () => {
+      const out = await runEvaluateKatex('\\frac{d}{dx} \\sin(x) \\Big|_{x=0}')
+      expect(out).toMatch(/Result \(numeric\): 1\b/)
+    })
+
+    it('uses the operator variable: `\\frac{d}{dt} t^3 \\Big|_{t=2}` = 12', async () => {
+      const out = await runEvaluateKatex('\\frac{d}{dt} t^3 \\Big|_{t=2}')
+      expect(out).toMatch(/Result \(numeric\): 12\b/)
+    })
+
+    it('rejects a derivative with no point and guides the user', async () => {
+      const out = await runEvaluateKatex('\\frac{d}{dx} x^2')
+      expect(out).toMatch(/without a point/i)
+      expect(out).toContain('\\frac{d}{dx}')
+    })
+  })
+
+  describe('limits', () => {
+    it('evaluates `\\lim_{x \\to 0} \\frac{\\sin(x)}{x}` to 1', async () => {
+      const out = await runEvaluateKatex('\\lim_{x \\to 0} \\frac{\\sin(x)}{x}')
+      expect(out).toMatch(/Result \(numeric\): 1\b/)
+    })
+
+    it('evaluates `\\lim_{x \\to 2} x^2` to 4', async () => {
+      const out = await runEvaluateKatex('\\lim_{x \\to 2} x^2')
+      expect(out).toMatch(/Result \(numeric\): 4\b/)
+    })
+
+    it('evaluates `\\lim_{x \\to \\infty} \\frac{1}{x}` to 0', async () => {
+      const out = await runEvaluateKatex('\\lim_{x \\to \\infty} \\frac{1}{x}')
+      expect(out).toMatch(/Result \(numeric\): 0\b/)
+    })
+
+    it('evaluates `\\lim_{x \\to \\infty} \\arctan(x)` to ~1.5707', async () => {
+      const out = await runEvaluateKatex('\\lim_{x \\to \\infty} \\arctan(x)')
+      expect(out).toMatch(/Result \(numeric\): 1\.5707/)
+    })
+
+    it('reports divergence for `\\lim_{x \\to 0} \\frac{1}{x}`', async () => {
+      const out = await runEvaluateKatex('\\lim_{x \\to 0} \\frac{1}{x}')
+      expect(out).toMatch(/may not exist|diverge|unbounded/i)
+    })
+  })
+
+  describe('non-calculus regression', () => {
+    it('leaves the scalar path untouched: `\\frac{1}{2} + \\sqrt{9}` keeps the plain `Result:` label', async () => {
+      const out = await runEvaluateKatex('\\frac{1}{2} + \\sqrt{9}')
+      expect(out).toContain('Result: 3.5')
+      expect(out).not.toContain('(numeric)')
     })
   })
 })

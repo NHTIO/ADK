@@ -10,8 +10,8 @@
 
 import { create, all } from 'mathjs'
 import { Tool } from '@nhtio/adk/common'
-import { isError } from '@nhtio/adk/guards'
 import { validator } from '@nhtio/validation'
+import { isError, isInstanceOf } from '@nhtio/adk/guards'
 
 const math = create(all)
 
@@ -59,10 +59,12 @@ function latexToMathjs(latex: string): string {
   expr = expr.replace(/\\sqrt\[([^\]]+)\]\s*\{([^{}]*)\}/g, 'nthRoot($2, $1)')
   expr = expr.replace(/\\sqrt\s*\{([^{}]*)\}/g, 'sqrt($1)')
 
-  expr = expr.replace(
-    /\\(sin|cos|tan|cot|sec|csc|arcsin|arccos|arctan|sinh|cosh|tanh|ln|log|exp|abs|det)/g,
-    '$1'
-  )
+  // Inverse trig: mathjs spells these asin/acos/atan, not arcsin/arccos/arctan.
+  expr = expr.replace(/\\arcsin/g, 'asin')
+  expr = expr.replace(/\\arccos/g, 'acos')
+  expr = expr.replace(/\\arctan/g, 'atan')
+
+  expr = expr.replace(/\\(sin|cos|tan|cot|sec|csc|sinh|cosh|tanh|ln|log|exp|abs|det)/g, '$1')
 
   expr = expr.replace(/log_\{?(\w+)\}?\s*\(([^)]+)\)/g, 'log($2, $1)')
   expr = expr.replace(/\^{([^{}]*)}/g, '^($1)')
@@ -93,6 +95,298 @@ function latexToMathjs(latex: string): string {
   expr = expr.replace(/\s+/g, ' ').trim()
 
   return expr
+}
+
+// ─── Numeric calculus ─────────────────────────────────────────────────────────
+//
+// `evaluate_katex` is a numeric evaluator. mathjs has no symbolic integration, and its symbolic
+// `derivative` is intentionally blocklisted above, so calculus is computed NUMERICALLY: definite
+// integrals via composite Simpson quadrature, derivatives via central finite differences, and limits
+// via a two-sided approach. These are approximations (correct to ~1e-9 for the smooth expressions a
+// model emits), surfaced under a `Result (numeric):` label so the distinction is explicit.
+//
+// Detection runs on the RAW LaTeX, before `latexToMathjs` flattens it — its subscript stripping
+// would otherwise destroy integral bounds (`\int_{0}^{1}` → `\int^(1)`) and limit targets. The
+// extracted sub-expressions (integrand, bounds, body, point) are then translated by the existing
+// `latexToMathjs` and evaluated per-point with a scope, which works under the security blocklist.
+
+/** A tagged error whose message is surfaced to the model verbatim (caught by {@link tryCalculus}). */
+class CalculusError extends Error {}
+
+/** Evaluate a mathjs expression at a single point, guarding against non-finite results. */
+function evalAt(expr: string, varName: string, x: number): number {
+  const y = math.evaluate!(expr, { [varName]: x })
+  if (typeof y !== 'number' || !Number.isFinite(y)) {
+    throw new CalculusError('NON_FINITE')
+  }
+  return y
+}
+
+/** Composite Simpson's rule over a finite interval. Throws {@link CalculusError} on a singularity. */
+function simpson(fn: (x: number) => number, a: number, b: number, n = 1000): number {
+  if (n % 2 === 1) n++
+  const h = (b - a) / n
+  let sum = fn(a) + fn(b)
+  for (let i = 1; i < n; i++) {
+    sum += (i % 2 === 1 ? 4 : 2) * fn(a + i * h)
+  }
+  const result = (h / 3) * sum
+  if (!Number.isFinite(result)) throw new CalculusError('NON_FINITE')
+  return result
+}
+
+/** Round numeric output to 12 significant digits, collapsing floating-point noise. */
+function formatNumeric(n: number): string {
+  // Snap values that are zero-to-within-tolerance to exactly 0 (e.g. lim_{x->inf} 1/x ≈ 1e-8).
+  if (Math.abs(n) < 1e-9) return '0'
+  return math.format!(n, { precision: 12 })
+}
+
+/**
+ * Reads a single `_`/`^` script starting at `i`, supporting braced (`_{0}`, `^{\pi}`), command
+ * (`^\pi`), and bare-token (`_0`, `^1`) forms. Returns the mark, its raw-LaTeX value, and the next
+ * index, or `null` when there is no script at `i`.
+ */
+function readScript(s: string, i: number): { mark: '_' | '^'; val: string; next: number } | null {
+  while (s[i] === ' ') i++
+  const mark = s[i]
+  if (mark !== '_' && mark !== '^') return null
+  i++
+  while (s[i] === ' ') i++
+  if (s[i] === '{') {
+    let depth = 0
+    const start = ++i
+    for (; i < s.length; i++) {
+      if (s[i] === '{') depth++
+      else if (s[i] === '}') {
+        if (depth === 0) break
+        depth--
+      }
+    }
+    return { mark, val: s.slice(start, i), next: i + 1 }
+  }
+  if (s[i] === '\\') {
+    const m = /^\\[a-zA-Z]+/.exec(s.slice(i))
+    if (!m) return null
+    return { mark, val: m[0], next: i + m[0].length }
+  }
+  const m = /^[A-Za-z0-9.]+/.exec(s.slice(i))
+  if (!m) return null
+  return { mark, val: m[0], next: i + m[0].length }
+}
+
+/** Translate a raw-LaTeX bound/target fragment and evaluate it to a finite number. */
+function evalBound(latex: string): number {
+  const trimmed = latex.trim()
+  if (/\\infty/.test(trimmed)) throw new CalculusError('INFINITE_BOUND')
+  const mathjsExpr = latexToMathjs(trimmed)
+  const value = math.evaluate!(mathjsExpr)
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new CalculusError('BAD_BOUND')
+  }
+  return value
+}
+
+/** Evaluate a definite integral `\int_{a}^{b} f \,dx` by Simpson quadrature. */
+function evalIntegral(s: string): string {
+  // Strip the operator (\int, optionally with \limits).
+  const m = /\\int(?:\\limits)?/.exec(s)
+  if (!m) throw new CalculusError('NOT_INTEGRAL')
+  let i = m.index + m[0].length
+
+  // Read up to two scripts (bounds), in either order.
+  const scripts: Record<'_' | '^', string | undefined> = { '_': undefined, '^': undefined }
+  for (let k = 0; k < 2; k++) {
+    const sc = readScript(s, i)
+    if (!sc) break
+    scripts[sc.mark] = sc.val
+    i = sc.next
+  }
+  if (scripts._ === undefined || scripts['^'] === undefined) {
+    throw new CalculusError('INDEFINITE')
+  }
+
+  // The remainder is `integrand … d<var>`. Pull the trailing differential off the end.
+  const rest = s.slice(i)
+  const diff = /\\?,?\s*\bd\s*([a-zA-Z])\s*$/.exec(rest)
+  if (!diff) throw new CalculusError('NO_DIFFERENTIAL')
+  const variable = diff[1]
+  const integrandLatex = rest.slice(0, diff.index)
+  if (integrandLatex.trim().length === 0) throw new CalculusError('NO_INTEGRAND')
+
+  const a = evalBound(scripts._)
+  const b = evalBound(scripts['^'])
+  const integrand = latexToMathjs(integrandLatex)
+  const fn = (x: number) => evalAt(integrand, variable, x)
+
+  let result: number
+  if (a === b) result = 0
+  else if (a < b) result = simpson(fn, a, b)
+  else result = -simpson(fn, b, a)
+
+  return `Converted: ∫(${integrand}) d${variable} from ${formatNumeric(a)} to ${formatNumeric(b)}\nResult (numeric): ${formatNumeric(result)}`
+}
+
+/** Evaluate a derivative `\frac{d}{dx} f \big|_{x=a}` at a point via central finite difference. */
+function evalDerivative(s: string): string {
+  // Operator + variable: \frac{d}{dx} … or bare d/dx ….
+  let variable: string | undefined
+  let body = s
+  const fracOp = /\\frac\s*\{\s*d\s*\}\s*\{\s*d\s*([a-zA-Z])\s*\}/.exec(s)
+  if (fracOp) {
+    variable = fracOp[1]
+    body = s.slice(fracOp.index + fracOp[0].length)
+  } else {
+    const bareOp = /(?:^|[^a-zA-Z])d\s*\/\s*d([a-zA-Z])/.exec(s)
+    if (bareOp) {
+      variable = bareOp[1]
+      body = s.slice(bareOp.index + bareOp[0].length)
+    }
+  }
+  if (!variable) throw new CalculusError('NOT_DERIVATIVE')
+
+  // Remove pure \left. / \right. delimiters.
+  body = body.replace(/\\left\.?/g, '').replace(/\\right\.?/g, '')
+
+  // Evaluation bar + point at the end: …|_{x=3} (optionally \Big| etc.).
+  const bar = /\\?(?:Big|big|bigg|Bigg)?\s*\|\s*_\s*\{?\s*([a-zA-Z])\s*=\s*([^}]+?)\s*\}?\s*$/.exec(
+    body
+  )
+  if (!bar) throw new CalculusError('NO_POINT')
+  const point = evalBound(bar[2])
+  let fnLatex = body.slice(0, bar.index).trim()
+
+  // Strip one layer of wrapping parentheses/brackets around the function body.
+  fnLatex = fnLatex
+    .replace(/^\\?\(([\s\S]*)\\?\)$/, '$1')
+    .replace(/^\[([\s\S]*)\]$/, '$1')
+    .trim()
+  if (fnLatex.length === 0) throw new CalculusError('NO_FUNCTION')
+
+  const expr = latexToMathjs(fnLatex)
+  const h = 1e-6
+  const fn = (x: number) => evalAt(expr, variable, x)
+  const result = (fn(point + h) - fn(point - h)) / (2 * h)
+  if (!Number.isFinite(result)) throw new CalculusError('NON_FINITE')
+
+  return `Converted: d/d${variable}(${expr}) at ${variable}=${formatNumeric(point)}\nResult (numeric): ${formatNumeric(result)}`
+}
+
+/** Evaluate a limit `\lim_{x \to a} f(x)` by a two-sided numeric approach. */
+function evalLimit(s: string): string {
+  const head = /\\lim\s*_\s*\{\s*([a-zA-Z])\s*\\to\s*([\s\S]+?)\s*\}/.exec(s)
+  if (!head) throw new CalculusError('NOT_LIMIT')
+  const variable = head[1]
+  let targetLatex = head[2].trim()
+  const bodyLatex = s.slice(head.index + head[0].length).trim()
+  if (bodyLatex.length === 0) throw new CalculusError('NO_FUNCTION')
+
+  // One-sided markers (0^+, 0^-, 0^{+}) — record the side, strip the marker.
+  let side: 'both' | 'plus' | 'minus' = 'both'
+  const oneSided = /\^\s*\{?\s*([+-])\s*\}?\s*$/.exec(targetLatex)
+  if (oneSided) {
+    side = oneSided[1] === '+' ? 'plus' : 'minus'
+    targetLatex = targetLatex.slice(0, oneSided.index).trim()
+  }
+
+  const expr = latexToMathjs(bodyLatex)
+  const fn = (x: number) => evalAt(expr, variable, x)
+  const eps = 1e-6
+
+  // Infinite targets via large-magnitude substitution.
+  let result: number
+  let targetLabel: string
+  if (/^-\s*\\infty$/.test(targetLatex)) {
+    result = fn(-1e8)
+    targetLabel = '-∞'
+  } else if (/^\\infty$/.test(targetLatex)) {
+    result = fn(1e8)
+    targetLabel = '∞'
+  } else {
+    const target = evalBound(targetLatex)
+    targetLabel = formatNumeric(target)
+    if (side === 'plus') {
+      result = fn(target + eps)
+    } else if (side === 'minus') {
+      result = fn(target - eps)
+    } else {
+      const lo = fn(target - eps)
+      const hi = fn(target + eps)
+      const avg = (lo + hi) / 2
+      if (Math.abs(hi - lo) > 1e-3 * Math.max(1, Math.abs(avg))) {
+        throw new CalculusError('LIMIT_MISMATCH')
+      }
+      result = avg
+    }
+  }
+  if (!Number.isFinite(result)) throw new CalculusError('LIMIT_UNBOUNDED')
+
+  // Infinite-target substitution (±1e8) and the eps offset leave more residue than Simpson or the
+  // derivative difference, so snap a limit result to a nearby round value before formatting:
+  // 0.99999998 → 1, 1e-8 → 0. The tolerance is loose enough to absorb the substitution error yet
+  // far tighter than the divergence check that already rejected genuinely non-convergent limits.
+  const nearest = Math.round(result)
+  if (Math.abs(result - nearest) < 1e-6) result = nearest
+
+  return `Converted: lim ${variable}→${targetLabel} of (${expr})\nResult (numeric): ${formatNumeric(result)}`
+}
+
+/** Human-readable, model-actionable message for each {@link CalculusError} tag. */
+function calculusErrorMessage(tag: string): string {
+  switch (tag) {
+    case 'INDEFINITE':
+      return 'Cannot evaluate an indefinite integral numerically. Provide bounds, e.g. \\int_{0}^{1} x dx.'
+    case 'NO_DIFFERENTIAL':
+      return "Could not find the integration variable. Expected a trailing differential like 'dx'."
+    case 'NO_INTEGRAND':
+      return 'The integral has no integrand to evaluate.'
+    case 'INFINITE_BOUND':
+      return 'Infinite integration bounds are not supported. Provide finite numeric bounds, e.g. \\int_{0}^{1} f dx.'
+    case 'BAD_BOUND':
+      return 'Could not evaluate the integration bounds to numbers.'
+    case 'NO_POINT':
+      return 'Cannot evaluate a derivative numerically without a point. Specify where, e.g. \\frac{d}{dx}(x^2)\\Big|_{x=3}.'
+    case 'NO_FUNCTION':
+      return 'Could not find the function to evaluate.'
+    case 'LIMIT_MISMATCH':
+      return 'The limit may not exist (left and right values disagree).'
+    case 'LIMIT_UNBOUNDED':
+      return 'The limit appears to diverge (function is unbounded near the target).'
+    case 'NON_FINITE':
+      return 'The expression is not finite over the requested range (possible singularity); cannot evaluate numerically.'
+    default:
+      return 'Could not evaluate the calculus expression.'
+  }
+}
+
+/**
+ * Detects a calculus construct in raw LaTeX and routes it to the matching numeric handler. Returns
+ * the result/error string, or `null` when the input is not a calculus expression (so the caller
+ * falls through to the scalar evaluation path unchanged).
+ */
+function tryCalculus(latex: string): string | null {
+  let s = latex.trim()
+  s = s.replace(/^\$\$?|\$\$?$/g, '')
+  s = s.replace(/^\\[[(]|\\[\])]$/g, '').trim()
+
+  let handler: ((expr: string) => string) | undefined
+  if (/\\int/.test(s)) handler = evalIntegral
+  else if (/\\lim/.test(s)) handler = evalLimit
+  else if (
+    /\\frac\s*\{\s*d\s*\}\s*\{\s*d\s*[a-zA-Z]\s*\}/.test(s) ||
+    /(?:^|[^a-zA-Z])d\s*\/\s*d[a-zA-Z]/.test(s)
+  )
+    handler = evalDerivative
+  if (!handler) return null
+
+  try {
+    return handler(s)
+  } catch (err) {
+    if (isInstanceOf(err, 'CalculusError', CalculusError)) {
+      return `Error: ${calculusErrorMessage(err.message)}`
+    }
+    return `Error: ${isError(err) ? err.message : String(err)}`
+  }
 }
 
 /**
@@ -138,20 +432,32 @@ export const calculateTool = new Tool({
  *
  * @remarks
  * Translates common LaTeX constructs (`\frac{a}{b}`, `\sqrt{...}`, `\cdot`, `\times`, Greek
- * macros like `\pi`, `\left`/`\right` delimiters, `\text{...}`, subscripts, etc.) into their
- * mathjs equivalents before evaluation. Both the source and the translated mathjs expression
- * are subject to the 1000-character length cap.
+ * macros like `\pi`, inverse trig `\arcsin`/`\arccos`/`\arctan`, `\left`/`\right` delimiters,
+ * `\text{...}`, subscripts, etc.) into their mathjs equivalents before evaluation. Both the source
+ * and the translated mathjs expression are subject to the 1000-character length cap.
+ *
+ * Also evaluates three calculus constructs **numerically** (mathjs has no symbolic integration, and
+ * its symbolic `derivative` is blocklisted here for safety):
+ * - Definite integrals — `\int_{a}^{b} f \,dx` via composite Simpson quadrature.
+ * - Derivatives at a point — `\frac{d}{dx} f \big|_{x=a}` via central finite difference.
+ * - Limits — `\lim_{x \to a} f` (including `a = \pm\infty`) via a two-sided numeric approach.
+ *
+ * Numeric results are rounded with `math.format(..., { precision: 12 })` and labelled
+ * `Result (numeric):` to flag that they are approximations. Constructs that cannot be evaluated
+ * numerically (indefinite integrals, derivatives without a point, infinite integration bounds,
+ * singular integrands, divergent limits) return a specific, guiding error string.
  *
  * Parse and evaluation errors are returned as error strings rather than thrown.
  */
 export const evaluateKatexTool = new Tool({
   name: 'evaluate_katex',
-  description: 'Evaluate a KaTeX/LaTeX math expression and return the numeric result.',
+  description:
+    'Evaluate a KaTeX/LaTeX math expression and return the numeric result. Supports arithmetic, trig, logs, roots, and numeric calculus: definite integrals (\\int_{a}^{b} f dx), derivatives at a point (\\frac{d}{dx} f|_{x=a}), and limits (\\lim_{x \\to a} f).',
   inputSchema: validator.object({
     katex: validator
       .string()
       .required()
-      .description('LaTeX expression, e.g. "\\frac{1}{2} + \\sqrt{9}"'),
+      .description('LaTeX expression, e.g. "\\frac{1}{2} + \\sqrt{9}" or "\\int_{0}^{1} x^2 dx"'),
   }),
   handler: async (args) => {
     const { katex } = args as { katex: string }
@@ -160,6 +466,12 @@ export const evaluateKatexTool = new Tool({
     if (lengthError) return lengthError
 
     try {
+      // Calculus (\int, \lim, d/dx) is detected on the raw LaTeX and evaluated numerically before
+      // the scalar flattening path, which would otherwise mangle bounds/targets. Returns null for
+      // non-calculus input, falling through to the scalar evaluator below unchanged.
+      const calculus = tryCalculus(katex)
+      if (calculus !== null) return calculus
+
       const mathjsExpr = latexToMathjs(katex)
 
       const translatedLengthError = validateExpression(mathjsExpr)

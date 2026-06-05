@@ -5,6 +5,28 @@ All notable changes to `@nhtio/adk` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2026-06-05
+
+### Added
+
+- **The `evaluate_katex` math tool now evaluates calculus numerically.** It previously mangled any
+  calculus input — `\int_{0}^{1} x dx` had its bounds stripped by the LaTeX flattener and produced a
+  cryptic `Syntax error in part "\int^(1) x dx"`. The tool now detects calculus on the raw LaTeX
+  before flattening and computes it numerically with the bundled mathjs (no new dependency):
+  definite integrals (`\int_{a}^{b} f \,dx`) via Simpson quadrature, derivatives at a point
+  (`\frac{d}{dx} f \big|_{x=a}`) via central finite difference, and limits (`\lim_{x \to a} f`,
+  including `a = \pm\infty`) via a two-sided approach. Results are rounded and labelled
+  `Result (numeric):` to flag the approximation. Genuinely uncomputable inputs (indefinite integrals,
+  derivatives without a point, infinite integration bounds, singular integrands, divergent limits)
+  return a specific, guiding error instead of a garbled one. mathjs has no symbolic integration and
+  its symbolic `derivative` is intentionally blocklisted here, so these are numeric methods.
+
+### Fixed
+
+- **`evaluate_katex` now maps inverse trig to the correct mathjs names.** `\arcsin`, `\arccos`, and
+  `\arctan` were passed through as `arcsin`/`arccos`/`arctan`, which mathjs does not define, so every
+  inverse-trig expression errored with `Undefined function`. They now translate to `asin`/`acos`/`atan`.
+
 ## 2026-06-04
 
 ### Fixed
