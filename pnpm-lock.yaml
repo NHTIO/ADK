@@ -1253,28 +1253,28 @@ packages:
       '@emnapi/runtime': ^1.7.1
 
   '@nhtio/eslint-config@1.20260518.0':
-    resolution: {integrity: sha1-LeTH+g5sD7gJmyo4f2lozhuE+jg=, tarball: https://gitlab.com/api/v4/projects/68895200/packages/npm/@nhtio/eslint-config/-/@nhtio/eslint-config-1.20260518.0.tgz}
+    resolution: {integrity: sha1-LeTH+g5sD7gJmyo4f2lozhuE+jg=, tarball: https://registry.npmjs.org/@nhtio/eslint-config/-/eslint-config-1.20260518.0.tgz}
 
   '@nhtio/hooks@1.20251213.1':
-    resolution: {integrity: sha1-7X84sqtvV/tfSWAjv2+ZtO55bs0=, tarball: https://gitlab.com/api/v4/projects/75261652/packages/npm/@nhtio/hooks/-/@nhtio/hooks-1.20251213.1.tgz}
+    resolution: {integrity: sha1-7X84sqtvV/tfSWAjv2+ZtO55bs0=, tarball: https://registry.npmjs.org/@nhtio/hooks/-/hooks-1.20251213.1.tgz}
 
   '@nhtio/middleware@1.20251213.1':
-    resolution: {integrity: sha1-cBFiNKzyZPn9otIuIRz/cKEIYqQ=, tarball: https://gitlab.com/api/v4/projects/75267161/packages/npm/@nhtio/middleware/-/@nhtio/middleware-1.20251213.1.tgz}
+    resolution: {integrity: sha1-cBFiNKzyZPn9otIuIRz/cKEIYqQ=, tarball: https://registry.npmjs.org/@nhtio/middleware/-/middleware-1.20251213.1.tgz}
 
   '@nhtio/swarm@1.20260111.0':
-    resolution: {integrity: sha1-LxQE0HJOdFSOV/a1p9IFtf0VP1Y=, tarball: https://gitlab.com/api/v4/projects/69261969/packages/npm/@nhtio/swarm/-/@nhtio/swarm-1.20260111.0.tgz}
+    resolution: {integrity: sha1-LxQE0HJOdFSOV/a1p9IFtf0VP1Y=, tarball: https://registry.npmjs.org/@nhtio/swarm/-/swarm-1.20260111.0.tgz}
 
   '@nhtio/tiny-typed-emitter@1.20251213.1':
-    resolution: {integrity: sha1-CLNP8Jnq2gYG873sDtadj6yJ0v4=, tarball: https://gitlab.com/api/v4/projects/69439831/packages/npm/@nhtio/tiny-typed-emitter/-/@nhtio/tiny-typed-emitter-1.20251213.1.tgz}
+    resolution: {integrity: sha1-CLNP8Jnq2gYG873sDtadj6yJ0v4=, tarball: https://registry.npmjs.org/@nhtio/tiny-typed-emitter/-/tiny-typed-emitter-1.20251213.1.tgz}
 
   '@nhtio/validation@2.20251230.0':
-    resolution: {integrity: sha1-Kq+w/y89R2bVtg8ML4IYTSnGipE=, tarball: https://gitlab.com/api/v4/projects/71769060/packages/npm/@nhtio/validation/-/@nhtio/validation-2.20251230.0.tgz}
+    resolution: {integrity: sha1-Kq+w/y89R2bVtg8ML4IYTSnGipE=, tarball: https://registry.npmjs.org/@nhtio/validation/-/validation-2.20251230.0.tgz}
 
   '@nhtio/vite-plugins@1.20251213.0':
-    resolution: {integrity: sha1-WJKDLo2iuDQAWFo6gidkyf62eWM=, tarball: https://gitlab.com/api/v4/projects/76806616/packages/npm/@nhtio/vite-plugins/-/@nhtio/vite-plugins-1.20251213.0.tgz}
+    resolution: {integrity: sha1-WJKDLo2iuDQAWFo6gidkyf62eWM=, tarball: https://registry.npmjs.org/@nhtio/vite-plugins/-/vite-plugins-1.20251213.0.tgz}
 
   '@nhtio/vue-editors@1.20251127.1':
-    resolution: {integrity: sha1-g/Sy8Ah66fEDHVP3FwxKAfl4cTs=, tarball: https://gitlab.com/api/v4/projects/70589565/packages/npm/@nhtio/vue-editors/-/@nhtio/vue-editors-1.20251127.1.tgz}
+    resolution: {integrity: sha1-g/Sy8Ah66fEDHVP3FwxKAfl4cTs=, tarball: https://registry.npmjs.org/@nhtio/vue-editors/-/vue-editors-1.20251127.1.tgz}
     peerDependencies:
       vue: ^3.5.13
 
