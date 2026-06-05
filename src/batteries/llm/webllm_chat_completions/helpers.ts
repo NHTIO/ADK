@@ -41,4 +41,5 @@ export {
   defaultBuildChatCompletionsHistory,
   createChatCompletionsToolCallDeltaAccumulator,
   defaultCreateChatCompletionsToolCallDeltaAccumulator,
+  extractReasoningFields,
 } from '../openai_chat_completions/helpers'

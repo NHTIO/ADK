@@ -117,6 +117,35 @@ export type ChatCompletionsBucketLabel =
 
 export type ChatCompletionsBucketOrder = ReadonlyArray<ChatCompletionsBucketLabel>
 
+// ─── Reasoning field precedence ───────────────────────────────────────────────
+
+/**
+ * A wire field name that may carry model reasoning/thinking output on an OpenAI-compatible
+ * Chat Completions response.
+ *
+ * @remarks
+ * Neither name is part of OpenAI's official Chat Completions spec (OpenAI hides reasoning on Chat
+ * Completions and surfaces it only on the Responses API). They are de-facto, provider-specific
+ * conventions: `reasoning_content` originates with legacy vLLM (≤0.8) and the DeepSeek API, while
+ * `reasoning` is what Ollama's `/v1` and current vLLM (post-rename) emit.
+ */
+export type ReasoningField = 'reasoning' | 'reasoning_content'
+
+/**
+ * Ordered precedence list of reasoning wire fields. See
+ * {@link OpenAIChatCompletionsAdapterOptions.reasoningFieldPrecedence}.
+ */
+export type ReasoningFieldPrecedence = ReadonlyArray<ReasoningField>
+
+/**
+ * A single reasoning trace extracted from a response message or stream delta — the wire `field` it
+ * came from and its `content`. Returned by `extractReasoningFields`.
+ */
+export interface ReasoningExtract {
+  field: ReasoningField
+  content: string
+}
+
 // ─── Wire shapes ──────────────────────────────────────────────────────────────
 
 export interface ChatCompletionsToolCallWire {
@@ -187,6 +216,11 @@ export interface ChatCompletionsChunkDelta {
   role?: 'assistant'
   content?: string | null
   reasoning_content?: string | null
+  /**
+   * Non-spec, provider-specific reasoning channel. Emitted by Ollama's `/v1` and current vLLM
+   * (which renamed `reasoning_content` → `reasoning`); see {@link OpenAIChatCompletionsAdapterOptions.reasoningFieldPrecedence}.
+   */
+  reasoning?: string | null
   tool_calls?: ChatCompletionsToolCallDelta[]
 }
 
@@ -209,6 +243,11 @@ export interface ChatCompletionsResponseMessage {
   role?: 'assistant'
   content?: string | null
   reasoning_content?: string | null
+  /**
+   * Non-spec, provider-specific reasoning channel. Emitted by Ollama's `/v1` and current vLLM
+   * (which renamed `reasoning_content` → `reasoning`); see {@link OpenAIChatCompletionsAdapterOptions.reasoningFieldPrecedence}.
+   */
+  reasoning?: string | null
   tool_calls?: ChatCompletionsToolCallWire[]
 }
 
@@ -408,6 +447,25 @@ export interface OpenAIChatCompletionsAdapterOptions {
   thoughtSurfacing?: 'all-self' | 'latest-self' | 'all'
   tokenEncoding?: TokenEncoding | null
   replayCompatibility?: ReadonlyArray<string>
+
+  /**
+   * Ordered precedence of the wire fields the adapter reads for model reasoning/thinking output.
+   *
+   * @remarks
+   * Reasoning is not part of OpenAI's official Chat Completions spec, so OpenAI-compatible providers
+   * disagree on the field name: Ollama's `/v1` and current vLLM emit `reasoning`, while legacy vLLM
+   * (≤0.8) and the DeepSeek API emit `reasoning_content`. The adapter reads every field in this list
+   * that is present on the response.
+   *
+   * Precedence governs two things. When more than one listed field is present with **identical**
+   * content (or only one is present), the adapter emits a single thought attributed to the
+   * highest-precedence field. When listed fields are present with **divergent** content, each
+   * surfaces as its own thought (ordered by precedence) rather than silently dropping one — a thought
+   * stream is the wrong place to lose data.
+   *
+   * @defaultValue `['reasoning', 'reasoning_content']`
+   */
+  reasoningFieldPrecedence?: ReasoningFieldPrecedence
   helpers?: Partial<ChatCompletionsHelpers>
 
   /**

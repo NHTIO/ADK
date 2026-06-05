@@ -89,6 +89,7 @@ import {
   defaultRenderChatCompletionsToolCallResult,
   defaultBuildChatCompletionsHistory,
   defaultCreateChatCompletionsToolCallDeltaAccumulator,
+  extractReasoningFields,
 } from './helpers'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { Tool, Memory, TokenEncoding } from '@nhtio/adk/common'
@@ -102,6 +103,7 @@ import type {
   AssembledToolCall,
   ChatCompletionsContentBlock,
   WebLLMEngine,
+  ReasoningField,
 } from './types'
 
 // ─── ADK-control keys (stripped before sending the request body) ──────────
@@ -118,6 +120,7 @@ const ADK_CONTROL_KEYS: ReadonlySet<string> = new Set([
   'thoughtSurfacing',
   'tokenEncoding',
   'replayCompatibility',
+  'reasoningFieldPrecedence',
   'helpers',
   'strictToolChoice',
   'unsupportedMediaPolicy',
@@ -777,6 +780,10 @@ export class WebLLMChatCompletionsAdapter {
       }
 
       const selfIdentity = merged.selfIdentity ?? 'assistant'
+      const reasoningPrecedence = merged.reasoningFieldPrecedence ?? [
+        'reasoning',
+        'reasoning_content',
+      ]
 
       // ── Step 8: streaming path ────────────────────────────────────────────
       if (stream) {
@@ -789,9 +796,16 @@ export class WebLLMChatCompletionsAdapter {
         const streamId = uuidv6()
 
         let partialMessageContent = ''
-        let partialThoughtContent = ''
         let sawMessageDelta = false
-        let sawThoughtDelta = false
+
+        // Reasoning may stream under more than one provider-specific field at once. Accumulate each
+        // field's text under its own live stream id; at completion we dedup by content to decide
+        // whether to persist one Thought or one per divergent field. The first field to appear keeps
+        // the bare `streamId` (the common single-field case); any others get a `:field` suffix.
+        const thoughtAccum = new Map<ReasoningField, string>()
+        let primaryThoughtField: ReasoningField | undefined
+        const thoughtStreamId = (field: ReasoningField): string =>
+          field === primaryThoughtField ? streamId : `${streamId}:${field}`
 
         const drainAndPersist = async (): Promise<void> => {
           if (sawMessageDelta) {
@@ -807,23 +821,47 @@ export class WebLLMChatCompletionsAdapter {
               })
             )
           }
-          if (sawThoughtDelta) {
-            helpers.reportThought(streamId, '', { isComplete: true })
+          // Finalize every reasoning stream we opened live, then dedup by content to decide how many
+          // Thoughts to persist: one (fields agreed, or only one present) vs one per divergent field.
+          for (const field of thoughtAccum.keys()) {
+            helpers.reportThought(thoughtStreamId(field), '', { isComplete: true })
+          }
+          const thoughtExtracts = extractReasoningFields(
+            Object.fromEntries(thoughtAccum) as Partial<Record<ReasoningField, string>>,
+            reasoningPrecedence
+          )
+          if (thoughtExtracts.length === 1) {
             await ctx.storeThought(
               new Thought({
                 id: streamId,
-                content: partialThoughtContent,
+                content: thoughtExtracts[0].content,
                 identity: selfIdentity,
                 createdAt: nowIso(),
                 updatedAt: nowIso(),
               })
             )
+          } else {
+            for (const { field, content } of thoughtExtracts) {
+              await ctx.storeThought(
+                new Thought({
+                  id: thoughtStreamId(field),
+                  content,
+                  identity: selfIdentity,
+                  createdAt: nowIso(),
+                  updatedAt: nowIso(),
+                })
+              )
+            }
           }
           const calls = accumulator.drain()
           helpers.log.debug({
             kind: 'accumulator-finalised',
-            message: `Stream finalised: ${calls.length} tool call(s), message=${sawMessageDelta}, thought=${sawThoughtDelta}`,
-            payload: { toolCallCount: calls.length, sawMessageDelta, sawThoughtDelta },
+            message: `Stream finalised: ${calls.length} tool call(s), message=${sawMessageDelta}, thoughtFields=${thoughtExtracts.length}`,
+            payload: {
+              toolCallCount: calls.length,
+              sawMessageDelta,
+              thoughtFieldCount: thoughtExtracts.length,
+            },
           })
           if (calls.length === 0) {
             // No tool calls — terminal text answer. Self-ack only when opted in;
@@ -849,11 +887,17 @@ export class WebLLMChatCompletionsAdapter {
               partialMessageContent += delta.content
               helpers.reportMessage(streamId, delta.content)
             }
-            const reasoning = (delta as { reasoning_content?: string | null }).reasoning_content
-            if (typeof reasoning === 'string' && reasoning.length > 0) {
-              sawThoughtDelta = true
-              partialThoughtContent += reasoning
-              helpers.reportThought(streamId, reasoning)
+            // Stream every reasoning field present on this delta, in precedence order. No
+            // mid-stream dedup — deltas are fragments; we compare full contents at completion.
+            for (const field of reasoningPrecedence) {
+              const reasoning = delta[field]
+              if (typeof reasoning !== 'string' || reasoning.length === 0) continue
+              if (!thoughtAccum.has(field)) {
+                primaryThoughtField ??= field
+                thoughtAccum.set(field, '')
+              }
+              thoughtAccum.set(field, thoughtAccum.get(field)! + reasoning)
+              helpers.reportThought(thoughtStreamId(field), reasoning)
             }
             if (Array.isArray(delta.tool_calls)) {
               for (const d of delta.tool_calls) {
@@ -902,15 +946,18 @@ export class WebLLMChatCompletionsAdapter {
           })
         )
       }
-      const reasoning = (msg as { reasoning_content?: string | null } | undefined)
-        ?.reasoning_content
-      if (typeof reasoning === 'string' && reasoning.length > 0) {
-        const thoughtId = `${responseId}:thought`
-        helpers.reportThought(thoughtId, reasoning, { isComplete: true })
+      // Reasoning may arrive under more than one provider-specific field. A single extracted
+      // entry (only one field present, or several but identical) keeps the historical
+      // `${responseId}:thought` id; divergent fields each surface as their own thought.
+      const reasoningExtracts = extractReasoningFields(msg, reasoningPrecedence)
+      for (const { field, content } of reasoningExtracts) {
+        const thoughtId =
+          reasoningExtracts.length > 1 ? `${responseId}:thought:${field}` : `${responseId}:thought`
+        helpers.reportThought(thoughtId, content, { isComplete: true })
         await ctx.storeThought(
           new Thought({
             id: thoughtId,
-            content: reasoning,
+            content,
             identity: selfIdentity,
             createdAt: nowIso(),
             updatedAt: nowIso(),

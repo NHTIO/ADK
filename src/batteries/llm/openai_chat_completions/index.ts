@@ -60,6 +60,7 @@ export {
   defaultBuildChatCompletionsHistory,
   createChatCompletionsToolCallDeltaAccumulator,
   defaultCreateChatCompletionsToolCallDeltaAccumulator,
+  extractReasoningFields,
 } from './helpers'
 
 export type {
@@ -73,6 +74,9 @@ export type {
   ChatCompletionsToolCallDeltaAccumulator,
   ChatCompletionsBucketLabel,
   ChatCompletionsBucketOrder,
+  ReasoningField,
+  ReasoningFieldPrecedence,
+  ReasoningExtract,
   UntrustedContentAttrs,
   TrustedContentAttrs,
   StandingInstructionAttrs,

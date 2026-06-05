@@ -2506,51 +2506,460 @@ describe('OpenAIChatCompletionsAdapter — structured observability hooks (helpe
   })
 })
 
-const liveApiEnv: Record<string, string | undefined> | undefined =
-  typeof process !== 'undefined' && process.env?.TEST_OPENAI_API_KEY ? process.env : undefined
+// ─── reasoningFieldPrecedence (fetch-stubbed, no network) ──────────────────────
+//
+// Reasoning is non-spec, so providers emit it under `reasoning` (Ollama, current vLLM) or
+// `reasoning_content` (legacy vLLM, DeepSeek). These cassettes prove the adapter reads both, honors
+// precedence, collapses agreement to one thought, and splits genuine divergence into two — in both
+// streaming and non-streaming modes.
 
-describe.skipIf(!liveApiEnv)('OpenAIChatCompletionsAdapter — live API (gated, real e2e)', () => {
-  const model = liveApiEnv?.TEST_OPENAI_MODEL ?? 'gpt-4o-mini'
-  const baseURL = liveApiEnv?.TEST_OPENAI_BASE_URL || undefined
-  const apiKey = liveApiEnv?.TEST_OPENAI_API_KEY ?? ''
-
-  it('non-streaming: persists an assistant message and acks', async () => {
-    const adapter = new OpenAIChatCompletionsAdapter({
-      model,
-      apiKey,
-      ...(baseURL ? { baseURL } : {}),
-      stream: false,
-      autoAck: true,
-    })
-    const ctx = makeCtx({ systemPrompt: 'Say "hello" and nothing else.' })
-    await adapter.executor()(ctx, makeHelpers())
-    expect(ctx._stored.messages.length).toBeGreaterThan(0)
-    expect((ctx._stored.messages[0].content?.toString() ?? '').length).toBeGreaterThan(0)
-    expect(ctx.ack).toHaveBeenCalledTimes(1)
+const nonStreamingWithReasoning = (
+  fields: Partial<{ reasoning: string; reasoning_content: string }>,
+  content = 'final',
+  id = 'resp-reason'
+) =>
+  jsonResponse({
+    id,
+    object: 'chat.completion',
+    created: 1,
+    model: 'gpt-x',
+    choices: [
+      {
+        index: 0,
+        message: { role: 'assistant', content, ...fields },
+        finish_reason: 'stop',
+      },
+    ],
   })
 
-  it('streaming: emits delta reportMessage calls and persists the final assembled content', async () => {
-    const adapter = new OpenAIChatCompletionsAdapter({
-      model,
-      apiKey,
-      ...(baseURL ? { baseURL } : {}),
-      stream: true,
-      autoAck: true,
+// Build an SSE stream whose deltas carry reasoning under the given field names. Each entry in
+// `reasoningDeltas` is one chunk; `{ field: text }` pairs go on that chunk's delta.
+const streamingWithReasoning = (
+  reasoningDeltas: Array<Partial<{ reasoning: string; reasoning_content: string }>>,
+  contentDeltas: string[] = ['final']
+) => {
+  const frames: SSEFrame[] = []
+  for (const r of reasoningDeltas) {
+    frames.push(
+      JSON.stringify({
+        id: 'chunk-r',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'gpt-x',
+        choices: [{ index: 0, delta: { ...r }, finish_reason: null }],
+      })
+    )
+  }
+  for (const c of contentDeltas) {
+    frames.push(
+      JSON.stringify({
+        id: 'chunk-c',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'gpt-x',
+        choices: [{ index: 0, delta: { content: c }, finish_reason: null }],
+      })
+    )
+  }
+  frames.push('[DONE]')
+  return sseResponse(frames)
+}
+
+describe('OpenAIChatCompletionsAdapter — reasoningFieldPrecedence', () => {
+  describe('non-streaming', () => {
+    it('reads the `reasoning` field (Ollama / current vLLM convention)', async () => {
+      const fetchFn = vi.fn(async () => nonStreamingWithReasoning({ reasoning: 'I am thinking.' }))
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: 'm',
+        fetch: fetchFn as never,
+        stream: false,
+        autoAck: true,
+      })
+      const ctx = makeCtx()
+      const helpers = makeHelpers()
+      await adapter.executor()(ctx, helpers)
+
+      expect(ctx._stored.thoughts).toHaveLength(1)
+      expect(ctx._stored.thoughts[0].content.toString()).toBe('I am thinking.')
+      expect(ctx._stored.thoughts[0].id).toBe('resp-reason:thought')
+      const thoughtEvents = helpers._events.filter((e) => e.kind === 'thought')
+      expect(thoughtEvents.length).toBeGreaterThan(0)
     })
-    const ctx = makeCtx({ systemPrompt: 'Say "hi there" and nothing else.' })
-    const helpers = makeHelpers()
-    await adapter.executor()(ctx, helpers)
-    expect(ctx._stored.messages.length).toBeGreaterThan(0)
-    const final = ctx._stored.messages[0].content?.toString() ?? ''
-    expect(final.length).toBeGreaterThan(0)
-    const messageEvents = helpers._events.filter((e) => e.kind === 'message')
-    expect(messageEvents.length).toBeGreaterThan(0)
-    expect(
-      messageEvents.some((e) => (e.payload as { isComplete?: boolean }).isComplete === true)
-    ).toBe(true)
-    expect(ctx.ack).toHaveBeenCalledTimes(1)
+
+    it('reads the `reasoning_content` field (legacy vLLM / DeepSeek convention)', async () => {
+      const fetchFn = vi.fn(async () =>
+        nonStreamingWithReasoning({ reasoning_content: 'legacy thought' })
+      )
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: 'm',
+        fetch: fetchFn as never,
+        stream: false,
+        autoAck: true,
+      })
+      const ctx = makeCtx()
+      await adapter.executor()(ctx, makeHelpers())
+
+      expect(ctx._stored.thoughts).toHaveLength(1)
+      expect(ctx._stored.thoughts[0].content.toString()).toBe('legacy thought')
+      expect(ctx._stored.thoughts[0].id).toBe('resp-reason:thought')
+    })
+
+    it('collapses identical reasoning + reasoning_content into a single thought', async () => {
+      const fetchFn = vi.fn(async () =>
+        nonStreamingWithReasoning({ reasoning: 'same text', reasoning_content: 'same text' })
+      )
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: 'm',
+        fetch: fetchFn as never,
+        stream: false,
+        autoAck: true,
+      })
+      const ctx = makeCtx()
+      await adapter.executor()(ctx, makeHelpers())
+
+      expect(ctx._stored.thoughts).toHaveLength(1)
+      expect(ctx._stored.thoughts[0].content.toString()).toBe('same text')
+      expect(ctx._stored.thoughts[0].id).toBe('resp-reason:thought')
+    })
+
+    it('emits two thoughts when reasoning and reasoning_content diverge', async () => {
+      const fetchFn = vi.fn(async () =>
+        nonStreamingWithReasoning({ reasoning: 'first trace', reasoning_content: 'second trace' })
+      )
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: 'm',
+        fetch: fetchFn as never,
+        stream: false,
+        autoAck: true,
+      })
+      const ctx = makeCtx()
+      await adapter.executor()(ctx, makeHelpers())
+
+      expect(ctx._stored.thoughts).toHaveLength(2)
+      // Default precedence is reasoning-first.
+      expect(ctx._stored.thoughts[0].id).toBe('resp-reason:thought:reasoning')
+      expect(ctx._stored.thoughts[0].content.toString()).toBe('first trace')
+      expect(ctx._stored.thoughts[1].id).toBe('resp-reason:thought:reasoning_content')
+      expect(ctx._stored.thoughts[1].content.toString()).toBe('second trace')
+    })
+
+    it('honors a reasoning_content-first precedence override', async () => {
+      const fetchFn = vi.fn(async () =>
+        nonStreamingWithReasoning({ reasoning: 'first trace', reasoning_content: 'second trace' })
+      )
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: 'm',
+        fetch: fetchFn as never,
+        stream: false,
+        autoAck: true,
+        reasoningFieldPrecedence: ['reasoning_content', 'reasoning'],
+      })
+      const ctx = makeCtx()
+      await adapter.executor()(ctx, makeHelpers())
+
+      expect(ctx._stored.thoughts).toHaveLength(2)
+      // Override flips ordering: reasoning_content surfaces first.
+      expect(ctx._stored.thoughts[0].id).toBe('resp-reason:thought:reasoning_content')
+      expect(ctx._stored.thoughts[0].content.toString()).toBe('second trace')
+      expect(ctx._stored.thoughts[1].id).toBe('resp-reason:thought:reasoning')
+    })
+
+    it('reads only the listed field when precedence is a single element', async () => {
+      const fetchFn = vi.fn(async () =>
+        nonStreamingWithReasoning({ reasoning: 'visible', reasoning_content: 'ignored' })
+      )
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: 'm',
+        fetch: fetchFn as never,
+        stream: false,
+        autoAck: true,
+        reasoningFieldPrecedence: ['reasoning'],
+      })
+      const ctx = makeCtx()
+      await adapter.executor()(ctx, makeHelpers())
+
+      expect(ctx._stored.thoughts).toHaveLength(1)
+      expect(ctx._stored.thoughts[0].content.toString()).toBe('visible')
+      expect(ctx._stored.thoughts[0].id).toBe('resp-reason:thought')
+    })
+
+    it('emits no thought when no reasoning field is present', async () => {
+      const fetchFn = vi.fn(async () => nonStreamingWithReasoning({}))
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: 'm',
+        fetch: fetchFn as never,
+        stream: false,
+        autoAck: true,
+      })
+      const ctx = makeCtx()
+      const helpers = makeHelpers()
+      await adapter.executor()(ctx, helpers)
+
+      expect(ctx._stored.thoughts).toHaveLength(0)
+      expect(helpers._events.filter((e) => e.kind === 'thought')).toHaveLength(0)
+    })
+  })
+
+  describe('streaming', () => {
+    it('streams the `reasoning` field and persists one thought', async () => {
+      const fetchFn = vi.fn(async () =>
+        streamingWithReasoning([{ reasoning: 'think ' }, { reasoning: 'more' }])
+      )
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: 'm',
+        fetch: fetchFn as never,
+        stream: true,
+        autoAck: true,
+      })
+      const ctx = makeCtx()
+      const helpers = makeHelpers()
+      await adapter.executor()(ctx, helpers)
+
+      expect(ctx._stored.thoughts).toHaveLength(1)
+      expect(ctx._stored.thoughts[0].content.toString()).toBe('think more')
+      const thoughtEvents = helpers._events.filter((e) => e.kind === 'thought')
+      expect(thoughtEvents.length).toBeGreaterThan(0)
+      expect(
+        thoughtEvents.some((e) => (e.payload as { isComplete?: boolean }).isComplete === true)
+      ).toBe(true)
+    })
+
+    it('collapses identical streamed reasoning + reasoning_content into one thought', async () => {
+      const fetchFn = vi.fn(async () =>
+        streamingWithReasoning([
+          { reasoning: 'abc', reasoning_content: 'abc' },
+          { reasoning: 'def', reasoning_content: 'def' },
+        ])
+      )
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: 'm',
+        fetch: fetchFn as never,
+        stream: true,
+        autoAck: true,
+      })
+      const ctx = makeCtx()
+      await adapter.executor()(ctx, makeHelpers())
+
+      expect(ctx._stored.thoughts).toHaveLength(1)
+      expect(ctx._stored.thoughts[0].content.toString()).toBe('abcdef')
+    })
+
+    it('persists two thoughts when streamed reasoning fields diverge', async () => {
+      const fetchFn = vi.fn(async () =>
+        streamingWithReasoning([
+          { reasoning: 'alpha', reasoning_content: 'beta' },
+          { reasoning: '-1', reasoning_content: '-2' },
+        ])
+      )
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: 'm',
+        fetch: fetchFn as never,
+        stream: true,
+        autoAck: true,
+      })
+      const ctx = makeCtx()
+      const helpers = makeHelpers()
+      await adapter.executor()(ctx, helpers)
+
+      expect(ctx._stored.thoughts).toHaveLength(2)
+      const byContent = ctx._stored.thoughts.map((t) => t.content.toString()).sort()
+      expect(byContent).toEqual(['alpha-1', 'beta-2'])
+      // Both fields streamed live as distinct thought streams.
+      const thoughtIds = new Set(
+        helpers._events.filter((e) => e.kind === 'thought').map((e) => e.id)
+      )
+      expect(thoughtIds.size).toBeGreaterThanOrEqual(2)
+    })
   })
 })
+
+// ─── Live API matrix (gated, real e2e) ─────────────────────────────────────────
+//
+// One row per real model behind an OpenAI-Chat-Completions-compatible endpoint. Each row is gated
+// on its own `TEST_OPENAI_<PREFIX>_API_KEY`; absent env → the whole describe block is skipped, so
+// these are CI-safe and only run when a key is supplied. Populate `.env.test` (gitignored; see
+// `.env.test.example`) and run under the node project:
+//   set -a && source .env.test && set +a && \
+//   pnpm vitest run tests/unit/batteries/llm/openai_chat_completions/adapter.cross.spec.ts --project node
+//
+// `expectsReasoning` records the OBSERVED behavior of each model behind its endpoint — not a
+// capability claim. Reasoning is not part of the OpenAI Chat Completions spec, so whether a thought
+// surfaces depends on the serving stack, not just the model: a model can "think" yet have its
+// reasoning embedded inline (`<think>…</think>` in content) or suppressed rather than split into a
+// `reasoning` / `reasoning_content` field. The matrix below was calibrated against the live load
+// balancer; rows marked `false` still exercise the message + ack path across providers.
+//
+// `reasoningEffort` is the passthrough `reasoning_effort` request-body field. On these endpoints it
+// is what turns thinking on (the native `think` param is not honored on `/v1`). It is per-row, not
+// global, because some routes (e.g. the gemini-2.5-pro backend) HTTP-error when it is supplied.
+interface LiveModel {
+  label: string
+  envPrefix: string
+  model: string
+  expectsReasoning: boolean
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high'
+}
+
+const MODEL_MATRIX: LiveModel[] = [
+  // Surfaces reasoning_content once reasoning_effort enables thinking.
+  {
+    label: 'claude-haiku-4-5',
+    envPrefix: 'TEST_OPENAI_CLAUDE_HAIKU_4_5',
+    model: 'claude-haiku-4-5',
+    expectsReasoning: true,
+    reasoningEffort: 'medium',
+  },
+  // Surfaces reasoning_content with reasoning_effort (the gemini-2.5-pro route did not).
+  {
+    label: 'gemini-3.5-flash',
+    envPrefix: 'TEST_OPENAI_GEMINI_3_5_FLASH',
+    model: 'gemini-3.5-flash',
+    expectsReasoning: true,
+    reasoningEffort: 'medium',
+  },
+  // The gemma4:31b route splits thinking into reasoning_content; the a4b route kept it inline.
+  {
+    label: 'gemma4',
+    envPrefix: 'TEST_OPENAI_GEMMA4',
+    model: 'gemma4:31b',
+    expectsReasoning: true,
+    reasoningEffort: 'medium',
+  },
+  // Same family via Ollama, which DOES split thinking into the `reasoning` field.
+  {
+    label: 'gemma4-workstation',
+    envPrefix: 'TEST_OPENAI_GEMMA4_WORKSTATION',
+    model: 'gemma4:12b-mlx',
+    expectsReasoning: true,
+    reasoningEffort: 'medium',
+  },
+  {
+    label: 'deepseek-v4-flash',
+    envPrefix: 'TEST_OPENAI_DEEPSEEK_V4_FLASH',
+    model: 'deepseek-v4-flash',
+    expectsReasoning: true,
+    reasoningEffort: 'medium',
+  },
+  {
+    label: 'glm-5.1',
+    envPrefix: 'TEST_OPENAI_GLM_5_1',
+    model: 'glm-5.1',
+    expectsReasoning: true,
+    reasoningEffort: 'medium',
+  },
+  {
+    label: 'gpt-oss:20b',
+    envPrefix: 'TEST_OPENAI_GPT_OSS_20B',
+    model: 'gpt-oss:20b',
+    expectsReasoning: true,
+    reasoningEffort: 'medium',
+  },
+  {
+    label: 'kimi-k2.6',
+    envPrefix: 'TEST_OPENAI_KIMI_K2_6',
+    model: 'kimi-k2.6',
+    expectsReasoning: true,
+    reasoningEffort: 'medium',
+  },
+]
+
+// A prompt that genuinely REQUIRES multi-step reasoning so thinking-capable models populate a
+// reasoning field. A trivial question (e.g. "17 + 26") is not enough: some models (observed with
+// gemini-3.5-flash streaming) skip the reasoning channel entirely when the answer is obvious, even
+// with reasoning_effort set. The classic "bat and ball" puzzle reliably elicits a chain-of-thought
+// while keeping the final answer short to assert on.
+const REASONING_PROMPT =
+  'A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. ' +
+  'How much does the ball cost? Think step by step, then give only the final amount.'
+
+const envFor = (prefix: string): { apiKey: string; baseURL: string | undefined } | undefined => {
+  if (typeof process === 'undefined') return undefined
+  const apiKey = process.env?.[`${prefix}_API_KEY`]
+  if (!apiKey) return undefined
+  return { apiKey, baseURL: process.env?.[`${prefix}_BASE_URL`] || undefined }
+}
+
+// These tests hit a real load balancer over the network, so a small retry absorbs genuinely
+// transient I/O blips (connection resets, momentary backend hiccups). Per Vitest guidance this is a
+// bandage for flaky external I/O, not a substitute for correctness — the deterministic field-parsing
+// behavior is fully covered by the fetch-stubbed `reasoningFieldPrecedence` suite above.
+const LIVE_RETRY = 2
+
+for (const m of MODEL_MATRIX) {
+  const env = envFor(m.envPrefix)
+  describe.skipIf(!env)(`OpenAIChatCompletionsAdapter — live: ${m.label}`, () => {
+    const apiKey = env?.apiKey ?? ''
+    const baseURL = env?.baseURL
+
+    it(
+      'non-streaming: persists a message, acks, and surfaces reasoning when expected',
+      { retry: LIVE_RETRY },
+      async () => {
+        const adapter = new OpenAIChatCompletionsAdapter({
+          model: m.model,
+          apiKey,
+          ...(baseURL ? { baseURL } : {}),
+          stream: false,
+          autoAck: true,
+          ...(m.reasoningEffort ? { reasoning_effort: m.reasoningEffort } : {}),
+        })
+        const ctx = makeCtx({
+          systemPrompt: 'You are a terse assistant.',
+          turnMessages: [makeMessage({ role: 'user', content: REASONING_PROMPT })],
+        })
+        const helpers = makeHelpers()
+        await adapter.executor()(ctx, helpers)
+
+        expect(ctx._stored.messages.length).toBeGreaterThan(0)
+        expect((ctx._stored.messages[0].content?.toString() ?? '').length).toBeGreaterThan(0)
+        expect(ctx.ack).toHaveBeenCalledTimes(1)
+
+        if (m.expectsReasoning) {
+          const thoughtEvents = helpers._events.filter((e) => e.kind === 'thought')
+          expect(thoughtEvents.length).toBeGreaterThan(0)
+          expect(ctx._stored.thoughts.length).toBeGreaterThan(0)
+          expect((ctx._stored.thoughts[0].content.toString() ?? '').length).toBeGreaterThan(0)
+        }
+      }
+    )
+
+    it(
+      'streaming: persists a message, acks, and surfaces reasoning when expected',
+      { retry: LIVE_RETRY },
+      async () => {
+        const adapter = new OpenAIChatCompletionsAdapter({
+          model: m.model,
+          apiKey,
+          ...(baseURL ? { baseURL } : {}),
+          stream: true,
+          autoAck: true,
+          ...(m.reasoningEffort ? { reasoning_effort: m.reasoningEffort } : {}),
+        })
+        const ctx = makeCtx({
+          systemPrompt: 'You are a terse assistant.',
+          turnMessages: [makeMessage({ role: 'user', content: REASONING_PROMPT })],
+        })
+        const helpers = makeHelpers()
+        await adapter.executor()(ctx, helpers)
+
+        expect(ctx._stored.messages.length).toBeGreaterThan(0)
+        expect((ctx._stored.messages[0].content?.toString() ?? '').length).toBeGreaterThan(0)
+        const messageEvents = helpers._events.filter((e) => e.kind === 'message')
+        expect(messageEvents.length).toBeGreaterThan(0)
+        expect(ctx.ack).toHaveBeenCalledTimes(1)
+
+        if (m.expectsReasoning) {
+          const thoughtEvents = helpers._events.filter((e) => e.kind === 'thought')
+          expect(thoughtEvents.length).toBeGreaterThan(0)
+          expect(
+            thoughtEvents.some((e) => (e.payload as { isComplete?: boolean }).isComplete === true)
+          ).toBe(true)
+          expect(ctx._stored.thoughts.length).toBeGreaterThan(0)
+        }
+      }
+    )
+  })
+}
 
 describe('OpenAIChatCompletionsAdapter — tool_choice + forged artifact-tools guard', () => {
   // A forged artifact-query tool is identified by `ephemeral: true`. The simplest way

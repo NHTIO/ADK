@@ -5,6 +5,32 @@ All notable changes to `@nhtio/adk` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2026-06-04
+
+### Fixed
+
+- **LLM batteries now surface reasoning from providers that use the `reasoning` field.** The OpenAI
+  and WebLLM Chat Completions batteries read only `reasoning_content`, so thinking output from
+  endpoints that emit `reasoning` (Ollama's `/v1`, post-rename vLLM, OpenRouter) produced **no**
+  thought events in either streaming or non-streaming mode. Reasoning is not part of OpenAI's
+  official Chat Completions spec, so OpenAI-compatible providers disagree on the field name; both
+  batteries now read `reasoning` and `reasoning_content` across both the streaming delta and
+  non-streaming message shapes. Verified live against a per-model matrix of real endpoints
+  (claude-haiku-4-5, gemini-3.5-flash, gemma4, deepseek-v4-flash, glm-5.1, gpt-oss:20b, kimi-k2.6,
+  and a workstation Ollama tag).
+
+### Added
+
+- **`reasoningFieldPrecedence` option on the Chat Completions batteries.** An ordered, de-duplicating
+  control over which provider reasoning field wins. When more than one listed field is present with
+  identical content (or only one is present) a single thought is emitted, attributed to the
+  highest-precedence field; when they diverge, each surfaces as its own thought rather than silently
+  dropping one (in streaming mode both stream live and are de-duplicated by content at persistence).
+  Defaults to `['reasoning', 'reasoning_content']`. A typed `reasoning` field was added to the
+  `ChatCompletionsChunkDelta` and `ChatCompletionsResponseMessage` wire shapes, and the new
+  `ReasoningField` / `ReasoningFieldPrecedence` / `ReasoningExtract` types plus the
+  `extractReasoningFields` helper are exported from both batteries.
+
 ## 2026-06-03
 
 ### Changed

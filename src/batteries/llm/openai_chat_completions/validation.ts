@@ -30,6 +30,13 @@ const bucketOrderSchema = validator
   .unique()
   .default(['standingInstructions', 'memories', 'retrievables', 'timeline'])
 
+const reasoningFieldPrecedenceSchema = validator
+  .array()
+  .items(validator.string().valid('reasoning', 'reasoning_content'))
+  .unique()
+  .min(1)
+  .default(['reasoning', 'reasoning_content'])
+
 const tokenEncodingSchema = validator
   .alternatives(
     validator
@@ -238,6 +245,7 @@ export const openAIChatCompletionsOptionsSchema = validator
       .default('all-self'),
     tokenEncoding: tokenEncodingSchema,
     replayCompatibility: validator.array().items(validator.string().min(1)).default([]),
+    reasoningFieldPrecedence: reasoningFieldPrecedenceSchema,
     helpers: helpersSchema.optional(),
     spoolStore: byteStoreSchema.optional(),
     strictToolChoice: validator.boolean().default(false),

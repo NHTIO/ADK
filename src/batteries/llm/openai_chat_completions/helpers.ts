@@ -46,12 +46,50 @@ import type {
   UntrustedContentAttrs,
   ChatCompletionsHelpers,
   UnsupportedMediaPolicy,
+  ReasoningField,
+  ReasoningFieldPrecedence,
+  ReasoningExtract,
 } from './types'
 
 // ─── XML attribute escaping ───────────────────────────────────────────────────
 
 const escapeXmlAttribute = (value: string): string =>
   value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+// ─── extractReasoningFields ───────────────────────────────────────────────────
+
+/**
+ * Pulls model reasoning/thinking text out of a Chat Completions response message or stream delta,
+ * reading every wire field named in `precedence` that carries a non-empty string.
+ *
+ * @remarks
+ * Reasoning is not part of OpenAI's official Chat Completions spec, so OpenAI-compatible providers
+ * disagree on the field name (`reasoning` for Ollama and current vLLM; `reasoning_content` for
+ * legacy vLLM and DeepSeek). This reads the union, in `precedence` order, and de-duplicates by
+ * content value: a field whose text exactly matches one already kept is dropped.
+ *
+ * The result length encodes the emission rule the callers follow:
+ * - `0` — no reasoning present.
+ * - `1` — a single thought (covers "only one field present" AND "several present but identical").
+ * - `≥2` — divergent fields; each surfaces as its own thought rather than silently dropping one.
+ *
+ * @param src - The response `message` or stream `delta` to read from.
+ * @param precedence - Ordered, de-duplicated field names to read (see `reasoningFieldPrecedence`).
+ * @returns The present, content-deduplicated reasoning traces in precedence order.
+ */
+export const extractReasoningFields = (
+  src: Partial<Record<ReasoningField, string | null | undefined>> | undefined,
+  precedence: ReasoningFieldPrecedence
+): ReasoningExtract[] => {
+  const out: ReasoningExtract[] = []
+  for (const field of precedence) {
+    const value = src?.[field]
+    if (typeof value !== 'string' || value.length === 0) continue
+    if (out.some((e) => e.content === value)) continue
+    out.push({ field, content: value })
+  }
+  return out
+}
 
 // ─── descriptionToChatCompletionsJsonSchema ───────────────────────────────────
 
