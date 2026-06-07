@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Importable ESLint plugin (`@nhtio/adk/eslint`).** The harness's documented contracts are now
+  machine-checkable: a flat-config plugin that flags footguns the TypeScript compiler cannot see
+  because they live in runtime validators or conventions, not types. Five rules ship —
+  `require-validator-any-required` (a `validator.any()` chain with no explicit
+  `.required()`/`.optional()`/`.default()`/`.forbidden()` silently admits null/undefined),
+  `thought-payload-requires-replay-tag` (a `Thought` with a vendor `payload` but no
+  `replayCompatibility` can never be safely replayed), `token-encoding-requires-context-window` (a
+  Chat Completions adapter that counts tokens with no budget never runs its overflow guard),
+  `artifact-tool-forbids-artifact-constructor` (an `ArtifactTool` that wraps another artifact
+  recurses forever), and `no-model-in-tool-handler` (a model call inside a tool handler hides an
+  unmanaged dispatch — unless the handler runs its own scoped sub-agent via `new TurnRunner(...)` or
+  `DispatchRunner.dispatch(...)`). Import the assembled plugin
+  from `@nhtio/adk/eslint` (or `adk.configs.recommended` for all five), or individual rules from
+  `@nhtio/adk/eslint/rules/<name>`. `eslint` and `@typescript-eslint/utils` are **optional peers** —
+  installed only by consumers who lint with the plugin. Rules are report-only with inline
+  `eslint-disable` carve-outs. See the new **Developer Tools** docs section, which also now houses
+  the ADK Assembly MCP guide.
+
 - **Vector conformance harness is now public (`@nhtio/adk/batteries/vector/conformance`).** The
   `runVectorStoreConformance` suite (plus `stubEncoder` / `paddedStubEncoder`) that the 29 shipped
   adapters test against is now an exported, deep-import-only subpath, so anyone writing their own

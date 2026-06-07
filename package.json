@@ -68,6 +68,7 @@
     "@orama/orama": "^3.1.18",
     "@pinecone-database/pinecone": "^7.2.0",
     "@qdrant/js-client-rest": "^1.18.0",
+    "@typescript-eslint/utils": "^8.0.0",
     "@zilliz/milvus2-sdk-node": "^3.0.3",
     "apache-arrow": "^18.1.0",
     "arangojs": "^10.3.1",
@@ -77,6 +78,7 @@
     "chrono-node": "^2.0.0",
     "couchbase": "^4.7.0",
     "diff": "^9.0.0",
+    "eslint": "^9.0.0",
     "evaluatex": "^2.2.0",
     "fastest-levenshtein": "^1.0.0",
     "flydrive": "^2.0.0",
@@ -108,6 +110,12 @@
       "optional": true
     },
     "@duckdb/node-api": {
+      "optional": true
+    },
+    "@typescript-eslint/utils": {
+      "optional": true
+    },
+    "eslint": {
       "optional": true
     },
     "@lancedb/lancedb": {
@@ -247,6 +255,8 @@
     "@types/pg": "^8.20.0",
     "@types/source-map-support": "^0.5.10",
     "@types/unist": "^3.0.3",
+    "@typescript-eslint/rule-tester": "^8.59.4",
+    "@typescript-eslint/utils": "^8.59.4",
     "@vitest/browser-playwright": "^4.1.7",
     "@vitest/coverage-v8": "^4.1.7",
     "@vueuse/core": "^14.3.0",
