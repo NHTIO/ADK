@@ -568,7 +568,7 @@ export class WebLLMChatCompletionsAdapter {
         if (v === undefined) continue
         ;(body as Record<string, unknown>)[k] = v
       }
-      const toolsArr = mergedRegistry.all()
+      const toolsArr = mergedRegistry.visible()
       if (toolsArr.length > 0) {
         body.tools = resolvedHelpers.toolsToChatCompletionsTools(toolsArr, {
           descriptionToChatCompletionsJsonSchema:

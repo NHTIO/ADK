@@ -72,19 +72,22 @@ export interface SpoolReader {
  * and `lineCount` present as callable properties. Arity is not enforced — implementations may add
  * optional parameters beyond the contract.
  */
-export const spoolReaderSchema = validator.any().custom((value, helpers) => {
-  if (
-    value !== null &&
-    value !== undefined &&
-    typeof (value as any).line === 'function' &&
-    typeof (value as any).byteLength === 'function' &&
-    typeof (value as any).lineCount === 'function' &&
-    typeof (value as any).readAll === 'function'
-  ) {
-    return value as SpoolReader
-  }
-  return helpers.error('any.invalid')
-})
+export const spoolReaderSchema = validator
+  .any()
+  .required()
+  .custom((value, helpers) => {
+    if (
+      value !== null &&
+      value !== undefined &&
+      typeof (value as any).line === 'function' &&
+      typeof (value as any).byteLength === 'function' &&
+      typeof (value as any).lineCount === 'function' &&
+      typeof (value as any).readAll === 'function'
+    ) {
+      return value as SpoolReader
+    }
+    return helpers.error('any.invalid')
+  })
 
 /**
  * Returns `true` if `value` implements the {@link SpoolReader} interface.

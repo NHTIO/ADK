@@ -1,7 +1,11 @@
 allowBuilds:
+  better-sqlite3: true
   core-js-pure: true
+  couchbase: true
   es5-ext: true
   esbuild: true
+  hnswlib-node: true
+  oracledb: true
   protobufjs: true
   sharp: true
 

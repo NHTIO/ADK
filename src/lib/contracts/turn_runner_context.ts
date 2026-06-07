@@ -74,6 +74,7 @@ export const turnContextSchema = validator
         validator.function().instance(AbortController as any)
       )
       .required(),
+    // eslint-disable-next-line adk/require-validator-any-required -- map value type-arg: stash holds arbitrary values; disposition is set by .default({}) on the object
     stash: validator.object().pattern(validator.string(), validator.any()).default({}),
     systemPrompt: Tokenizable.schema.required(),
     standingInstructions: validator.array().items(Tokenizable.schema).default([]),

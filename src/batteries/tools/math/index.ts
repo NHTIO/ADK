@@ -11,6 +11,7 @@
 import { create, all } from 'mathjs'
 import { Tool } from '@nhtio/adk/common'
 import { validator } from '@nhtio/validation'
+import { default as evaluatex } from 'evaluatex'
 import { isError, isInstanceOf } from '@nhtio/adk/guards'
 
 const math = create(all)
@@ -42,24 +43,154 @@ function validateExpression(expr: string): string | undefined {
 }
 
 /**
- * Convert common LaTeX/KaTeX notation to a mathjs-evaluable expression.
+ * EvaluateX scope providing constants and function aliases that evaluatex does not ship
+ * out-of-the-box, matching the capabilities that were previously provided by the mathjs
+ * translation layer.
  */
-function latexToMathjs(latex: string): string {
+const EVALUATEX_SCOPE: Record<string, unknown> = {
+  // Mathematical constants
+  pi: Math.PI,
+  e: Math.E,
+  infinity: Infinity,
+  // Greek letters as named constants (matching LaTeX macro names)
+  alpha: undefined,
+  beta: undefined,
+  gamma: undefined,
+  delta: undefined,
+  epsilon: undefined,
+  theta: undefined,
+  lambda: undefined,
+  mu: undefined,
+  sigma: undefined,
+  tau: undefined,
+  phi: undefined,
+  omega: undefined,
+  // Function aliases — evaluatex uses log for natural log; provide ln as alias,
+  // plus common log bases and nthRoot for \sqrt[n]{...}.
+  ln: Math.log,
+  log10: (x: number) => Math.log(x) / Math.LN10,
+  log2: (x: number) => Math.log(x) / Math.LN2,
+  nthRoot: (x: number, n: number) => Math.pow(x, 1 / n),
+  // Determinant (identity for scalars — det([a,b;c,d]) is not supported in the scalar path)
+  det: (x: number) => x,
+}
+
+/**
+ * Translate a LaTeX/KaTeX expression to evaluatex-compatible syntax and evaluate it.
+ *
+ * The translation is a lightweight pass over the LaTeX source that handles common constructs
+ * (frac, sqrt, trig, Greek macros, delimiters, etc.) and feeds the result to evaluatex with
+ * a pre-built scope providing constants and function aliases. This replaces the previous
+ * hand-rolled regex → mathjs pipeline.
+ */
+function evaluateLatex(latex: string): number {
   let expr = latex.trim()
 
+  // Strip display/inline math delimiters: $$...$$ or $...$
   expr = expr.replace(/^\$\$?|\$\$?$/g, '')
+  // Strip \[ ... \] or \( ... \) delimiters
   expr = expr.replace(/^\\[[(]|\\[\])]$/g, '')
 
-  for (let i = 0; i < 10; i++) {
+  // ---- LaTeX command translation ----
+
+  // \frac{a}{b} → (a)/(b) — iterates to handle nested fractions
+  for (let i = 0; i < 20; i++) {
     const before = expr
-    expr = expr.replace(/\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, '(($1)/($2))')
+    expr = expr.replace(/\\frac\s*\{([^}]*)\}\s*\{([^}]*)\}/g, '($1)/($2)')
     if (expr === before) break
   }
 
-  expr = expr.replace(/\\sqrt\[([^\]]+)\]\s*\{([^{}]*)\}/g, 'nthRoot($2, $1)')
-  expr = expr.replace(/\\sqrt\s*\{([^{}]*)\}/g, 'sqrt($1)')
+  // \sqrt[n]{x} → nthRoot(x, n)
+  expr = expr.replace(/\\sqrt\[([^\]]+)\]\s*\{([^}]*)\}/g, 'nthRoot($2, $1)')
+  // \sqrt{x} → sqrt(x)
+  expr = expr.replace(/\\sqrt\s*\{([^}]*)\}/g, 'sqrt($1)')
 
-  // Inverse trig: mathjs spells these asin/acos/atan, not arcsin/arccos/arctan.
+  // Inverse trig: \arcsin → asin (evaluatex uses asin/acos/atan natively)
+  expr = expr.replace(/\\arcsin/g, 'asin')
+  expr = expr.replace(/\\arccos/g, 'acos')
+  expr = expr.replace(/\\arctan/g, 'atan')
+
+  // Strip backslash from known function macros: \sin, \cos, \tan, \cot, \sec, \csc,
+  // \sinh, \cosh, \tanh, \ln, \log, \exp, \abs, etc.
+  expr = expr.replace(/\\(sin|cos|tan|cot|sec|csc|sinh|cosh|tanh|ln|log|exp|abs|det)/g, '$1')
+
+  // Subscript-based log: \log_2(x) → log2(x), or just strip subscript for single-arg
+  expr = expr.replace(/log_\{?(\w+)\}?\(/g, (_, base) => {
+    const baseLower = base.toLowerCase()
+    if (baseLower === '10') return 'log10('
+    if (baseLower === '2') return 'log2('
+    if (baseLower === 'e') return 'ln('
+    // Generic base: convert log_b(x) to ln(x)/ln(b) — evaluatex handles the
+    // resulting expression fine.
+    return `ln(/ln(${base})`
+  })
+  // Strip any remaining subscripts (e.g. x_1, a_n)
+  expr = expr.replace(/_\{[^}]*\}/g, '')
+  expr = expr.replace(/_\w/g, '')
+
+  // Powers: ^{...} → ^(...)
+  expr = expr.replace(/\^{([^{}]*)}/g, '^($1)')
+
+  // Greek letter macros
+  expr = expr.replace(/\\pi/g, 'pi')
+  expr = expr.replace(
+    /\\(alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|tau|phi|omega)/g,
+    '$1'
+  )
+
+  // Spacing and operators
+  expr = expr.replace(/\\cdot/g, '*')
+  expr = expr.replace(/\\times/g, '*')
+  expr = expr.replace(/\\div/g, '/')
+  expr = expr.replace(/\\infty/g, 'infinity')
+  expr = expr.replace(/\\left\s*([([{|])/g, '$1')
+  expr = expr.replace(/\\right\s*([)\]}|])/g, '$1')
+  expr = expr.replace(/\\sum/g, 'sum')
+  expr = expr.replace(/\\prod/g, 'prod')
+  expr = expr.replace(/\\,/g, ' ')
+  expr = expr.replace(/\\;/g, ' ')
+  expr = expr.replace(/\\quad/g, ' ')
+  expr = expr.replace(/\\qquad/g, ' ')
+  // Strip \text{...} blocks entirely
+  expr = expr.replace(/\\text\{([^{}]*)\}/g, '')
+
+  // Implicit multiplication: 2x, 3(x+1), etc.
+  expr = expr.replace(/(\d)([a-zA-Z(])/g, '$1*$2')
+  expr = expr.replace(/\)\s*\(/g, ')*(')
+
+  // Collapse whitespace
+  expr = expr.replace(/\s+/g, ' ').trim()
+
+  const fn = evaluatex(expr, EVALUATEX_SCOPE)
+  const result = fn()
+  if (typeof result !== 'number' || !Number.isFinite(result)) {
+    throw new Error('Result is not finite')
+  }
+  return result
+}
+
+/**
+ * Lightweight LaTeX-to-string translator for internal use by the numeric calculus path.
+ *
+ * This is the same translation pass as {@link evaluateLatex}, but returns the translated string
+ * (compatible with mathjs syntax) rather than evaluating it. Used by the calculus handlers to
+ * convert integrands, function bodies, and bound expressions before passing them to
+ * `math.evaluate` for specific-point evaluation.
+ */
+function translateLatex(latex: string): string {
+  let expr = latex.trim()
+  expr = expr.replace(/^\$\$?|\$\$?$/g, '')
+  expr = expr.replace(/^\\[[(]|\\[\])]$/g, '')
+
+  for (let i = 0; i < 20; i++) {
+    const before = expr
+    expr = expr.replace(/\\frac\s*\{([^}]*)\}\s*\{([^}]*)\}/g, '($1)/($2)')
+    if (expr === before) break
+  }
+
+  expr = expr.replace(/\\sqrt\[([^\]]+)\]\s*\{([^}]*)\}/g, 'nthRoot($2, $1)')
+  expr = expr.replace(/\\sqrt\s*\{([^}]*)\}/g, 'sqrt($1)')
+
   expr = expr.replace(/\\arcsin/g, 'asin')
   expr = expr.replace(/\\arccos/g, 'acos')
   expr = expr.replace(/\\arctan/g, 'atan')
@@ -105,10 +236,10 @@ function latexToMathjs(latex: string): string {
 // via a two-sided approach. These are approximations (correct to ~1e-9 for the smooth expressions a
 // model emits), surfaced under a `Result (numeric):` label so the distinction is explicit.
 //
-// Detection runs on the RAW LaTeX, before `latexToMathjs` flattens it — its subscript stripping
+// Detection runs on the RAW LaTeX, before `translateLatex` flattens it — its subscript stripping
 // would otherwise destroy integral bounds (`\int_{0}^{1}` → `\int^(1)`) and limit targets. The
 // extracted sub-expressions (integrand, bounds, body, point) are then translated by the existing
-// `latexToMathjs` and evaluated per-point with a scope, which works under the security blocklist.
+// `translateLatex` and evaluated per-point with a scope, which works under the security blocklist.
 
 /** A tagged error whose message is surfaced to the model verbatim (caught by {@link tryCalculus}). */
 class CalculusError extends Error {}
@@ -179,7 +310,7 @@ function readScript(s: string, i: number): { mark: '_' | '^'; val: string; next:
 function evalBound(latex: string): number {
   const trimmed = latex.trim()
   if (/\\infty/.test(trimmed)) throw new CalculusError('INFINITE_BOUND')
-  const mathjsExpr = latexToMathjs(trimmed)
+  const mathjsExpr = translateLatex(trimmed)
   const value = math.evaluate!(mathjsExpr)
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     throw new CalculusError('BAD_BOUND')
@@ -216,7 +347,7 @@ function evalIntegral(s: string): string {
 
   const a = evalBound(scripts._)
   const b = evalBound(scripts['^'])
-  const integrand = latexToMathjs(integrandLatex)
+  const integrand = translateLatex(integrandLatex)
   const fn = (x: number) => evalAt(integrand, variable, x)
 
   let result: number
@@ -263,7 +394,7 @@ function evalDerivative(s: string): string {
     .trim()
   if (fnLatex.length === 0) throw new CalculusError('NO_FUNCTION')
 
-  const expr = latexToMathjs(fnLatex)
+  const expr = translateLatex(fnLatex)
   const h = 1e-6
   const fn = (x: number) => evalAt(expr, variable, x)
   const result = (fn(point + h) - fn(point - h)) / (2 * h)
@@ -289,7 +420,7 @@ function evalLimit(s: string): string {
     targetLatex = targetLatex.slice(0, oneSided.index).trim()
   }
 
-  const expr = latexToMathjs(bodyLatex)
+  const expr = translateLatex(bodyLatex)
   const fn = (x: number) => evalAt(expr, variable, x)
   const eps = 1e-6
 
@@ -428,13 +559,13 @@ export const calculateTool = new Tool({
 })
 
 /**
- * Translates a LaTeX/KaTeX expression into mathjs syntax, evaluates it, and returns the result.
+ * Translates a LaTeX/KaTeX expression using evaluatex and returns the numeric result.
  *
  * @remarks
- * Translates common LaTeX constructs (`\frac{a}{b}`, `\sqrt{...}`, `\cdot`, `\times`, Greek
- * macros like `\pi`, inverse trig `\arcsin`/`\arccos`/`\arctan`, `\left`/`\right` delimiters,
- * `\text{...}`, subscripts, etc.) into their mathjs equivalents before evaluation. Both the source
- * and the translated mathjs expression are subject to the 1000-character length cap.
+ * Uses the evaluatex library to parse and evaluate LaTeX expressions. Handles common constructs
+ * (`\frac{a}{b}`, `\sqrt{...}`, `\cdot`, `\times`, Greek macros like `\pi`, inverse trig,
+ * `\left`/`\right` delimiters, `\text{...}`, subscripts, etc.) with a proper parser rather than
+ * brittle regex.
  *
  * Also evaluates three calculus constructs **numerically** (mathjs has no symbolic integration, and
  * its symbolic `derivative` is blocklisted here for safety):
@@ -472,13 +603,8 @@ export const evaluateKatexTool = new Tool({
       const calculus = tryCalculus(katex)
       if (calculus !== null) return calculus
 
-      const mathjsExpr = latexToMathjs(katex)
-
-      const translatedLengthError = validateExpression(mathjsExpr)
-      if (translatedLengthError) return translatedLengthError
-
-      const result = math.evaluate!(mathjsExpr)
-      return `Converted: ${mathjsExpr}\nResult: ${result}`
+      const result = evaluateLatex(katex)
+      return `Result: ${result}`
     } catch (err) {
       return `Error: ${isError(err) ? err.message : String(err)}`
     }

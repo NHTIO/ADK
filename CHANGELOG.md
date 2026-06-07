@@ -5,9 +5,227 @@ All notable changes to `@nhtio/adk` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2026-06-07
+
+### Added
+
+- **Vector conformance harness is now public (`@nhtio/adk/batteries/vector/conformance`).** The
+  `runVectorStoreConformance` suite (plus `stubEncoder` / `paddedStubEncoder`) that the 29 shipped
+  adapters test against is now an exported, deep-import-only subpath, so anyone writing their own
+  adapter can prove it against the exact same contract. The subpath imports `vitest`, declared as an
+  **optional peer** (`peerDependenciesMeta`) — install it to run the suite; it is never pulled in by
+  the `@nhtio/adk/batteries/vector` barrel, so a `createVectorStore` consumer takes on no test-runner
+  dependency. See `docs/batteries/vector/custom-adapter.md`.
+
+- **Query-builder grouping callbacks — mix AND and OR.** The `VectorQueryBuilder` filter methods
+  (`.where` / `.andWhere` / `.orWhere` / `.whereNot` / new `.orWhereNot`) now accept a callback that
+  receives a filter-only `FilterBuilder`, so you can express `A AND (B OR C)` and negated groups
+  (`{ not: <group> }`) at any nesting depth — previously the builder could only emit flat DNF. The
+  scalar forms are unchanged (`.whereNot('f', v)` is still `→ ne`). Groups compile to the neutral
+  `FilterGroup` tree; the 6 native filter translators recurse over it and the over-fetch adapters
+  JS-evaluate it. **Chroma** rejects a `not` group with `E_VECTOR_STORE_UNSUPPORTED_FILTER_OPERATOR`
+  (consistent with its existing `exists`/`contains` limits); nested AND/OR works on all 29. See
+  `docs/batteries/vector/query-builder.md`.
+
+### Fixed
+
+- **`.orWhere()` no longer silently drops its branch.** `where(A).where(B).orWhere(C)` previously
+  compiled to `(A AND B) OR (A AND B AND C)`, which collapses to just `(A AND B)` — the `.orWhere(C)`
+  was a no-op. It now correctly yields `(A AND B) OR C`, matching the documented knex semantics.
+
+- **Chroma multi-row filter-scan.** A filter-scan (no `.near*()`) that matched more than one record
+  returned only the first row: the adapter unwrapped `query()`'s nested result arrays on the `get()`
+  path too. Fixed to unwrap only on the similarity path.
+
+## 2026-06-06
+
+### Added
+
+- **Cloudflare Vectorize adapter (`@nhtio/adk/batteries/vector/cloudflare`).** Managed, serverless
+  vector store over the Vectorize **V2 REST API** — pure `fetch`, no driver/peer dependency. A
+  logical collection maps to a Vectorize index (`indexNamePrefix` isolates per use). Upserts use
+  the NDJSON multipart endpoint (field `vectors`); query/get/delete use JSON. Dimensions must be
+  **32–1536**. KNN `score` is recomputed locally from the returned values to the `[0,1]` contract;
+  the document rides in a reserved `__document` metadata key. Native metadata filtering needs
+  pre-created metadata indexes and lacks `$and`/`$or`, so the adapter **over-fetches (topK 50, the
+  service cap when returning values/metadata) and JS-filters** via the neutral `evaluateFilter`
+  for full cross-adapter parity. Cloudflare Vectorize is **aggressively eventually-consistent** —
+  a fresh index takes ~8–34s before its first write is queryable and the query index flaps for
+  seconds after writes/deletes; the adapter settle-polls the query index for stability, and the
+  integration spec additionally uses **vitest `retry`** to ride out the flap deterministically
+  (slow, ~8 min, but green). Managed, so no docker/CI matrix entry (like Pinecone / S3 Vectors).
+  Verified 7/7 conformance against live Cloudflare Vectorize. This also adds an optional
+  `retry`/`timeout` parameter to the shared `runVectorStoreConformance` harness (defaults preserve
+  existing behavior).
+
+- **Oracle 23ai AI Vector Search adapter (`@nhtio/adk/batteries/vector/oracle23ai`).** Each
+  collection is a table with a native `VECTOR(dims, FLOAT32)` column; vectors are bound/read as
+  `Float32Array` via the `oracledb` driver in **thin mode** (no Instant Client). KNN uses
+  `VECTOR_DISTANCE(vec, :q, COSINE|EUCLIDEAN|DOT) ORDER BY … FETCH APPROX FIRST k ROWS ONLY`; the
+  raw distance only orders candidates — the `[0,1]` score is recomputed locally from the stored
+  vector. Metadata is a JSON-string CLOB (read via `fetchInfo` STRING) filtered with the neutral
+  `evaluateFilter`; identifiers are double-quoted and `tablePrefix` isolates collections. Strongly
+  consistent (commit per write). NB: VECTOR columns are rejected in the SYSTEM tablespace — the
+  connecting user must default to a normal tablespace (e.g. USERS) and have CREATE TABLE; the
+  docker `oracle` profile provisions such a user via `APP_USER`. Verified 7/7 conformance ×3
+  against a live Oracle Free 23ai. Closes the Oracle 23ai gap in the Open WebUI minimum-support set.
+
+- **AWS S3 Vectors adapter (`@nhtio/adk/batteries/vector/s3vectors`).** Managed, serverless vector
+  store (no container, like Pinecone). The vector bucket is provisioned out-of-band; a logical
+  collection maps to an **index** inside the bucket (`indexPrefix` isolates per use — index names
+  must be 3–63 chars). KNN via `QueryVectors` (the returned `distance` is converted to the
+  battery's normalized `[0,1]` score — cosine `sim = 1 - distance`); `PutVectors`/`GetVectors`/
+  `DeleteVectors` for upsert/fetch/delete by key; metadata is native JSON with the document under a
+  reserved `__document` key. `topK` is capped at the service max of **100**, so filtered/scan reads
+  over-fetch to that ceiling and JS-filter via the neutral `evaluateFilter` for cross-adapter
+  parity; eventual-consistency settle-polling makes read-after-write deterministic. Metrics:
+  `cosine`/`euclidean` (S3 Vectors has no dot-product — `dot` throws at createCollection). Driver:
+  `@aws-sdk/client-s3vectors` (lazy; credentials from the ambient AWS chain). Verified 7/7
+  conformance ×3 against a live bucket in eu-west-1. Closes the S3 Vector Bucket gap in the Open
+  WebUI minimum-support set.
+
+- **Elasticsearch 8 vector adapter (`@nhtio/adk/batteries/vector/elasticsearch`).** A dedicated
+  adapter for the Elasticsearch 8 dialect — each collection is an index with a `dense_vector`
+  field, and KNN uses ES8's **top-level `knn` search clause** with an optional `filter`. This is
+  distinct from the existing `opensearch` adapter, which speaks OpenSearch's `knn_vector` /
+  `query.knn` dialect (an ES client cannot drive it). The neutral filter tree compiles to ES
+  bool/term/range over `metadata.*` (`.keyword` for strings) via the exported
+  `translateElasticsearchFilter`; writes use `bulk({ refresh: true })` for strong consistency;
+  cosine `_score` (already `(sim+1)/2 ∈ [0,1]`) is normalized defensively. Driver:
+  `@elastic/elasticsearch` (lazy; use the **v8** client against an 8.x server — a v9 client sends a
+  compatibility header an 8.x server rejects). BYO client supported via
+  `connection.client`. Verified 7/7 conformance ×3 against a live Elasticsearch 8.18.
+
+- **Vespa vector adapter (`@nhtio/adk/batteries/vector/vespa`).** Vespa has no runtime
+  collection creation — a collection is a *document type* declared in a deployed **application
+  package**. The adapter holds the package state in memory and rebuilds + redeploys it (via a
+  dependency-free, store-only ZIP writer — no zip lib needed) to the config server's
+  `prepareandactivate` endpoint on each `createCollection`/`dropCollection`, generating
+  `services.xml`, `hosts.xml`, a `validation-overrides.xml` (≤30-day window, for schema-removal /
+  type-change), and a `schemas/<collection>.sd` per collection with an HNSW tensor field. KNN uses
+  a YQL `nearestNeighbor` query with a `closeness` rank profile; filter-scan/delete use YQL +
+  document-API; scores are re-computed locally from the stored vector via `normalizeScore` for the
+  [0,1] contract guarantee (metric maps cosine→angular, dot→dotproduct, euclidean→euclidean). No
+  npm driver — pure HTTP/`fetch`. Metadata is a JSON string field filtered with the neutral
+  evaluator. Verified 7/7 conformance ×3 against a live Vespa.
+
+- **Couchbase vector adapter (`@nhtio/adk/batteries/vector/couchbase`).** Enterprise Edition only —
+  vector search is an EE feature; Community throws "vector typed fields not supported". A logical
+  collection maps to a Couchbase scope.collection. KV operations (upsert/get/remove) are strongly
+  consistent and serve point reads; the scoped FTS vector index is async, so it is settle-polled
+  after writes and used **only** to retrieve the KNN candidate id set — scores are then
+  re-computed locally from the stored vector via `normalizeScore`, guaranteeing the [0,1] contract
+  regardless of the backend metric (cosine/dot_product/l2_norm). Filter-scan, enumerate and
+  delete-by-filter use N1QL with `RequestPlus` for strong reads. `collectionPrefix` isolates
+  collections (avoids per-test FTS-index rebuild churn). Metadata is a JSON string field filtered
+  with the neutral evaluator. Driver: `couchbase`. Cluster/bucket are provisioned non-interactively
+  (REST `clusterInit` + bucket create — see the docker-compose `couchbase` profile's init sidecar);
+  the adapter manages scopes/collections + the FTS vector index. Omitted from the CI matrix (its
+  two-step init can't be expressed as a single service alias); verified 7/7 conformance ×3 against
+  a live Couchbase EE 8.0.
+
 ## 2026-06-05
 
 ### Added
+
+- **MongoDB Atlas Vector Search adapter (`@nhtio/adk/batteries/vector/mongodb`).** Each collection
+  is a MongoDB collection with an Atlas `vectorSearch` index on `vec`; KNN uses the `$vectorSearch`
+  aggregation stage (cosine `vectorSearchScore`, [0,1]). Because the Atlas vector *index* updates
+  asynchronously (~1s) while the document store is strongly consistent, filter-scans / fetch-by-id
+  / delete read-back use a plain `find()` (immediate) and only KNN goes through `$vectorSearch` —
+  with a post-write settle polling until the inserted ids are index-visible. `collectionPrefix`
+  isolates collections (avoids per-test index rebuild churn). Metadata is a JSON string field
+  filtered with the neutral evaluator. Driver: `mongodb`; works against `mongodb/mongodb-atlas-local`
+  or a real Atlas cluster. Verified 7/7 conformance against a live atlas-local.
+
+- **Apache Solr vector adapter (`@nhtio/adk/batteries/vector/solr`).** Dense-vector / kNN query
+  parser (Solr 9+): a collection maps to a Solr core, the adapter ensures a `DenseVectorField`
+  (`vec`) + `document`/`metadata` fields in the core schema, and searches with
+  `{!knn f=vec topK=N}[…]` (cosine score already [0,1]). Metadata is a JSON string field filtered
+  with the neutral filter tree's JS reference evaluator. No driver dependency — plain HTTP/JSON via
+  `fetch`. The target core must already exist (`solr-precreate <core>`); the adapter manages its
+  schema, not the core. Verified 7/7 conformance against a live Solr 9.
+
+- **HNSWLib vector adapter (`@nhtio/adk/batteries/vector/hnswlib`).** Embedded, in-process (no
+  server). Wraps the `hnswlib-node` native ANN index for KNN, paired with a JS sidecar that owns
+  id↔label mapping and the document/metadata records (hnswlib stores vectors only); metadata
+  filtering, filter-scans, projection, and delete are served from the sidecar via the neutral
+  filter tree's JS reference evaluator. Native build must be approved (pnpm-workspace.yaml
+  `allowBuilds`). Verified 7/7 conformance in-process.
+
+- **ArangoDB vector adapter (`@nhtio/adk/batteries/vector/arangodb`).** Each collection is an
+  ArangoDB document collection keyed by `_key`; KNN uses the exact AQL `COSINE_SIMILARITY` /
+  `L2_DISTANCE` functions (no index required, always correct), with the experimental IVF
+  `vector` index created lazily on first upsert for production-scale ANN. Metadata in a JSON
+  string attribute filtered with the neutral filter tree's JS reference evaluator. Driver:
+  `arangojs`. Verified 7/7 conformance against a live ArangoDB 3.12 backend.
+
+- **Neo4j vector adapter (`@nhtio/adk/batteries/vector/neo4j`).** Native vector index (5.13+):
+  each collection is a node label with a `VECTOR INDEX` on `vec`; KNN via
+  `db.index.vector.queryNodes` (cosine score already [0,1]). Metadata is a JSON string property
+  filtered with the neutral filter tree's JS reference evaluator. Upsert via `MERGE`; integer
+  params wrapped with `neo4j.int()`. Driver: `neo4j-driver`. Verified 7/7 conformance against a
+  live Neo4j 5 backend.
+
+- **SurrealDB vector adapter (`@nhtio/adk/batteries/vector/surrealdb`).** Multi-model; each
+  collection is a SurrealDB table storing the vector as an array field, KNN via
+  `vector::similarity::cosine` / `vector::distance::euclidean` ordered appropriately. Metadata in
+  a JSON string field filtered with the neutral filter tree's JS reference evaluator. All queries
+  parameterized (`type::thing`, `$bindings`). Upsert via `UPSERT`. Driver: `surrealdb`. Verified
+  7/7 conformance against a live SurrealDB v2 backend.
+
+- **LanceDB vector adapter (`@nhtio/adk/batteries/vector/lancedb`).** Embedded, no server
+  (file-based, like sqlite-vec/duckdb). Each collection is a Lance table with an explicit Arrow
+  schema (`vec` as `FixedSizeList<Float32>`); KNN via `table.search(vector).distanceType(...)`,
+  metadata in a JSON string column filtered with the neutral filter tree's JS reference evaluator.
+  Upsert via merge-insert on `id`. Drivers: `@lancedb/lancedb` + `apache-arrow` (prebuilt binary,
+  no native compile). Verified 7/7 conformance in-process (temp dir).
+
+- **MariaDB vector adapter (`@nhtio/adk/batteries/vector/mariadb`).** Native `VECTOR(N)` columns
+  (MariaDB 11.7+): vectors written with `VEC_FromText` / read with `VEC_ToText`, KNN via
+  `VEC_DISTANCE_COSINE` / `VEC_DISTANCE_EUCLIDEAN`; metadata in a `JSON` column filtered with the
+  neutral filter tree's JS reference evaluator. SQL backend → transactions + rawSql. Upsert via
+  `ON DUPLICATE KEY UPDATE`. Driver: `mariadb`. Verified 7/7 conformance against a live MariaDB 11.7.
+
+- **Meilisearch vector adapter (`@nhtio/adk/batteries/vector/meilisearch`).** Each collection is a
+  Meilisearch index with a `userProvided` embedder (BYO vectors under `_vectors.default`); KNN via
+  semantic search (`vector` + `hybrid.semanticRatio = 1`), `_rankingScore` maps directly to the
+  [0,1] score contract. Metadata is a JSON string field filtered with the neutral filter tree's JS
+  reference evaluator. Writes await task completion (strongly consistent). Enables the `vectorStore`
+  experimental feature on connect. Driver: `meilisearch`. Verified 7/7 conformance against a live
+  Meilisearch backend.
+
+- **Typesense vector adapter (`@nhtio/adk/batteries/vector/typesense`).** Each collection is a
+  Typesense collection with a native `float[]` vector field (KNN via `vector_query`); metadata is
+  a JSON string field filtered with the neutral filter tree's JS reference evaluator. Native upsert
+  by id; strongly consistent (writes searchable on resolve). Driver: `typesense`. Verified 7/7
+  conformance against a live Typesense backend.
+
+- **Elasticsearch / OpenSearch vector adapter (`@nhtio/adk/batteries/vector/opensearch`).** One
+  adapter for the whole family — they share the kNN `_search` data model. Each collection is an
+  index with a `knn_vector` (HNSW/Lucene) field; the neutral filter tree compiles to a bool-query
+  over `metadata.*` keyword/numeric sub-fields. Writes use `refresh: true` for read-after-write
+  consistency. Driver: `@opensearch-project/opensearch` by default; pass an `@elastic/elasticsearch`
+  client via `connection.client` to target Elasticsearch. Verified 7/7 conformance against a live
+  OpenSearch backend.
+
+- **ClickHouse vector adapter (`@nhtio/adk/batteries/vector/clickhouse`).** Vectors in an
+  `Array(Float32)` column, KNN via `cosineDistance` / `L2Distance` / negative-inner-product
+  ordered ascending; metadata in a JSON `String` column. MergeTree allows duplicate keys, so
+  upsert is delete-then-insert, and writes are made read-after-write consistent with
+  `mutations_sync = 2`. Driver: `@clickhouse/client`. Verified 7/7 conformance against a live
+  ClickHouse backend.
+
+- **DuckDB vector adapter (`@nhtio/adk/batteries/vector/duckdb`).** In-process, no server
+  (like sqlite-vec) — uses the `vss` community extension's `array_*_distance` functions over a
+  `FLOAT[N]` column for KNN, with metadata in a `JSON` column. Driver: `@duckdb/node-api`.
+  Verified 7/7 conformance in-process (`:memory:`).
+
+- **Redis / Valkey vector adapter (`@nhtio/adk/batteries/vector/redis`).** One adapter for the
+  whole Redis family via the RediSearch module (`redis/redis-stack-server`, or any Redis/Valkey
+  with RediSearch loaded). Vectors are stored as FLOAT32 blobs on Redis hashes and searched with
+  `FT.SEARCH ... KNN`; the neutral filter tree compiles to RediSearch query syntax (TAG/NUMERIC).
+  Verified 7/7 conformance against a live RediSearch backend.
 
 - **The `evaluate_katex` math tool now evaluates calculus numerically.** It previously mangled any
   calculus input — `\int_{0}^{1} x dx` had its bounds stripped by the LaTeX flattener and produced a
@@ -26,6 +244,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`evaluate_katex` now maps inverse trig to the correct mathjs names.** `\arcsin`, `\arccos`, and
   `\arctan` were passed through as `arcsin`/`arccos`/`arctan`, which mathjs does not define, so every
   inverse-trig expression errored with `Undefined function`. They now translate to `asin`/`acos`/`atan`.
+
+### Changed
+
+- **Replaced the hand-rolled LaTeX regex parser with evaluatex.** The `evaluate_katex` tool's
+  LaTeX-to-mathjs translator (`latexToMathjs`) used brittle regex substitutions that could not handle
+  nested braces, causing expressions like `\frac{\sqrt{100}}{2}` to produce a Syntax Error.
+  It is replaced by the evaluatex library (v2.2.0, zero deps, ~56KB, works in Node.js and all browsers),
+  which parses LaTeX with a proper recursive parser. The scalar evaluation path now uses evaluatex
+  directly; the numeric calculus path (integrals, derivatives, limits) still uses mathjs for
+  per-point evaluation via a shared lightweight LaTeX-to-string translator. evaluatex is an optional
+  peer dependency, following the existing battery pattern.
+
+- **`ToolRegistry` now supports hidden tools.** A tool can be registered and callable without being
+  immediately visible to the model — hidden state lives on the registry, not the tool. New methods:
+  `hide(...names)`, `unhide(...names)`, `setHidden(...names)`, `clearHidden()`, `visible()`, and
+  `hidden()`. The LLM batteries now read `visible()` instead of `all()` when building the tool
+  definition list, so hidden tools are excluded from the rendered tool list but still resolve when
+  called by name. Hidden state propagates through `ToolRegistry.merge`, and unregistering a tool
+  automatically cleans up its hidden state. This enables discovery patterns where an agent has a
+  tool that enumerates available tools, and the model picks one to call in a subsequent iteration
+  without listing everything upfront.
 
 ## 2026-06-04
 

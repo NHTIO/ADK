@@ -1,0 +1,421 @@
+# Selectively-enabled backends for the vector storage battery's integration tests.
+#
+# Each service is behind a Compose PROFILE so you bring up ONE at a time — this box
+# should never run more than a single vector backend concurrently. Start a backend,
+# export the matching TEST_VECTOR_<NAME>_URL (see .env.test.example), run the suite,
+# then tear it down before starting the next.
+#
+#   docker compose -f docker-compose.vector.yml --profile pgvector up -d
+#   TEST_VECTOR_PGVECTOR_URL=postgres://vector:vector@localhost:5432/vector \
+#     pnpm vitest run tests/functional/batteries/vector/pgvector.integration.node.spec.ts --project node
+#   docker compose -f docker-compose.vector.yml --profile pgvector down -v
+#
+# sqlite-vec needs NO service (file/:memory:) and orama runs in-process — neither is here.
+
+services:
+  # ── pgvector ──────────────────────────────────────────────────────────────
+  pgvector:
+    profiles: ['pgvector']
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: vector
+      POSTGRES_PASSWORD: vector
+      POSTGRES_DB: vector
+    ports:
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U vector -d vector']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # ── Qdrant ────────────────────────────────────────────────────────────────
+  qdrant:
+    profiles: ['qdrant']
+    image: qdrant/qdrant:latest
+    ports:
+      - '6333:6333'
+      - '6334:6334'
+    healthcheck:
+      test: ['CMD-SHELL', 'bash -c ":> /dev/tcp/127.0.0.1/6333" || exit 1']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # ── Chroma ────────────────────────────────────────────────────────────────
+  chroma:
+    profiles: ['chroma']
+    image: chromadb/chroma:latest
+    ports:
+      - '8000:8000'
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:8000/api/v2/heartbeat || exit 1']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # ── Weaviate ──────────────────────────────────────────────────────────────
+  weaviate:
+    profiles: ['weaviate']
+    image: cr.weaviate.io/semitechnologies/weaviate:latest
+    ports:
+      - '8080:8080'
+      - '50051:50051'
+    environment:
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: 'true'
+      PERSISTENCE_DATA_PATH: '/var/lib/weaviate'
+      DEFAULT_VECTORIZER_MODULE: 'none'
+      ENABLE_MODULES: ''
+      QUERY_DEFAULTS_LIMIT: '25'
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:8080/v1/.well-known/ready || exit 1']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # ── Milvus (standalone: bundles its own etcd + local storage) ──────────────
+  milvus:
+    profiles: ['milvus']
+    image: milvusdb/milvus:v2.4.15
+    command: ['milvus', 'run', 'standalone']
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_USE_EMBED: 'true'
+      ETCD_DATA_DIR: '/var/lib/milvus/etcd'
+      ETCD_CONFIG_PATH: '/milvus/configs/embedEtcd.yaml'
+      COMMON_STORAGETYPE: 'local'
+      DEPLOY_MODE: 'STANDALONE'
+    volumes:
+      - ./.milvus-embed-etcd.yaml:/milvus/configs/embedEtcd.yaml
+    ports:
+      - '19530:19530'
+      - '9091:9091'
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:9091/healthz || exit 1']
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 90s
+
+  # ── Redis Stack (RediSearch vector similarity) ────────────────────────────
+  # One adapter serves the whole Redis/Valkey family — RediSearch is the vector
+  # engine. redis-stack-server bundles the module; plain Redis/Valkey would need
+  # the module loaded separately.
+  redis:
+    profiles: ['redis']
+    image: redis/redis-stack-server:latest
+    # Host port 6380 to avoid colliding with a plain local Redis on 6379 (which lacks
+    # the RediSearch module). Point TEST_VECTOR_REDIS_URL at redis://localhost:6380.
+    ports:
+      - '6380:6379'
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli ping | grep -q PONG || exit 1']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # ── ClickHouse (cosineDistance / L2Distance over Array(Float32)) ──────────
+  clickhouse:
+    profiles: ['clickhouse']
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      CLICKHOUSE_USER: vector
+      CLICKHOUSE_PASSWORD: vector
+      CLICKHOUSE_DB: vector
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: '1'
+    ports:
+      - '8123:8123'
+      - '9000:9000'
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:8123/ping || exit 1']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # ── OpenSearch (kNN) ──────────────────────────────────────────────────────
+  # One adapter serves the Elasticsearch/OpenSearch family (shared kNN _search API).
+  # OpenSearch is fully open-source; security disabled for the test single-node.
+  opensearch:
+    profiles: ['opensearch']
+    image: opensearchproject/opensearch:2
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: 'true'
+      DISABLE_INSTALL_DEMO_CONFIG: 'true'
+      OPENSEARCH_JAVA_OPTS: '-Xms512m -Xmx512m'
+      bootstrap.memory_lock: 'true'
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - '9200:9200'
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:9200/_cluster/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+
+  # ── Elasticsearch 8 (dense_vector + top-level knn) ────────────────────────
+  # Distinct from opensearch: ES8 uses `dense_vector` + a top-level `knn` clause. Security
+  # disabled for the test container. Use the @elastic/elasticsearch v8 client (a v9 client sends
+  # a compat header an 8.x server rejects).
+  elasticsearch:
+    profiles: ['elasticsearch']
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.18.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: 'false'
+      ES_JAVA_OPTS: '-Xms512m -Xmx512m'
+    ports:
+      - '9200:9200'
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'curl -fsS http://localhost:9200/_cluster/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+
+  # ── Typesense (native vector search) ──────────────────────────────────────
+  typesense:
+    profiles: ['typesense']
+    image: typesense/typesense:27.1
+    command: '--data-dir /data --api-key=vectortest --enable-cors'
+    tmpfs:
+      - /data
+    ports:
+      - '8108:8108'
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:8108/health || exit 1']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # ── Meilisearch (native vector search) ────────────────────────────────────
+  meilisearch:
+    profiles: ['meilisearch']
+    image: getmeili/meilisearch:v1.12
+    environment:
+      MEILI_MASTER_KEY: vectortest
+      MEILI_NO_ANALYTICS: 'true'
+    ports:
+      - '7700:7700'
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:7700/health || exit 1']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # ── MariaDB (native VECTOR type + VEC_DISTANCE, 11.7+) ────────────────────
+  mariadb:
+    profiles: ['mariadb']
+    image: mariadb:11.7
+    environment:
+      MARIADB_ROOT_PASSWORD: vector
+      MARIADB_DATABASE: vector
+      MARIADB_USER: vector
+      MARIADB_PASSWORD: vector
+    ports:
+      - '3306:3306'
+    healthcheck:
+      test: ['CMD-SHELL', 'healthcheck.sh --connect --innodb_initialized || exit 1']
+      interval: 4s
+      timeout: 4s
+      retries: 30
+
+  # ── SurrealDB (multi-model, native vector::distance + HNSW) ───────────────
+  surrealdb:
+    profiles: ['surrealdb']
+    image: surrealdb/surrealdb:v2
+    command: 'start --user root --pass root --bind 0.0.0.0:8000 memory'
+    ports:
+      - '8000:8000'
+    healthcheck:
+      test: ['CMD-SHELL', '/surreal isready --conn http://localhost:8000 || exit 1']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # ── Neo4j (native vector index, 5.13+) ────────────────────────────────────
+  neo4j:
+    profiles: ['neo4j']
+    image: neo4j:5
+    environment:
+      NEO4J_AUTH: 'neo4j/vectortest'
+      NEO4J_dbms_security_auth__minimum__password__length: '4'
+    ports:
+      - '7474:7474'
+      - '7687:7687'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:7474 || exit 1']
+      interval: 4s
+      timeout: 4s
+      retries: 40
+      start_period: 20s
+
+  # ── ArangoDB (experimental vector index, 3.12.4+) ─────────────────────────
+  arangodb:
+    profiles: ['arangodb']
+    image: arangodb:3.12
+    command: ['arangod', '--experimental-vector-index=true']
+    environment:
+      ARANGO_ROOT_PASSWORD: vectortest
+    ports:
+      - '8529:8529'
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:8529/_api/version --user root:vectortest || exit 1']
+      interval: 4s
+      timeout: 4s
+      retries: 40
+
+  # ── Apache Solr (dense vector / kNN query parser) ─────────────────────────
+  solr:
+    profiles: ['solr']
+    image: solr:9
+    # Precreate the 'docs' core the conformance suite targets (the adapter manages its schema).
+    command: ['solr-precreate', 'docs']
+    ports:
+      - '8983:8983'
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:8983/solr/docs/admin/ping || exit 1']
+      interval: 4s
+      timeout: 4s
+      retries: 40
+      start_period: 15s
+
+  # ── MongoDB Atlas Vector Search (local) ───────────────────────────────────
+  # mongodb-atlas-local runs Atlas Search ($vectorSearch) locally in a single container.
+  mongodb:
+    profiles: ['mongodb']
+    image: mongodb/mongodb-atlas-local:latest
+    ports:
+      - '27017:27017'
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'mongosh --quiet --eval "db.runCommand({ping:1}).ok" mongodb://localhost:27017/?directConnection=true || exit 1',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  # ── Couchbase (Enterprise) ────────────────────────────────────────────────
+  # Vector search is Enterprise-only (Community throws "vector typed fields not supported").
+  # The EE image is free for development use. The `couchbase-init` sidecar performs the full
+  # NON-INTERACTIVE provisioning the adapter needs — cluster-init (kv,n1ql,index,fts services +
+  # memory quotas + admin creds) and a `vectors` bucket — via the REST API, then exits. Bring up
+  # the whole profile and wait for couchbase-init to finish before running the suite:
+  #
+  #   docker compose -f docker-compose.vector.yml --profile couchbase up -d
+  #   # wait for init to complete (it exits 0 when the cluster + bucket are ready):
+  #   docker wait nhtio-couchbase-init
+  #   TEST_VECTOR_COUCHBASE_URL=couchbase://localhost \
+  #   TEST_VECTOR_COUCHBASE_USER=Administrator TEST_VECTOR_COUCHBASE_PASS=password123 \
+  #   TEST_VECTOR_COUCHBASE_BUCKET=vectors \
+  #     pnpm vitest run tests/functional/batteries/vector/couchbase.integration.node.spec.ts --project node
+  #   docker compose -f docker-compose.vector.yml --profile couchbase down -v
+  couchbase:
+    profiles: ['couchbase']
+    image: couchbase:enterprise
+    ports:
+      - '8091-8097:8091-8097'
+      - '18091-18097:18091-18097'
+      - '11210:11210'
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:8091/pools || exit 1']
+      interval: 4s
+      timeout: 4s
+      retries: 60
+      start_period: 15s
+
+  couchbase-init:
+    profiles: ['couchbase']
+    image: couchbase:enterprise
+    container_name: nhtio-couchbase-init
+    depends_on:
+      couchbase:
+        condition: service_healthy
+    entrypoint: ['/bin/bash', '-c']
+    command:
+      - |
+        set -e
+        H=http://couchbase:8091; A=Administrator:password123
+        # cluster-init: services + memory quotas + admin creds, all in one call.
+        curl -sf -X POST $$H/clusterInit \
+          -d hostname=127.0.0.1 -d 'services=kv,n1ql,index,fts' \
+          -d memoryQuota=512 -d indexMemoryQuota=512 -d ftsMemoryQuota=512 \
+          -d username=Administrator -d password=password123 \
+          -d port=SAME -d indexerStorageMode=plasma
+        # create the bucket the suite targets (the adapter manages scopes/collections + indexes).
+        curl -sf -u $$A -X POST $$H/pools/default/buckets \
+          -d name=vectors -d ramQuota=256 -d bucketType=couchbase -d flushEnabled=1
+        echo 'couchbase provisioned: cluster + vectors bucket ready'
+    restart: 'no'
+
+  # ── Oracle 23ai (AI Vector Search) ────────────────────────────────────────
+  # Oracle Free 23ai. VECTOR columns are rejected in the SYSTEM tablespace, so the suite connects
+  # as an APP_USER whose default tablespace is USERS (the image creates it from these env vars).
+  # First boot initializes the DB (~1-2 min) — wait for the healthcheck before running the suite:
+  #
+  #   docker compose -f docker-compose.vector.yml --profile oracle up -d
+  #   # wait until healthy (DB bootstrap is slow on first run), then:
+  #   TEST_VECTOR_ORACLE_URL=localhost:1521/FREEPDB1 \
+  #   TEST_VECTOR_ORACLE_USER=vector TEST_VECTOR_ORACLE_PASS=vector \
+  #     pnpm vitest run tests/functional/batteries/vector/oracle23ai.integration.node.spec.ts --project node
+  #   docker compose -f docker-compose.vector.yml --profile oracle down -v
+  oracle:
+    profiles: ['oracle']
+    image: gvenzl/oracle-free:23-slim
+    environment:
+      ORACLE_PASSWORD: vectortest
+      APP_USER: vector
+      APP_USER_PASSWORD: vector
+    ports:
+      - '1521:1521'
+    healthcheck:
+      test: ['CMD-SHELL', 'healthcheck.sh']
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 90s
+
+  # ── Vespa ─────────────────────────────────────────────────────────────────
+  # Vespa has no runtime "create collection": a collection is a document type in a deployed
+  # APPLICATION PACKAGE. The adapter builds + redeploys that package (a dependency-free store-zip)
+  # via the config server (19071) on createCollection/dropCollection; the data/query plane is 8080.
+  # No init sidecar is needed — the adapter does the deploy. Just bring up the engine:
+  #
+  #   docker compose -f docker-compose.vector.yml --profile vespa up -d
+  #   # wait for the config server + app endpoint:
+  #   until curl -fsS http://localhost:19071/state/v1/health >/dev/null; do sleep 2; done
+  #   TEST_VECTOR_VESPA_URL=http://localhost:8080 TEST_VECTOR_VESPA_CONFIG_URL=http://localhost:19071 \
+  #     pnpm vitest run tests/functional/batteries/vector/vespa.integration.node.spec.ts --project node
+  #   docker compose -f docker-compose.vector.yml --profile vespa down -v
+  vespa:
+    profiles: ['vespa']
+    image: vespaengine/vespa
+    ports:
+      - '8080:8080'
+      - '19071:19071'
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:19071/state/v1/health || exit 1']
+      interval: 4s
+      timeout: 4s
+      retries: 60
+      start_period: 20s
+
+  # Pinecone is a managed cloud service — no local container. Its integration suite
+  # runs only when TEST_VECTOR_PINECONE_API_KEY + TEST_VECTOR_PINECONE_INDEX are set
+  # against a real Pinecone project.

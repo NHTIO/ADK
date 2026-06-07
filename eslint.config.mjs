@@ -26,6 +26,7 @@ export default [
       'adk/use-is-instance-of': 'error',
       'adk/prefer-is-object': 'error',
       'adk/prefer-is-error': 'error',
+      'adk/require-validator-any-required': 'error',
     },
   },
   {

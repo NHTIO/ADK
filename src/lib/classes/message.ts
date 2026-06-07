@@ -113,10 +113,13 @@ const rawMessageSchema = validator
     attachments: validator
       .array()
       .items(
-        validator.any().custom((value, helpers) => {
-          if (Media.isMedia(value)) return value
-          return helpers.error('any.invalid')
-        })
+        validator
+          .any()
+          .required()
+          .custom((value, helpers) => {
+            if (Media.isMedia(value)) return value
+            return helpers.error('any.invalid')
+          })
       )
       .default([]),
     identity: validator

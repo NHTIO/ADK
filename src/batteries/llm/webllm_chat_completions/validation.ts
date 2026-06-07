@@ -42,7 +42,10 @@ const tokenEncodingSchema = validator
         'llama2',
         'claude'
       ),
-    validator.any().valid(null)
+    // tokenEncoding is OPTIONAL: a valid encoding string, explicit null, or absent (undefined =
+    // "no token counting"). `.optional()` makes the null/undefined disposition explicit (both
+    // allowed) per adk/require-validator-any-required, without rejecting the omitted case.
+    validator.any().valid(null).optional()
   )
   .default(null)
 

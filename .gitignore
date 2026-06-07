@@ -28,3 +28,4 @@ docs/.vitepress/config.mts.timestamp-*
 .pnpm-store/
 .claude/
 .DS_Store
+!.env.test.example

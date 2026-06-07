@@ -99,6 +99,7 @@ const rawArtifactToolSchema = validator.object<RawArtifactTool & { artifactConst
     })
     .required(),
   handler: validator.function().required(),
+  // eslint-disable-next-line adk/require-validator-any-required -- map value type-arg: meta holds arbitrary values; disposition is set by .default({}) on the object
   meta: validator.object().pattern(validator.string(), validator.any()).default({}),
   ephemeral: validator.boolean().default(false),
   trusted: validator.boolean().default(false),

@@ -87,18 +87,21 @@ export type MediaStore = ByteStore<MediaReader>
  * contract. The reader type `R` cannot be checked structurally here; conformance of the reader is
  * the caller's concern at the point of use.
  */
-export const byteStoreSchema = validator.any().custom((value, helpers) => {
-  if (
-    value !== null &&
-    value !== undefined &&
-    typeof (value as any).write === 'function' &&
-    typeof (value as any).read === 'function' &&
-    typeof (value as any).delete === 'function'
-  ) {
-    return value
-  }
-  return helpers.error('any.invalid')
-})
+export const byteStoreSchema = validator
+  .any()
+  .required()
+  .custom((value, helpers) => {
+    if (
+      value !== null &&
+      value !== undefined &&
+      typeof (value as any).write === 'function' &&
+      typeof (value as any).read === 'function' &&
+      typeof (value as any).delete === 'function'
+    ) {
+      return value
+    }
+    return helpers.error('any.invalid')
+  })
 
 /**
  * Returns `true` if `value` implements the {@link ByteStore} interface.

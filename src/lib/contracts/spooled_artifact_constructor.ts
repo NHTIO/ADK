@@ -38,15 +38,20 @@ const ARTIFACT_METHODS = [
  * cross-realm-safe duck-type pattern — `instanceof SpooledArtifact` would be tighter but would
  * force a value-import of the class and reopen the module cycle.
  */
-export const spooledArtifactConstructorSchema = validator.any().custom((value, helpers) => {
-  if (typeof value !== 'function') return helpers.error('any.invalid')
-  const proto = (value as { prototype?: unknown }).prototype
-  if (proto === undefined || proto === null) return helpers.error('any.invalid')
-  if (ARTIFACT_METHODS.every((m) => typeof (proto as Record<string, unknown>)[m] === 'function')) {
-    return value
-  }
-  return helpers.error('any.invalid')
-})
+export const spooledArtifactConstructorSchema = validator
+  .any()
+  .required()
+  .custom((value, helpers) => {
+    if (typeof value !== 'function') return helpers.error('any.invalid')
+    const proto = (value as { prototype?: unknown }).prototype
+    if (proto === undefined || proto === null) return helpers.error('any.invalid')
+    if (
+      ARTIFACT_METHODS.every((m) => typeof (proto as Record<string, unknown>)[m] === 'function')
+    ) {
+      return value
+    }
+    return helpers.error('any.invalid')
+  })
 
 /**
  * Returns `true` if `value` is a constructor whose prototype carries every canonical

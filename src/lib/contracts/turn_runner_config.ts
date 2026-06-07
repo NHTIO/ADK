@@ -166,10 +166,19 @@ export const turnRunnerConfigSchema = validator.object<TurnRunnerConfig>({
   tools: validator
     .array()
     .items(
-      validator.any().custom((value: unknown, helpers: { error: (code: string) => unknown }) => {
-        if (Tool.isTool(value)) return value
-        return helpers.error('any.invalid')
-      })
+      // `.optional()`, not `.required()`: this `.any()` is a type-argument inside `items(...)`,
+      // describing what a tool element looks like — it must NOT impose array cardinality. A
+      // `.required()` item turns the array into `array.includesRequiredUnknowns` ("must contain
+      // ≥1 tool"), which contradicts the contract above (`tools` is optional, defaults to `[]`).
+      // `.optional()` satisfies adk/require-validator-any-required by declaring disposition
+      // explicitly while leaving the empty-array default valid.
+      validator
+        .any()
+        .optional()
+        .custom((value: unknown, helpers: { error: (code: string) => unknown }) => {
+          if (Tool.isTool(value)) return value
+          return helpers.error('any.invalid')
+        })
     )
     .default([]),
   turnInputPipeline: validator.array().items(validator.function()).default([]),

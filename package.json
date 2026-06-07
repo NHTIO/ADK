@@ -58,24 +58,92 @@
     "uuid": "^14.0.0"
   },
   "peerDependencies": {
+    "@aws-sdk/client-s3vectors": "^3.0.0",
+    "@clickhouse/client": "^1.20.0",
+    "@duckdb/node-api": "^1.5.3-r.3",
+    "@elastic/elasticsearch": "^8.0.0 || ^9.0.0",
+    "@lancedb/lancedb": "^0.30.0",
     "@mlc-ai/web-llm": "^0.2.83",
+    "@opensearch-project/opensearch": "^3.6.0",
+    "@orama/orama": "^3.1.18",
+    "@pinecone-database/pinecone": "^7.2.0",
+    "@qdrant/js-client-rest": "^1.18.0",
+    "@zilliz/milvus2-sdk-node": "^3.0.3",
+    "apache-arrow": "^18.1.0",
+    "arangojs": "^10.3.1",
+    "better-sqlite3": "^12.10.0",
     "case-anything": "^3.0.0",
+    "chromadb": "^3.4.3",
     "chrono-node": "^2.0.0",
+    "couchbase": "^4.7.0",
     "diff": "^9.0.0",
+    "evaluatex": "^2.2.0",
     "fastest-levenshtein": "^1.0.0",
     "flydrive": "^2.0.0",
+    "hnswlib-node": "^3.0.0",
+    "mariadb": "^3.5.2",
     "mathjs": "^15.0.0",
+    "meilisearch": "^0.58.0",
+    "mongodb": "^7.2.0",
+    "neo4j-driver": "^6.0.1",
+    "oracledb": "^6.0.0",
     "papaparse": "^5.0.0",
-    "simple-statistics": "^7.0.0"
+    "pg": "^8.21.0",
+    "redis": "^6.0.0",
+    "simple-statistics": "^7.0.0",
+    "sqlite-vec": "^0.1.9",
+    "surrealdb": "^2.0.3",
+    "typesense": "^3.0.6",
+    "vitest": "^4.1.5",
+    "weaviate-client": "^3.13.1"
   },
   "peerDependenciesMeta": {
+    "@aws-sdk/client-s3vectors": {
+      "optional": true
+    },
+    "@clickhouse/client": {
+      "optional": true
+    },
+    "@elastic/elasticsearch": {
+      "optional": true
+    },
+    "@duckdb/node-api": {
+      "optional": true
+    },
+    "@lancedb/lancedb": {
+      "optional": true
+    },
     "@mlc-ai/web-llm": {
+      "optional": true
+    },
+    "@opensearch-project/opensearch": {
+      "optional": true
+    },
+    "@orama/orama": {
+      "optional": true
+    },
+    "@pinecone-database/pinecone": {
+      "optional": true
+    },
+    "@qdrant/js-client-rest": {
+      "optional": true
+    },
+    "@zilliz/milvus2-sdk-node": {
+      "optional": true
+    },
+    "better-sqlite3": {
       "optional": true
     },
     "case-anything": {
       "optional": true
     },
+    "chromadb": {
+      "optional": true
+    },
     "chrono-node": {
+      "optional": true
+    },
+    "couchbase": {
       "optional": true
     },
     "diff": {
@@ -87,27 +155,84 @@
     "flydrive": {
       "optional": true
     },
+    "evaluatex": {
+      "optional": true
+    },
+    "apache-arrow": {
+      "optional": true
+    },
+    "arangojs": {
+      "optional": true
+    },
+    "hnswlib-node": {
+      "optional": true
+    },
+    "mariadb": {
+      "optional": true
+    },
     "mathjs": {
+      "optional": true
+    },
+    "meilisearch": {
+      "optional": true
+    },
+    "mongodb": {
+      "optional": true
+    },
+    "neo4j-driver": {
+      "optional": true
+    },
+    "oracledb": {
       "optional": true
     },
     "papaparse": {
       "optional": true
     },
+    "pg": {
+      "optional": true
+    },
+    "redis": {
+      "optional": true
+    },
     "simple-statistics": {
+      "optional": true
+    },
+    "sqlite-vec": {
+      "optional": true
+    },
+    "surrealdb": {
+      "optional": true
+    },
+    "typesense": {
+      "optional": true
+    },
+    "vitest": {
+      "optional": true
+    },
+    "weaviate-client": {
       "optional": true
     }
   },
   "devDependencies": {
     "@arothuis/markdown-it-biblatex": "^2.1.0",
+    "@aws-sdk/client-s3vectors": "^3.1062.0",
+    "@clickhouse/client": "^1.20.0",
+    "@duckdb/node-api": "1.5.3-r.3",
+    "@elastic/elasticsearch": "^8.19.1",
     "@inquirer/prompts": "^8.4.2",
+    "@lancedb/lancedb": "^0.30.0",
     "@mlc-ai/web-llm": "^0.2.83",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@nhtio/eslint-config": "^1.20251104.0",
     "@nhtio/swarm": "^1.20260111.0",
     "@nhtio/vite-plugins": "^1.20251202.1",
     "@nhtio/vue-editors": "^1.20251127.1",
+    "@opensearch-project/opensearch": "^3.6.0",
     "@orama/orama": "^3.1.18",
     "@orama/plugin-vitepress": "^3.1.18",
+    "@pinecone-database/pinecone": "^7.2.0",
+    "@qdrant/js-client-rest": "^1.18.0",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/cli-color": "^2.0.6",
     "@types/command-line-args": "^5.2.3",
     "@types/command-line-usage": "^5.0.4",
@@ -119,17 +244,24 @@
     "@types/mdast": "^4.0.4",
     "@types/node": "^25.6.0",
     "@types/papaparse": "^5.5.2",
+    "@types/pg": "^8.20.0",
     "@types/source-map-support": "^0.5.10",
     "@types/unist": "^3.0.3",
     "@vitest/browser-playwright": "^4.1.7",
     "@vitest/coverage-v8": "^4.1.7",
     "@vueuse/core": "^14.3.0",
     "@xenova/transformers": "^2.17.2",
+    "@zilliz/milvus2-sdk-node": "^3.0.3",
+    "apache-arrow": "18.1.0",
+    "arangojs": "^10.3.1",
     "baseline-browser-mapping": "^2.10.24",
+    "better-sqlite3": "^12.10.0",
     "case-anything": "^3.1.2",
+    "chromadb": "^3.4.3",
     "chrono-node": "^2.9.1",
     "cli-color": "^2.0.4",
     "cli-progress": "^3.12.0",
+    "couchbase": "^4.7.0",
     "diff": "^9.0.0",
     "dompurify": "^3.4.5",
     "esbuild-wasm": "^0.28.0",
@@ -140,32 +272,43 @@
     "execa": "^9.6.1",
     "fastest-levenshtein": "^1.0.16",
     "flydrive": "^2.1.0",
+    "hnswlib-node": "^3.0.0",
     "jiti": "^2.6.1",
     "keyword-extractor": "^0.0.28",
     "madge": "^8.0.0",
+    "mariadb": "^3.5.2",
     "markdown-it": "^14.1.1",
     "mathjs": "^15.2.0",
     "mdast-util-to-markdown": "^2.1.2",
+    "meilisearch": "^0.58.0",
     "mermaid": "^11.15.0",
     "minisearch": "^7.2.0",
     "monaco-editor": "0.55.1",
+    "mongodb": "^7.2.0",
+    "neo4j-driver": "^6.0.1",
     "nodemon": "^3.1.14",
     "papaparse": "^5.5.3",
+    "pg": "^8.21.0",
     "playwright": "^1.60.0",
     "prettier": "^3.8.3",
     "reading-time": "^1.5.0",
+    "redis": "^6.0.0",
     "rimraf": "^6.1.3",
     "simple-statistics": "^7.8.9",
+    "sqlite-vec": "^0.1.9",
+    "surrealdb": "^2.0.3",
     "typedoc": "^0.28.19",
     "typedoc-plugin-markdown": "^4.11.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.59.1",
+    "typesense": "^3.0.6",
     "vite": "^8.0.10",
     "vitepress": "^1.6.4",
     "vitepress-plugin-llms": "^1.12.1",
     "vitepress-plugin-mermaid": "^2.0.17",
     "vitest": "^4.1.5",
     "vue": "^3.5.33",
+    "weaviate-client": "^3.13.1",
     "zod": "^4.4.3"
   },
   "module": "./dist/index.mjs",

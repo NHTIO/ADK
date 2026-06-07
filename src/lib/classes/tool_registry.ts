@@ -39,9 +39,16 @@ export interface MergeOptions {
  *
  * `register()` throws {@link @nhtio/adk!E_TOOL_ALREADY_REGISTERED} if a tool with the same name is already
  * present — pass `overwrite: true` to replace it explicitly.
+ *
+ * Tools can be **hidden** — registered and callable, but excluded from the default tool list
+ * rendered to the model. This is useful for discovery patterns where an agent has a tool that
+ * enumerates available tools, and the model picks one to call by name in a subsequent iteration.
+ * Hidden state is a property of the registry, not the tool: the same tool can be visible in one
+ * registry and hidden in another. See {@link hide}, {@link visible}, {@link hidden}.
  */
 export class ToolRegistry {
   #tools: Map<string, Tool>
+  #hidden: Set<string>
 
   /**
    * Returns `true` if `value` is a {@link ToolRegistry} instance.
@@ -60,6 +67,7 @@ export class ToolRegistry {
    */
   constructor(tools?: Tool[]) {
     this.#tools = new Map()
+    this.#hidden = new Set()
     for (const tool of tools ?? []) {
       this.register(tool)
     }
@@ -85,12 +93,14 @@ export class ToolRegistry {
    * Removes the tool with the given name from the registry.
    *
    * @remarks
-   * No-ops if no tool with that name is registered.
+   * Also removes the name from the hidden set if present. No-ops if no tool with that name is
+   * registered.
    *
    * @param name - The name of the tool to remove.
    */
   unregister(name: string): void {
     this.#tools.delete(name)
+    this.#hidden.delete(name)
   }
 
   /**
@@ -115,6 +125,9 @@ export class ToolRegistry {
    * Returns a fresh array of all registered tools in insertion order.
    *
    * @remarks
+   * Includes both visible and hidden tools. Use {@link visible} to get only non-hidden tools, or
+   * {@link hidden} to get only hidden tools.
+   *
    * Since {@link @nhtio/adk!Tool} instances are immutable, no deep-cloning is needed.
    */
   all(): Tool[] {
@@ -122,17 +135,93 @@ export class ToolRegistry {
   }
 
   /**
+   * Returns a fresh array of registered tools that are **not** hidden, in insertion order.
+   *
+   * @remarks
+   * This is the accessor LLM batteries should use when building the tool list for the model.
+   * Hidden tools are still callable (they resolve via {@link get}) but are excluded from the
+   * rendered tool definitions.
+   */
+  visible(): Tool[] {
+    return this.all().filter((t) => !this.#hidden.has(t.name))
+  }
+
+  /**
+   * Returns a fresh array of registered tools that **are** hidden, in insertion order.
+   *
+   * @remarks
+   * The converse of {@link visible}. Useful for discovery tools that enumerate all available
+   * tools, and for propagating hidden state across {@link merge}.
+   */
+  hidden(): Tool[] {
+    return this.all().filter((t) => this.#hidden.has(t.name))
+  }
+
+  /**
+   * Marks one or more registered tools as hidden.
+   *
+   * @remarks
+   * Hidden tools remain registered and callable via {@link get}, but are excluded from
+   * {@link visible} (and therefore from the LLM tool list). No-ops for any name that is not
+   * currently registered — the end result (the tool is not visible) matches the intent.
+   *
+   * @param names - One or more tool names to hide.
+   */
+  hide(...names: string[]): void {
+    for (const name of names) {
+      this.#hidden.add(name)
+    }
+  }
+
+  /**
+   * Unmarks one or more tools as hidden, making them visible again.
+   *
+   * @remarks
+   * No-ops for any name that is not currently hidden.
+   *
+   * @param names - One or more tool names to unhide.
+   */
+  unhide(...names: string[]): void {
+    for (const name of names) {
+      this.#hidden.delete(name)
+    }
+  }
+
+  /**
+   * Replaces the entire hidden set with the given tool names.
+   *
+   * @remarks
+   * Any previously hidden tool not in `names` becomes visible. Names that are not registered are
+   * silently ignored — they are added to the set but have no effect until a tool with that name
+   * is registered.
+   *
+   * @param names - The complete set of tool names to hide.
+   */
+  setHidden(...names: string[]): void {
+    this.#hidden = new Set(names)
+  }
+
+  /**
+   * Unhides every tool in the registry.
+   */
+  clearHidden(): void {
+    this.#hidden.clear()
+  }
+
+  /**
    * Removes every tool whose {@link @nhtio/adk!Tool.ephemeral} flag is `true`.
    *
    * @remarks
-   * Synchronous and idempotent — calling it twice in a row is a no-op the second time. The
-   * canonical caller is {@link ToolRegistry.bindContext}, which schedules this method to run
-   * at {@link @nhtio/adk!DispatchContext.ack}. Non-ephemeral tools are left untouched.
+   * Also removes pruned tool names from the hidden set. Synchronous and idempotent — calling it
+   * twice in a row is a no-op the second time. The canonical caller is
+   * {@link ToolRegistry.bindContext}, which schedules this method to run at
+   * {@link @nhtio/adk!DispatchContext.ack}. Non-ephemeral tools are left untouched.
    */
   pruneEphemeral(): void {
     for (const [name, tool] of this.#tools) {
       if (tool.ephemeral) {
         this.#tools.delete(name)
+        this.#hidden.delete(name)
       }
     }
   }
@@ -191,6 +280,9 @@ export class ToolRegistry {
    * tool, not the registry, so `bindContext(ctx)` on the merged registry will prune the forged
    * tools as expected.
    *
+   * Hidden state is also propagated: a tool that is hidden in any source registry remains hidden
+   * in the merged result, provided it survives collision resolution.
+   *
    * @param registries - Registries to merge, in priority order (left-to-right insertion).
    * @param options - Merge-level collision policy. Defaults to `{ onCollision: 'throw' }`.
    * @returns A fresh {@link ToolRegistry} containing the resolved union of all inputs.
@@ -224,6 +316,13 @@ export class ToolRegistry {
           continue
         }
         throw new E_TOOL_ALREADY_REGISTERED()
+      }
+      // Propagate hidden state: any tool that was hidden in a source registry stays hidden
+      // in the merged result, as long as it survived collision resolution.
+      for (const tool of registry.hidden()) {
+        if (merged.has(tool.name)) {
+          merged.hide(tool.name)
+        }
       }
     }
     return merged
