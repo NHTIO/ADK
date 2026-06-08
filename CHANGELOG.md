@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SoDK — a mental-model doc that teaches the loop in human terms.** A new page,
+  `docs/sodk.md` ("Society Development Kit"), retells [How agents work](https://adk.nht.io/how-agents-work)
+  and [What ADK is](https://adk.nht.io/what-adk-is) with exactly one noun swapped: where ADK says
+  *model*, SoDK says *person*. It is a teaching device for the reader who can't yet see why an agent
+  is the loop, not the LLM — role↔agent, task↔turn, briefing↔context, request↔tool, process↔middleware,
+  "say where things get filed"↔the required storage callbacks. The human-facing prose plays it
+  straight; the `<llm-only>` block names the metaphor outright and carries the full 1:1 map, so an
+  agent answering a question can explain a concept *through* the framing or translate either way. Wired
+  into the sidebar and home listing, and cross-linked from both source docs. Docs only — no code, types,
+  or package surface change.
+
 - **Importable ESLint plugin (`@nhtio/adk/eslint`).** The harness's documented contracts are now
   machine-checkable: a flat-config plugin that flags footguns the TypeScript compiler cannot see
   because they live in runtime validators or conventions, not types. Five rules ship —
