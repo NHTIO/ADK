@@ -250,6 +250,11 @@ export class WebLLMChatCompletionsAdapter {
   #engine: WebLLMEngine | undefined
   #enginePromise: Promise<WebLLMEngine> | undefined
 
+  /**
+   * Whether the runtime can host a WebLLM engine — i.e. WebGPU (`navigator.gpu`) is present.
+   *
+   * @returns `true` when WebGPU is available in the current environment.
+   */
   public static isAvailable(): boolean {
     return (
       typeof globalThis.navigator !== 'undefined' &&
@@ -269,16 +274,29 @@ export class WebLLMChatCompletionsAdapter {
     this.#engine = this.#baseline.engine
   }
 
+  /**
+   * Eagerly loads (and caches) the engine so the first dispatch does not pay the model-load cost.
+   *
+   * @param overrides - Optional option overrides layered over the constructor baseline.
+   * @returns The resolved {@link WebLLMEngine}.
+   */
   async preload(overrides?: Partial<WebLLMChatCompletionsAdapterOptions>): Promise<WebLLMEngine> {
     const merged = validateOptions(mergeOptions(this.#baseline, overrides, undefined))
     return this.#resolveEngine(merged)
   }
 
+  /** Drops the cached engine and any in-flight load so the next dispatch re-resolves it. */
   reset(): void {
     this.#engine = undefined
     this.#enginePromise = undefined
   }
 
+  /**
+   * Instance-level availability check, honouring an injected
+   * {@link WebLLMChatCompletionsAdapterOptions.isWebGPUAvailable} override.
+   *
+   * @returns `true` when a WebLLM engine can run in the current environment.
+   */
   isAvailable(): boolean {
     return (this.#baseline.isWebGPUAvailable ?? WebLLMChatCompletionsAdapter.isAvailable)()
   }

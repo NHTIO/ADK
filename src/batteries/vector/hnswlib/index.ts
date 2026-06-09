@@ -37,7 +37,7 @@ import type {
 } from '../types'
 
 export interface HnswlibVectorStoreOptions extends BaseVectorStoreOptions {
-  // Initial index capacity per collection (grows automatically via resizeIndex). Default 1024.
+  /** Initial index capacity per collection; grows automatically via `resizeIndex`. Default 1024. */
   initialCapacity?: number
 }
 
@@ -89,6 +89,7 @@ export class HnswlibVectorStore extends BaseVectorStore {
     return this.options as HnswlibVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }

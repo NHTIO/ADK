@@ -80,14 +80,27 @@ function applyStringOp(text: string, op: StringOp): string | number | string[] {
     case 'normalize_whitespace':
       return text.replace(/\s+/g, ' ').trim()
     case 'reverse':
-      return text.split('').reverse().join('')
+      // Iterate by code point ([...text]), not UTF-16 code unit, so astral characters / emoji
+      // (surrogate pairs) are not split into broken halves. 'A\ud83d\udca5B' \u2192 'B\ud83d\udca5A'.
+      return [...text].reverse().join('')
     case 'slug':
-      return text
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
+      return (
+        text
+          .toLowerCase()
+          // Transliterate common Latin-1 letters/ligatures that do NOT decompose under NFD, so they
+          // survive the a-z0-9 filter instead of becoming hyphens (e.g. 'f\u00f8tex' \u2192 'fotex', not 'f-tex').
+          .replace(/\u00df/g, 'ss')
+          .replace(/\u00e6/g, 'ae')
+          .replace(/\u0153/g, 'oe')
+          .replace(/\u00f8/g, 'o')
+          .replace(/\u0111/g, 'd')
+          .replace(/\u0142/g, 'l')
+          .replace(/\u00fe/g, 'th')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+      )
     case 'strip_html':
       return text.replace(/<[^>]*>/g, '')
     case 'count_words':

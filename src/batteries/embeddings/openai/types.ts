@@ -111,9 +111,13 @@ export interface OpenAIEmbeddingsAdapterOptions extends BaseEmbeddingsAdapterOpt
  * The JSON request body POSTed to `/v1/embeddings`.
  */
 export interface OpenAIEmbeddingsRequestBody {
+  /** ID of the embedding model to use. */
   model: string
+  /** The batch of texts to embed. */
   input: string[]
+  /** Wire encoding for the returned vectors; always `'float'`. */
   encoding_format: 'float'
+  /** Optional output dimensionality for models that support truncation. */
   dimensions?: number
 }
 
@@ -121,7 +125,10 @@ export interface OpenAIEmbeddingsRequestBody {
  * The relevant subset of the `/v1/embeddings` JSON response shape.
  */
 export interface OpenAIEmbeddingsResponseBody {
+  /** The embedding vectors, each tagged with its input `index`. */
   data: Array<{ embedding: number[]; index: number }>
+  /** Model that produced the embeddings. */
   model?: string
+  /** Object type reported by the API (e.g. `'list'`). */
   object?: string
 }

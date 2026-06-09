@@ -138,6 +138,7 @@ const makeHelpers = (): DispatchExecutorHelpers & {
       warn: vi.fn(captureLog('warn')),
       error: vi.fn(captureLog('error')),
     },
+    reportGenerationStats: vi.fn(),
     _events: events,
     _logs: logs,
   } as unknown as DispatchExecutorHelpers & {

@@ -43,12 +43,24 @@ const normalizeOp = (op: string): FilterOperator => {
   return norm
 }
 
+/**
+ * The execution backend a {@link VectorQueryBuilder} drains its assembled plans into. Implemented
+ * by the vector store; the builder produces {@link SearchPlan}/{@link UpsertPlan}/{@link DeletePlan}
+ * objects and hands them here rather than touching the adapter directly.
+ */
 export interface PlanSink {
+  /** Executes an assembled search plan and resolves the matching records. */
   executeSearch(plan: SearchPlan): Promise<VectorMatch[]>
+  /** Executes an assembled upsert plan. */
   executeUpsert(plan: UpsertPlan): Promise<void>
+  /** Executes an assembled delete plan. */
   executeDelete(plan: DeletePlan): Promise<void>
 }
 
+/**
+ * An argument accepted by {@link VectorQueryBuilder.select} — a field name (or `'*'`), a
+ * `[field, config]` tuple, or a `{ field: config }` map selecting and configuring projected fields.
+ */
 export type SelectArg =
   | string
   | [string, Record<string, unknown>]
@@ -82,8 +94,11 @@ class FilterBuilder {
     return fb.buildFilter()
   }
 
+  /** Add a parenthesized condition group via a {@link FilterCallback}; ANDed with prior conditions. */
   where(cb: FilterCallback): this
+  /** Add a condition `field op value` (or `field = value` when `c` is omitted); ANDed with prior conditions. */
   where(a: string, b?: unknown, c?: unknown): this
+  /** Add equality conditions for each key of `obj`; ANDed with prior conditions. */
   where(obj: Record<string, unknown>): this
   where(a: string | Record<string, unknown> | FilterCallback, b?: unknown, c?: unknown): this {
     if (typeof a === 'function') {
@@ -110,8 +125,11 @@ class FilterBuilder {
     return this
   }
 
+  /** Alias of {@link FilterBuilder.where} (callback group form) for readability in a chain. */
   andWhere(cb: FilterCallback): this
+  /** Alias of {@link FilterBuilder.where} (`field op value` form) for readability in a chain. */
   andWhere(a: string, b?: unknown, c?: unknown): this
+  /** Alias of {@link FilterBuilder.where} (object form) for readability in a chain. */
   andWhere(obj: Record<string, unknown>): this
   andWhere(a: string | Record<string, unknown> | FilterCallback, b?: unknown, c?: unknown): this {
     return this.where(a as any, b, c)
@@ -126,8 +144,11 @@ class FilterBuilder {
     this.orBranches.push([filter])
   }
 
+  /** Open a new OR branch holding a parenthesized condition group via a {@link FilterCallback}. */
   orWhere(cb: FilterCallback): this
+  /** Open a new OR branch holding the equality condition `field = value`. */
   orWhere(field: string, value: unknown): this
+  /** Open a new OR branch holding the condition `field op value`. */
   orWhere(field: string, op: FilterOperator, value: unknown): this
   orWhere(field: string | FilterCallback, b?: unknown, c?: unknown): this {
     if (typeof field === 'function') {
@@ -143,7 +164,9 @@ class FilterBuilder {
     return this
   }
 
+  /** AND a negated parenthesized condition group via a {@link FilterCallback}. */
   whereNot(cb: FilterCallback): this
+  /** AND the negated equality condition `field != value`. */
   whereNot(field: string, value: unknown): this
   whereNot(field: string | FilterCallback, value?: unknown): this {
     if (typeof field === 'function') {
@@ -156,7 +179,9 @@ class FilterBuilder {
     return this.where(field, 'ne', value as FilterCondition['value'])
   }
 
+  /** Open a new OR branch holding a negated parenthesized condition group via a {@link FilterCallback}. */
   orWhereNot(cb: FilterCallback): this
+  /** Open a new OR branch holding the negated equality condition `field != value`. */
   orWhereNot(field: string, value: unknown): this
   orWhereNot(field: string | FilterCallback, value?: unknown): this {
     if (typeof field === 'function') {
@@ -169,23 +194,29 @@ class FilterBuilder {
     return this.orWhere(field, 'ne', value)
   }
 
+  /** AND the condition that `field`'s value is one of `values`. */
   whereIn(field: string, values: unknown[]): this {
     return this.where(field, 'in', values as FilterCondition['value'])
   }
 
+  /** AND the condition that `field`'s value is none of `values`. */
   whereNotIn(field: string, values: unknown[]): this {
     return this.where(field, 'nin', values as FilterCondition['value'])
   }
 
+  /** AND the condition that `field` is absent (does not exist). */
   whereNull(field: string): this {
     return this.where(field, 'exists', false as FilterCondition['value'])
   }
 
+  /** AND the condition that `field` is present (exists). */
   whereExists(field: string): this {
     return this.where(field, 'exists', true as FilterCondition['value'])
   }
 
+  /** AND a raw, adapter-dialect filter expressed as SQL text plus positional `bindings`. */
   whereRaw(sql: string, bindings?: unknown[]): this
+  /** AND a raw, adapter-dialect filter expressed as a `{ $dialect, $raw, $bindings }` object. */
   whereRaw(rawObj: { $dialect: string; $raw: unknown; $bindings?: unknown[] }): this
   whereRaw(
     sqlOrObj: string | { $dialect: string; $raw: unknown; $bindings?: unknown[] },
@@ -260,6 +291,12 @@ class VectorQueryBuilder extends FilterBuilder implements PromiseLike<VectorMatc
     this.#topK = defaultTopK
   }
 
+  /**
+   * Search by nearest neighbours to a client-supplied query `vector`. Mutually exclusive with the
+   * other `near*` clauses.
+   *
+   * @throws {@link @nhtio/adk/batteries!E_VECTOR_STORE_QUERY_CONFLICT} when a `near*` clause is already set.
+   */
   nearVector(vector: number[]): this {
     if (this.#near !== undefined) {
       throw new E_VECTOR_STORE_QUERY_CONFLICT(['a near* clause was already set'])
@@ -268,6 +305,12 @@ class VectorQueryBuilder extends FilterBuilder implements PromiseLike<VectorMatc
     return this
   }
 
+  /**
+   * Search by nearest neighbours to `text`, embedded server-side by the backend. Mutually exclusive
+   * with the other `near*` clauses.
+   *
+   * @throws {@link @nhtio/adk/batteries!E_VECTOR_STORE_QUERY_CONFLICT} when a `near*` clause is already set.
+   */
   nearText(text: string): this {
     if (this.#near !== undefined) {
       throw new E_VECTOR_STORE_QUERY_CONFLICT(['a near* clause was already set'])
@@ -276,6 +319,12 @@ class VectorQueryBuilder extends FilterBuilder implements PromiseLike<VectorMatc
     return this
   }
 
+  /**
+   * Search by nearest neighbours to the stored vector of the record with the given `id`. Mutually
+   * exclusive with the other `near*` clauses.
+   *
+   * @throws {@link @nhtio/adk/batteries!E_VECTOR_STORE_QUERY_CONFLICT} when a `near*` clause is already set.
+   */
   nearId(id: string): this {
     if (this.#near !== undefined) {
       throw new E_VECTOR_STORE_QUERY_CONFLICT(['a near* clause was already set'])
@@ -284,6 +333,11 @@ class VectorQueryBuilder extends FilterBuilder implements PromiseLike<VectorMatc
     return this
   }
 
+  /**
+   * Declare which fields each match projects (id / vector / document / metadata). Required before a
+   * search terminal runs. Accepts {@link SelectArg}s: `'*'`, field names, `[field, config]` tuples,
+   * or `{ field: config }` maps.
+   */
   select(...args: SelectArg[]): this {
     this.#selectCalled = true
     for (const arg of args) {
@@ -329,11 +383,13 @@ class VectorQueryBuilder extends FilterBuilder implements PromiseLike<VectorMatc
     return this
   }
 
+  /** Cap the number of matches returned (the search `topK`). */
   limit(n: number): this {
     this.#topK = n
     return this
   }
 
+  /** Skip the first `n` matches before returning results. */
   offset(n: number): this {
     this.#offset = n
     return this
@@ -379,6 +435,7 @@ class VectorQueryBuilder extends FilterBuilder implements PromiseLike<VectorMatc
     return await this.#sink.executeSearch(plan)
   }
 
+  /** Terminal: insert or replace `records` in the collection. */
   async upsert(records: VectorRecord[]): Promise<void> {
     const plan: UpsertPlan = {
       collection: this.#collection,
@@ -388,6 +445,7 @@ class VectorQueryBuilder extends FilterBuilder implements PromiseLike<VectorMatc
     await this.#sink.executeUpsert(plan)
   }
 
+  /** Terminal: delete records matching the accumulated filter (or the `id IN [...]` fast path). */
   async delete(): Promise<void> {
     const ids = this.extractIdsFromFilter()
     const filter = this.buildFilter()

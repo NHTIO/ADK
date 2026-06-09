@@ -99,7 +99,23 @@ export const parseYamlTool = new Tool({
     const { text } = args as { text: string }
     try {
       const parsed = parseYaml(text)
-      return JSON.stringify(parsed, null, 2)
+      // An empty / whitespace-only / BOM-only document parses to `undefined`, and
+      // `JSON.stringify(undefined)` returns the JS value `undefined` (not a string), breaking the
+      // tool's string-return contract. Normalise that empty document to JSON `null`.
+      if (parsed === undefined) return 'null'
+      // YAML permits .NaN / .inf / -.inf, which `JSON.stringify` would silently turn into `null`,
+      // losing the value. Render non-finite numbers as their YAML token strings so the information
+      // survives the JSON round-trip instead of being corrupted to null.
+      return JSON.stringify(
+        parsed,
+        (_key, value) => {
+          if (typeof value === 'number' && !Number.isFinite(value)) {
+            return Number.isNaN(value) ? '.NaN' : value > 0 ? '.inf' : '-.inf'
+          }
+          return value
+        },
+        2
+      )
     } catch (err) {
       return `Error: Invalid YAML — ${isError(err) ? err.message : String(err)}`
     }

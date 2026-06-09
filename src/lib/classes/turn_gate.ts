@@ -133,11 +133,17 @@ export class TurnGate<T = unknown> {
     return isInstanceOf(value, 'TurnGate', TurnGate)
   }
 
+  /** Unique identifier for this gate instance. */
   declare readonly id: string
+  /** Id of the turn this gate belongs to. */
   declare readonly turnId: string
+  /** Human-readable reason the gate was opened. */
   declare readonly reason: string
+  /** Optional caller-supplied payload describing what the gate is waiting on. */
   declare readonly payload: unknown
+  /** When the gate was created. */
   declare readonly createdAt: DateTime
+  /** Whether the gate has been settled (resolved or rejected) and no longer blocks the turn. */
   declare readonly isSettled: boolean
 
   #id: string

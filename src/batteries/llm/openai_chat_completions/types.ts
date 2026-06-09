@@ -22,100 +22,34 @@ import type {
   ArtifactTool,
   ToolRegistry,
 } from '@nhtio/adk/common'
+import type {
+  JsonSchema,
+  ChatCompletionsBucketOrder,
+  ChatCompletionsTool,
+  UnsupportedMediaPolicy,
+  ChatCompletionsRetryConfig,
+  ChatHelpersCommon,
+} from '../chat_common/types'
 
-// ─── DescriptionLike (validator description envelope) ─────────────────────────
-
-export interface DescriptionLike {
-  type?: string
-  description?: string
-  presence?: string
-  default?: unknown
-  enum?: unknown[]
-  valids?: unknown[]
-  examples?: unknown[]
-  properties?: Record<string, DescriptionLike>
-  items?: DescriptionLike | DescriptionLike[]
-  required?: string[]
-  flags?: { presence?: string; description?: string; default?: unknown }
-  [key: string]: unknown
-}
-
-// ─── JSON Schema (Chat-Completions-compatible subset) ─────────────────────────
-
-export interface JsonSchema {
-  type?: 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array' | 'null'
-  description?: string
-  enum?: unknown[]
-  default?: unknown
-  examples?: unknown[]
-  properties?: Record<string, JsonSchema>
-  required?: string[]
-  items?: JsonSchema | JsonSchema[]
-  additionalProperties?: boolean | JsonSchema
-  [key: string]: unknown
-}
-
-// ─── Helper-attribute envelopes ───────────────────────────────────────────────
-
-export interface UntrustedContentAttrs {
-  nonce: string
-  kind: string
-  tool?: string
-  /**
-   * When wrapping a {@link @nhtio/adk!Media}-derived text marker, the modality hazard axis derived from
-   * `media.modalityHazard`: `'inert'`, `'extractable'` (from `'extractable-instructions'`), or
-   * `'opaque'` (from `'opaque-perceptual'`). Omitted for non-media envelopes.
-   */
-  modality?: 'inert' | 'extractable' | 'opaque'
-}
-
-export interface TrustedContentAttrs {
-  nonce: string
-  kind: string
-  tool?: string
-  /**
-   * Same semantics as {@link UntrustedContentAttrs.modality}.
-   */
-  modality?: 'inert' | 'extractable' | 'opaque'
-}
-
-export interface StandingInstructionAttrs {
-  version?: string
-}
-
-export interface MemoryAttrs {
-  nonce: string
-  source?: string
-  createdAt?: string
-  kind?: string
-  score?: number
-}
-
-export interface RetrievableAttrs {
-  nonce: string
-  source?: string
-  createdAt?: string
-  kind?: string
-  score?: number
-}
-
-export interface ThoughtAttrs {
-  nonce: string
-  kind: 'self-reasoning' | 'peer-reasoning' | 'opaque-reasoning'
-  from: string
-  createdAt?: string
-  replayCompatibility?: string
-}
-
-// ─── Bucket order ─────────────────────────────────────────────────────────────
-
-export type ChatCompletionsBucketLabel =
-  | 'standingInstructions'
-  | 'memories'
-  | 'retrievables'
-  | 'timeline'
-
-export type ChatCompletionsBucketOrder = ReadonlyArray<ChatCompletionsBucketLabel>
+// ─── Re-exported shared (wire-shape-agnostic) types ───────────────────────────
+// These moved to `../chat_common/types` so the OpenAI battery and the native Ollama battery
+// share one definition. They are re-exported here under their original names so every existing
+// `@nhtio/adk/batteries/llm/openai_chat_completions` import keeps resolving unchanged.
+export type {
+  DescriptionLike,
+  JsonSchema,
+  UntrustedContentAttrs,
+  TrustedContentAttrs,
+  StandingInstructionAttrs,
+  MemoryAttrs,
+  RetrievableAttrs,
+  ThoughtAttrs,
+  ChatCompletionsBucketLabel,
+  ChatCompletionsBucketOrder,
+  ChatCompletionsTool,
+  UnsupportedMediaPolicy,
+  ChatCompletionsRetryConfig,
+} from '../chat_common/types'
 
 // ─── Reasoning field precedence ───────────────────────────────────────────────
 
@@ -142,15 +76,33 @@ export type ReasoningFieldPrecedence = ReadonlyArray<ReasoningField>
  * came from and its `content`. Returned by `extractReasoningFields`.
  */
 export interface ReasoningExtract {
+  /**
+   * The reasoning field name.
+   */
   field: ReasoningField
+  /**
+   * The content of the reasoning block.
+   */
   content: string
 }
 
 // ─── Wire shapes ──────────────────────────────────────────────────────────────
 
+/**
+ * Wire representation of a tool call in a chat completion response or request.
+ */
 export interface ChatCompletionsToolCallWire {
+  /**
+   * Unique identifier for the tool call.
+   */
   id: string
+  /**
+   * Type of the tool call, typically 'function'.
+   */
   type?: 'function'
+  /**
+   * Function detail payload.
+   */
   function?: {
     name?: string
     arguments?: string
@@ -173,210 +125,281 @@ export type ChatCompletionsContentBlock =
   | { type: 'input_audio'; input_audio: { data: string; format: 'wav' | 'mp3' } }
   | { type: 'file'; file: { file_id?: string; filename?: string; file_data?: string } }
 
+/**
+ * Chat completion message wire object.
+ */
 export interface ChatCompletionsMessage {
+  /**
+   * The role of the author of this message.
+   */
   role: 'system' | 'user' | 'assistant' | 'tool' | 'developer'
+  /**
+   * The contents of the message.
+   */
   content: string | ChatCompletionsContentBlock[] | null
+  /**
+   * An optional name for the participant.
+   */
   name?: string
+  /**
+   * Tool call identifier if responding to a tool call.
+   */
   tool_call_id?: string
+  /**
+   * The tool calls generated by the model.
+   */
   tool_calls?: ChatCompletionsToolCallWire[]
 }
 
-export interface ChatCompletionsTool {
-  type: 'function'
-  function: {
-    name: string
-    description?: string
-    parameters?: JsonSchema
-  }
-}
-
+/**
+ * Part of a tool call in a streaming response.
+ */
 export interface ChatCompletionsToolCallDelta {
+  /**
+   * The index of the tool call in the stream.
+   */
   index: number
+  /**
+   * The identifier of the tool call.
+   */
   id?: string
+  /**
+   * The tool type, typically 'function'.
+   */
   type?: 'function'
+  /**
+   * The partial function name or arguments.
+   */
   function?: {
     name?: string
     arguments?: string
   }
 }
 
+/**
+ * An assembled tool call ready for execution.
+ */
 export interface AssembledToolCall {
+  /**
+   * Unique identifier for the tool call.
+   */
   id: string
+  /**
+   * Type of tool call, typically 'function'.
+   */
   type: 'function'
+  /**
+   * Name of the function to call.
+   */
   name: string
+  /**
+   * Stringified JSON arguments for the function.
+   */
   args: string
 }
 
+/**
+ * Accumulator for stitching together streaming tool call deltas into fully-assembled tool calls.
+ */
 export interface ChatCompletionsToolCallDeltaAccumulator {
+  /**
+   * Feeds a tool call delta into the accumulator.
+   */
   feed(delta: ChatCompletionsToolCallDelta): void
+  /**
+   * Drains and returns the completed assembled tool calls.
+   */
   drain(): AssembledToolCall[]
 }
 
+/**
+ * Stream delta payload for a chat completion choice chunk.
+ */
 export interface ChatCompletionsChunkDelta {
+  /**
+   * Optional role of the message author.
+   */
   role?: 'assistant'
+  /**
+   * The content block text fragment.
+   */
   content?: string | null
+  /**
+   * De-facto field for model reasoning output.
+   */
   reasoning_content?: string | null
   /**
    * Non-spec, provider-specific reasoning channel. Emitted by Ollama's `/v1` and current vLLM
    * (which renamed `reasoning_content` → `reasoning`); see {@link OpenAIChatCompletionsAdapterOptions.reasoningFieldPrecedence}.
    */
   reasoning?: string | null
+  /**
+   * Partial stream deltas for tool calls.
+   */
   tool_calls?: ChatCompletionsToolCallDelta[]
 }
 
+/**
+ * A choice option in a streaming chat completions chunk.
+ */
 export interface ChatCompletionsChunkChoice {
+  /**
+   * Index of the choice in the completions list.
+   */
   index?: number
+  /**
+   * The stream delta object.
+   */
   delta?: ChatCompletionsChunkDelta
+  /**
+   * The reason the generation stopped.
+   */
   finish_reason?: string | null
 }
 
+/**
+ * Streaming chunk response from a chat completion API.
+ */
 export interface ChatCompletionsChunk {
+  /**
+   * Unique identifier for the chunk.
+   */
   id?: string
+  /**
+   * The object type, typically 'chat.completion.chunk'.
+   */
   object?: string
+  /**
+   * Unix timestamp when the chunk was created.
+   */
   created?: number
+  /**
+   * The model name used for generation.
+   */
   model?: string
+  /**
+   * List of chunk choice options.
+   */
   choices?: ChatCompletionsChunkChoice[]
+  /**
+   * Token usage statistics if requested.
+   */
   usage?: Record<string, unknown>
 }
 
+/**
+ * A message response in non-streaming chat completions.
+ */
 export interface ChatCompletionsResponseMessage {
+  /**
+   * Role of the message author.
+   */
   role?: 'assistant'
+  /**
+   * Text contents of the response.
+   */
   content?: string | null
+  /**
+   * De-facto field for model reasoning output.
+   */
   reasoning_content?: string | null
   /**
    * Non-spec, provider-specific reasoning channel. Emitted by Ollama's `/v1` and current vLLM
    * (which renamed `reasoning_content` → `reasoning`); see {@link OpenAIChatCompletionsAdapterOptions.reasoningFieldPrecedence}.
    */
   reasoning?: string | null
+  /**
+   * The tool calls returned by the model.
+   */
   tool_calls?: ChatCompletionsToolCallWire[]
 }
 
+/**
+ * A choice returned in non-streaming chat completions.
+ */
 export interface ChatCompletionsResponseChoice {
+  /**
+   * Index of the choice in the list.
+   */
   index?: number
+  /**
+   * Message response payload.
+   */
   message?: ChatCompletionsResponseMessage
+  /**
+   * Reason why the model finished generating.
+   */
   finish_reason?: string | null
 }
 
-export interface ChatCompletionsResponse {
-  id?: string
-  object?: string
-  created?: number
-  model?: string
-  choices?: ChatCompletionsResponseChoice[]
-  usage?: Record<string, unknown>
-}
-
-// ─── Unsupported-media policy ─────────────────────────────────────────────────
-
 /**
- * Policy for how the OpenAI Chat Completions battery handles a {@link @nhtio/adk!Media} instance whose
- * modality the wire protocol cannot natively represent (today: video).
- *
- * @remarks
- * Three modes:
- *
- * - `'throw'` — raise `E_UNSUPPORTED_MEDIA_MODALITY` and fail the dispatch. Loud failure;
- *   the default, so a misconfigured pipeline surfaces immediately.
- * - `'fallback-stash'` — look for a model-readable text entry in `media.stash`. If
- *   present, render that text inside the appropriate trust envelope in lieu of a media block.
- *   If no entry is found, fall through to `'synthetic-description'` behaviour. The shorthand
- *   string form uses the battery's default key list (`['text:transcript', 'text:caption',
- *   'text:description']`, walked in order). The object form `{ mode: 'fallback-stash';
- *   stashKeys }` overrides the key list.
- * - `'synthetic-description'` — always render a synthetic text description constructed from
- *   `filename`, `byteLength`, and `mimeType` (e.g. `[media: report.mp4, video/mp4, 38.4 MB]`)
- *   regardless of `stash` presence.
+ * Non-streaming chat completion response payload.
  */
-export type UnsupportedMediaPolicy =
-  | 'throw'
-  | 'fallback-stash'
-  | 'synthetic-description'
-  | { mode: 'fallback-stash'; stashKeys: ReadonlyArray<string> }
-
-// ─── Retry config ─────────────────────────────────────────────────────────────
-
-export interface ChatCompletionsRetryConfig {
-  maxAttempts?: number
-  baseDelayMs?: number
-  maxDelayMs?: number
-  retriableStatuses?: number[]
-  honorRetryAfter?: boolean
+export interface ChatCompletionsResponse {
+  /**
+   * Unique identifier for the response.
+   */
+  id?: string
+  /**
+   * Object type, typically 'chat.completion'.
+   */
+  object?: string
+  /**
+   * Unix timestamp when the response was created.
+   */
+  created?: number
+  /**
+   * Model used for completion.
+   */
+  model?: string
+  /**
+   * List of choices generated by the model.
+   */
+  choices?: ChatCompletionsResponseChoice[]
+  /**
+   * Token usage statistics.
+   */
+  usage?: Record<string, unknown>
 }
 
 // ─── Helpers bag ──────────────────────────────────────────────────────────────
 
-export interface ChatCompletionsHelpers {
-  descriptionToChatCompletionsJsonSchema: (d: DescriptionLike) => JsonSchema
-  renderUntrustedContent: (content: string, attrs: UntrustedContentAttrs) => string
-  renderTrustedContent: (content: string, attrs: TrustedContentAttrs) => string
-  renderStandingInstructions: (
-    items: Iterable<Tokenizable>,
-    attrs?: StandingInstructionAttrs
-  ) => string
-  renderMemories: (items: Iterable<{ memory: Memory; attrs: MemoryAttrs }>) => string
-  renderRetrievableSafetyDirective: () => string
-  renderFirstPartyRetrievables: (
-    items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>
-  ) => Promise<string>
-  renderThirdPartyPublicRetrievables: (
-    items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
-    deps: { renderUntrustedContent: ChatCompletionsHelpers['renderUntrustedContent'] }
-  ) => Promise<string>
-  renderThirdPartyPrivateRetrievables: (
-    items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
-    deps: { renderUntrustedContent: ChatCompletionsHelpers['renderUntrustedContent'] }
-  ) => Promise<string>
-  renderRetrievables: (
-    items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
-    deps: {
-      renderRetrievableSafetyDirective: ChatCompletionsHelpers['renderRetrievableSafetyDirective']
-      renderFirstPartyRetrievables: ChatCompletionsHelpers['renderFirstPartyRetrievables']
-      renderThirdPartyPublicRetrievables: ChatCompletionsHelpers['renderThirdPartyPublicRetrievables']
-      renderThirdPartyPrivateRetrievables: ChatCompletionsHelpers['renderThirdPartyPrivateRetrievables']
-      renderUntrustedContent: ChatCompletionsHelpers['renderUntrustedContent']
-    }
-  ) => Promise<string>
+/**
+ * Full translation-helper contract for the OpenAI Chat Completions battery.
+ *
+ * @remarks
+ * Extends the wire-shape-agnostic {@link ChatHelpersCommon} (the string/JSON-Schema/tool-definition
+ * renderers shared with the Ollama battery) and adds the OpenAI-wire-specific members: timeline
+ * message rendering (content blocks), tool-call-result rendering (content blocks), full-history
+ * assembly (synthetic `assistant.tool_calls` + `tool.tool_call_id` shape), and the streaming
+ * tool-call delta accumulator. The `deps` parameters reference {@link ChatHelpersCommon} member
+ * types, so this interface carries no self-referential typing for the shared helpers.
+ */
+export interface ChatCompletionsHelpers extends ChatHelpersCommon {
+  /**
+   * Renders a timeline message into a wire-formatted message.
+   */
   renderTimelineMessage: (input: {
     message: Message
     selfIdentity: string
     unsupportedMediaPolicy: UnsupportedMediaPolicy
     warn?: (msg: string) => void
   }) => Promise<ChatCompletionsMessage>
-  renderThought: (content: string, attrs: ThoughtAttrs, payload?: unknown) => string
-  filterThoughts: (
-    thoughts: Iterable<Thought>,
-    mode: 'all-self' | 'latest-self' | 'all',
-    selfIdentity: string,
-    replayCompatibility: ReadonlyArray<string>
-  ) => Thought[]
-  toolsToChatCompletionsTools: (
-    tools: ReadonlyArray<Tool | ArtifactTool>,
-    deps: { descriptionToChatCompletionsJsonSchema: (d: DescriptionLike) => JsonSchema }
-  ) => ChatCompletionsTool[]
-  renderChatCompletionsSystemPrompt: (input: {
-    systemPrompt: Tokenizable
-    standingInstructions: Iterable<Tokenizable>
-    memories: Iterable<Memory>
-    retrievables: Iterable<Retrievable>
-    bucketOrder: ChatCompletionsBucketOrder
-    renderStandingInstructions: ChatCompletionsHelpers['renderStandingInstructions']
-    renderMemories: ChatCompletionsHelpers['renderMemories']
-    renderRetrievables: ChatCompletionsHelpers['renderRetrievables']
-    renderRetrievableSafetyDirective: ChatCompletionsHelpers['renderRetrievableSafetyDirective']
-    renderFirstPartyRetrievables: ChatCompletionsHelpers['renderFirstPartyRetrievables']
-    renderThirdPartyPublicRetrievables: ChatCompletionsHelpers['renderThirdPartyPublicRetrievables']
-    renderThirdPartyPrivateRetrievables: ChatCompletionsHelpers['renderThirdPartyPrivateRetrievables']
-    renderUntrustedContent: ChatCompletionsHelpers['renderUntrustedContent']
-  }) => Promise<string>
+  /**
+   * Renders tool call result payloads into the corresponding wire-formatted message content blocks or text.
+   */
   renderChatCompletionsToolCallResult: (input: {
     toolCall: ToolCall
     results: Tokenizable | SpooledArtifact | SpooledArtifact[] | Media | Media[]
     tool: Tool | ArtifactTool | undefined
-    renderUntrustedContent: ChatCompletionsHelpers['renderUntrustedContent']
-    renderTrustedContent: ChatCompletionsHelpers['renderTrustedContent']
+    renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
+    renderTrustedContent: ChatHelpersCommon['renderTrustedContent']
     unsupportedMediaPolicy: UnsupportedMediaPolicy
     warn?: (msg: string) => void
   }) => Promise<string | ChatCompletionsContentBlock[]>
+  /**
+   * Builds the entire chat history (system prompts, memories, retrievables, timeline, and thoughts) into wire format.
+   */
   buildChatCompletionsHistory: (input: {
     systemPrompt: Tokenizable
     standingInstructions: Iterable<Tokenizable>
@@ -393,33 +416,51 @@ export interface ChatCompletionsHelpers {
     replayCompatibility: ReadonlyArray<string>
     unsupportedMediaPolicy: UnsupportedMediaPolicy
     renderChatCompletionsToolCallResult: ChatCompletionsHelpers['renderChatCompletionsToolCallResult']
-    renderChatCompletionsSystemPrompt: ChatCompletionsHelpers['renderChatCompletionsSystemPrompt']
-    renderStandingInstructions: ChatCompletionsHelpers['renderStandingInstructions']
-    renderMemories: ChatCompletionsHelpers['renderMemories']
-    renderRetrievables: ChatCompletionsHelpers['renderRetrievables']
-    renderRetrievableSafetyDirective: ChatCompletionsHelpers['renderRetrievableSafetyDirective']
-    renderFirstPartyRetrievables: ChatCompletionsHelpers['renderFirstPartyRetrievables']
-    renderThirdPartyPublicRetrievables: ChatCompletionsHelpers['renderThirdPartyPublicRetrievables']
-    renderThirdPartyPrivateRetrievables: ChatCompletionsHelpers['renderThirdPartyPrivateRetrievables']
+    renderChatCompletionsSystemPrompt: ChatHelpersCommon['renderChatCompletionsSystemPrompt']
+    renderStandingInstructions: ChatHelpersCommon['renderStandingInstructions']
+    renderMemories: ChatHelpersCommon['renderMemories']
+    renderRetrievables: ChatHelpersCommon['renderRetrievables']
+    renderRetrievableSafetyDirective: ChatHelpersCommon['renderRetrievableSafetyDirective']
+    renderFirstPartyRetrievables: ChatHelpersCommon['renderFirstPartyRetrievables']
+    renderThirdPartyPublicRetrievables: ChatHelpersCommon['renderThirdPartyPublicRetrievables']
+    renderThirdPartyPrivateRetrievables: ChatHelpersCommon['renderThirdPartyPrivateRetrievables']
     renderTimelineMessage: ChatCompletionsHelpers['renderTimelineMessage']
-    renderThought: ChatCompletionsHelpers['renderThought']
-    filterThoughts: ChatCompletionsHelpers['filterThoughts']
-    renderUntrustedContent: ChatCompletionsHelpers['renderUntrustedContent']
-    renderTrustedContent: ChatCompletionsHelpers['renderTrustedContent']
+    renderThought: ChatHelpersCommon['renderThought']
+    filterThoughts: ChatHelpersCommon['filterThoughts']
+    renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
+    renderTrustedContent: ChatHelpersCommon['renderTrustedContent']
     warn?: (msg: string) => void
   }) => Promise<{
     messages: ChatCompletionsMessage[]
     reasoningPayloads: Array<{ id: string; replayCompatibility: string; payload: unknown }>
   }>
+  /**
+   * Instantiates a new tool call delta accumulator for streaming responses.
+   */
   createChatCompletionsToolCallDeltaAccumulator: () => ChatCompletionsToolCallDeltaAccumulator
 }
 
 // ─── Request body ─────────────────────────────────────────────────────────────
 
+/**
+ * Request body structure for the OpenAI Chat Completions API.
+ */
 export interface OpenAIChatCompletionsRequestBody {
+  /**
+   * ID of the model to use.
+   */
   model: string
+  /**
+   * A list of messages comprising the conversation history so far.
+   */
   messages: ChatCompletionsMessage[]
+  /**
+   * If set, partial message deltas will be sent as server-sent events.
+   */
   stream: boolean
+  /**
+   * A list of tools the model may call.
+   */
   tools?: ChatCompletionsTool[]
   /**
    * Side-channel for opaque vendor reasoning payloads. Forwarded to gateways that understand
@@ -431,21 +472,38 @@ export interface OpenAIChatCompletionsRequestBody {
 
 // ─── Adapter options ──────────────────────────────────────────────────────────
 
+/**
+ * Configuration options for the OpenAI Chat Completions adapter.
+ */
 export interface OpenAIChatCompletionsAdapterOptions {
   // ADK control
+  /** API key for authenticating requests to the OpenAI-compatible service. */
   apiKey?: string
+  /** Base URL for the OpenAI-compatible API endpoint. */
   baseURL?: string
+  /** Extra HTTP headers to include with each request. */
   headers?: Record<string, string>
+  /** Whether to stream the completion response chunk by chunk. */
   stream?: boolean
+  /** Idle timeout in milliseconds for the stream before aborting. */
   streamIdleTimeoutMs?: number
+  /** Request timeout in milliseconds for API calls. */
   requestTimeoutMs?: number
+  /** Configures request retry behavior. */
   retry?: ChatCompletionsRetryConfig
+  /** Custom fetch implementation to use for HTTP requests. */
   fetch?: typeof globalThis.fetch
+  /** Determines order of memory and retrievable buckets in history assembly. */
   bucketOrder?: ChatCompletionsBucketOrder
+  /** Size of the model's token context window. */
   contextWindow?: number
+  /** Unique identity label for the assistant instance. */
   selfIdentity?: string
+  /** Determines which thoughts are surfaced back to the model. */
   thoughtSurfacing?: 'all-self' | 'latest-self' | 'all'
+  /** Tokenizer encoding configuration for token counting. */
   tokenEncoding?: TokenEncoding | null
+  /** List of replay labels supported by the assistant. */
   replayCompatibility?: ReadonlyArray<string>
 
   /**
@@ -466,6 +524,7 @@ export interface OpenAIChatCompletionsAdapterOptions {
    * @defaultValue `['reasoning', 'reasoning_content']`
    */
   reasoningFieldPrecedence?: ReasoningFieldPrecedence
+  /** Optional overrides for OpenAI chat completions helpers. */
   helpers?: Partial<ChatCompletionsHelpers>
 
   /**
@@ -541,27 +600,46 @@ export interface OpenAIChatCompletionsAdapterOptions {
   autoAck?: boolean
 
   // Chat Completions request body
+  /** Name of the model to use for completion. */
   model: string
+  /** Parameters for audio output if requested. */
   audio?: { voice: string; format: 'wav' | 'mp3' | 'flac' | 'opus' | 'pcm16' }
+  /** Frequency penalty wire field to discourage repeating words. */
   frequency_penalty?: number
+  /** Deprecated wire field to control which function is called. */
   function_call?: 'none' | 'auto' | { name: string }
+  /** Deprecated list of functions available to the model. */
   functions?: Array<{ name: string; description?: string; parameters?: JsonSchema }>
+  /** Bias logits to control token generation likelihood. */
   logit_bias?: Record<string, number>
+  /** Request log probabilities for generated tokens. */
   logprobs?: boolean
+  /** Hard limit on token count for model reasoning/completion. */
   max_completion_tokens?: number
+  /** Maximum number of generated tokens. */
   max_tokens?: number
+  /** Metadata key-value pairs forwarded to the provider. */
   metadata?: Record<string, string>
+  /** Desired modalities for model output, such as text and audio. */
   modalities?: Array<'text' | 'audio'>
+  /** Number of completions to generate for each request. */
   n?: number
+  /** Allow the model to emit multiple tool calls in one turn. */
   parallel_tool_calls?: boolean
+  /** Prediction helper to accelerate latency of known content. */
   prediction?: {
     type: 'content'
     content: string | Array<{ type: 'text'; text: string }>
   }
+  /** Presence penalty wire field to encourage new topics. */
   presence_penalty?: number
+  /** Vendor cache key for caching system prompts. */
   prompt_cache_key?: string
+  /** Cache retention strategy for cached system prompts. */
   prompt_cache_retention?: 'in_memory' | '24h'
-  reasoning_effort?: 'minimal' | 'low' | 'medium' | 'high'
+  /** Target reasoning depth/effort for reasoning models. */
+  reasoning_effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high'
+  /** Enforces a specific output format, e.g. JSON schema. */
   response_format?:
     | { type: 'text' }
     | { type: 'json_object' }
@@ -574,13 +652,21 @@ export interface OpenAIChatCompletionsAdapterOptions {
           description?: string
         }
       }
+  /** Unique safety system identifier or configuration ID. */
   safety_identifier?: string
+  /** Deterministic random seed for generation. */
   seed?: number
+  /** Service reliability tier for processing the request. */
   service_tier?: 'auto' | 'default' | 'flex' | 'priority' | 'scale'
+  /** Custom stop sequence strings. */
   stop?: string | string[]
+  /** Request the provider to store the completed trace. */
   store?: boolean
+  /** Configuration options for response streaming. */
   stream_options?: { include_usage?: boolean; include_obfuscation?: boolean }
+  /** Sampling temperature control. */
   temperature?: number
+  /** Enforce or disable tool execution selection. */
   tool_choice?:
     | 'none'
     | 'auto'
@@ -597,10 +683,15 @@ export interface OpenAIChatCompletionsAdapterOptions {
           >
         }
       }
+  /** Top log probability tokens limit. */
   top_logprobs?: number
+  /** Nucleus sampling probability threshold. */
   top_p?: number
+  /** End-user identifier for abuse monitoring. */
   user?: string
+  /** Diagnostics verbosity level. */
   verbosity?: 'low' | 'medium' | 'high'
+  /** Configuration for built-in web search. */
   web_search_options?: {
     search_context_size?: 'low' | 'medium' | 'high'
     user_location?: {

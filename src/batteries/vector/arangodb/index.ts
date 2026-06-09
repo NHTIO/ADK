@@ -33,6 +33,7 @@ import type {
 } from '../types'
 
 export interface ArangoDBVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection: {
     url: string
     username?: string
@@ -73,6 +74,7 @@ export class ArangoDBVectorStore extends BaseVectorStore {
     return this.options as ArangoDBVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }

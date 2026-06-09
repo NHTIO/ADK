@@ -65,7 +65,7 @@ describe('flydrive store through TurnRunner', () => {
     const exec = scriptedExecutor(
       [
         {
-          toolCalls: [{ tool: 'stats_describe', args: { numbers: '[10, 20, 30, 40, 50]' } }],
+          toolCalls: [{ tool: 'stats_describe', args: { numbers: [10, 20, 30, 40, 50] } }],
         },
         { ack: true },
       ],
@@ -82,9 +82,10 @@ describe('flydrive store through TurnRunner', () => {
     expect(reader).toBeDefined()
     const artifact = new SpooledJsonArtifact(reader!, 'json')
     const lines = await artifact.cat()
-    const parsed = JSON.parse(lines.join('\n')) as Record<string, number>
+    const parsed = JSON.parse(lines.join('\n')) as Record<string, unknown>
     expect(parsed.count).toBe(5)
-    expect(parsed.mean).toBe(30)
+    // `mean` is emitted as a precision-formatted BigNumber string; `median` stays a number.
+    expect(parsed.mean).toBe('30')
     expect(parsed.median).toBe(30)
   })
 

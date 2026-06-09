@@ -120,7 +120,7 @@ export class TurnRunner {
   #observabilityEmitter: TypedEventEmitter<TurnObservabilityEvents>
 
   /**
-   * @param config - Construction-time configuration validated against {@link turnRunnerConfigSchema}.
+   * @param config - Construction-time configuration validated against the turn-runner config schema.
    * @throws {@link @nhtio/adk!E_INVALID_TURN_RUNNER_CONFIG} when `config` does not satisfy the schema.
    */
   constructor(config: TurnRunnerConfig) {

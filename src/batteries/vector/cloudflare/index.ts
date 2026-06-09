@@ -107,6 +107,7 @@ const computeScore = (vec: number[], query: number[], metric: DistanceMetric): n
 }
 
 export interface CloudflareVectorizeVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection: {
     accountId: string
     apiKey: string
@@ -133,6 +134,7 @@ export class CloudflareVectorizeVectorStore extends BaseVectorStore {
     return this.options as CloudflareVectorizeVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined' && typeof fetch !== 'undefined'
   }

@@ -10,15 +10,17 @@
 import { describe, expect, it } from 'vitest'
 import type { CallableVectorStore } from '../contract'
 
-// A deterministic stub encoder: 3-dim vector from text features.
+/** A deterministic stub encoder producing a 3-dim vector from simple text features. */
 export const stubEncoder = async (
   texts: string[],
   _kind: 'query' | 'document'
 ): Promise<number[][]> =>
   texts.map((tx) => [tx.length, tx.includes('cat') ? 1 : 0, tx.includes('dog') ? 1 : 0])
 
-// A dimension-padding encoder factory: wraps the 3-feature stub and zero-extends to `dim`.
-// Used by backends that enforce a minimum dimension (e.g. Cloudflare Vectorize requires 32–1536).
+/**
+ * A dimension-padding encoder factory: wraps {@link stubEncoder} and zero-extends to `dim`. Used by
+ * backends that enforce a minimum dimension (e.g. Cloudflare Vectorize requires 32–1536).
+ */
 export const paddedStubEncoder =
   (dim: number) =>
   async (texts: string[], kind: 'query' | 'document'): Promise<number[][]> => {
@@ -34,17 +36,23 @@ const padVector = (v: number[], dim: number): number[] => {
   return [...v, ...new Array(dim - v.length).fill(0)]
 }
 
-// makeStore: () => Promise<CallableVectorStore> | CallableVectorStore  (already connected +
-// collection 'docs' created with the matching dimension). `dim` defaults to 3 — pass a larger
-// value for backends with a dimension floor (the harness pads every test vector to `dim`, and the
-// store's collection must be created at the same `dim`).
-//
-// `opts.retry` / `opts.timeout` are forwarded to every `it()`. Both default to vitest's defaults
-// (retry 0), so existing callers are unchanged. They exist for aggressively eventually-consistent
-// managed backends (e.g. Cloudflare Vectorize) whose read-after-write can flap for seconds: a
-// retried attempt re-runs `makeStore()` (re-clearing state) against an index that's had more time
-// to settle, turning transient-consistency flake into deterministic green without weakening any
-// assertion. Each `it` re-derives its store via makeStore, so retries are self-contained.
+/**
+ * Drive a vector-store adapter through the shared contract suite.
+ *
+ * @remarks
+ * `makeStore` must return an already-connected store whose `'docs'` collection is created at the
+ * matching dimension; it is re-invoked per test so retries are self-contained. `dim` defaults to 3
+ * — pass a larger value for backends with a dimension floor (the harness pads every test vector to
+ * `dim`). `opts.retry` / `opts.timeout` are forwarded to every `it()` (defaults: retry 0, 5s) and
+ * exist for aggressively eventually-consistent managed backends whose read-after-write can flap for
+ * seconds — a retried attempt re-runs `makeStore()` against an index that has had more time to
+ * settle, without weakening any assertion.
+ *
+ * @param label - Human-readable label for the suite (the adapter name).
+ * @param makeStore - Factory returning a fresh, connected store with the `'docs'` collection.
+ * @param dim - Vector dimensionality the harness pads to (default 3).
+ * @param opts - Per-`it` retry/timeout overrides.
+ */
 export const runVectorStoreConformance = (
   label: string,
   makeStore: () => Promise<CallableVectorStore>,

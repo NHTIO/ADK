@@ -35,6 +35,7 @@ import type {
 } from '../types'
 
 export interface Neo4jVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection: { url: string; username?: string; password?: string; database?: string }
 }
 
@@ -74,6 +75,7 @@ export class Neo4jVectorStore extends BaseVectorStore {
     return this.options as Neo4jVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }

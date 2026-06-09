@@ -11,6 +11,21 @@
 import { Tool } from '@nhtio/adk/common'
 import { validator } from '@nhtio/validation'
 import { isError, isObject } from '@nhtio/adk/guards'
+import { bigSum, bigMean, formatBig, bigToNumber } from '@nhtio/adk/lib/helpers/bignum'
+import type { BigNumber } from 'mathjs'
+
+/**
+ * Render a {@link BigNumber} aggregate as a JSON-friendly value: a plain `number` when the result
+ * is exactly representable as a float64 (|x| ≤ Number.MAX_SAFE_INTEGER, so existing consumers and
+ * tests see a number with no precision loss), or a full-precision string otherwise — covering both
+ * overflow (which `JSON.stringify` would turn into `null`) and the gap above 2^53 where float64
+ * silently rounds (e.g. 3 × MAX_SAFE_INTEGER).
+ */
+function aggregateValue(big: BigNumber): number | string {
+  const asNum = bigToNumber(big)
+  if (Number.isFinite(asNum) && Math.abs(asNum) <= Number.MAX_SAFE_INTEGER) return asNum
+  return formatBig(big, 16)
+}
 
 function getPath(obj: unknown, path: string): unknown {
   const parts = path.split('.')
@@ -106,6 +121,12 @@ type Operation =
   | { op: 'map_template'; template: string }
 
 function applyOperation(data: unknown, op: Operation): unknown {
+  // Guard malformed pipeline entries (null, non-object, or missing `op`) so they produce a clear
+  // error string rather than a TypeError from dereferencing `op.op`.
+  if (op === null || typeof op !== 'object' || typeof (op as { op?: unknown }).op !== 'string') {
+    throw new Error('Each operation must be an object with a string "op" field.')
+  }
+
   if (op.op === 'count') {
     if (Array.isArray(data)) return data.length
     if (isObject(data)) return Object.keys(data).length
@@ -160,9 +181,16 @@ function applyOperation(data: unknown, op: Operation): unknown {
     }
 
     case 'unique_by': {
-      const seen = new Set<unknown>()
+      const seen = new Set<string>()
       return arr.filter((item) => {
-        const key = getPath(item, op.key)
+        const raw = getPath(item, op.key)
+        // Serialise the key value so deep-equal objects/arrays dedupe by VALUE, not reference —
+        // JSON.parse produces a distinct reference per row, so a raw Set never matched them. This
+        // must catch BOTH plain objects and arrays, so a raw `typeof === 'object'` is intended here
+        // rather than the plain-object-only `isObject` guard.
+        // eslint-disable-next-line adk/prefer-is-object
+        const isObjectOrArray = typeof raw === 'object' && raw !== null
+        const key = isObjectOrArray ? JSON.stringify(raw) : `${typeof raw}:${String(raw)}`
         if (seen.has(key)) return false
         seen.add(key)
         return true
@@ -186,20 +214,34 @@ function applyOperation(data: unknown, op: Operation): unknown {
       return [...arr].reverse()
 
     case 'sum': {
+      // The total is accumulated in BigNumber so a sum exceeding float64 stays exact (returned as
+      // a precise string) instead of silently becoming Infinity → JSON null.
       const values = op.key ? arr.map((i) => getPath(i, op.key!)) : arr
-      return values.reduce<number>((acc, v) => acc + (typeof v === 'number' ? v : 0), 0)
+      const nums = values.filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+      // A non-empty input with no numeric values is almost always a mistake (e.g. an array of
+      // objects summed without a `key`). Returning 0 would be silently wrong, so error instead.
+      if (nums.length === 0 && arr.length > 0) {
+        throw new Error(
+          op.key
+            ? `No numeric values found at key "${op.key}".`
+            : 'No numeric values to sum. For an array of objects, pass a "key".'
+        )
+      }
+      return aggregateValue(bigSum(nums))
     }
 
     case 'avg': {
       const values = op.key ? arr.map((i) => getPath(i, op.key!)) : arr
-      const nums = values.filter((v): v is number => typeof v === 'number')
+      const nums = values.filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+      // null (not 0) signals "no numeric data" — unlike sum, an average has no neutral element,
+      // so null is an honest "no result" rather than a misleading number.
       if (nums.length === 0) return null
-      return nums.reduce((a, b) => a + b, 0) / nums.length
+      return aggregateValue(bigMean(nums))
     }
 
     case 'median': {
       const values = op.key ? arr.map((i) => getPath(i, op.key!)) : arr
-      const nums = values.filter((v): v is number => typeof v === 'number')
+      const nums = values.filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
       if (nums.length === 0) return null
       return medianOf(nums)
     }
@@ -241,7 +283,9 @@ function applyOperation(data: unknown, op: Operation): unknown {
     }
 
     case 'top_n': {
-      const dir = op.direction === 'asc' ? 1 : -1
+      // desc (default) ranks largest-first; asc ranks smallest-first. The base comparator
+      // `(bv - av)` / `localeCompare(bv, av)` is descending, so asc flips it.
+      const dir = op.direction === 'asc' ? -1 : 1
       return [...arr]
         .sort((a, b) => {
           const av = getPath(a, op.key)
@@ -303,7 +347,11 @@ export const jsonTransformTool = new Tool({
       try {
         current = applyOperation(current, operation)
       } catch (err) {
-        return `Error in operation ${i + 1} ("${operation.op}"): ${isError(err) ? err.message : String(err)}`
+        const opName =
+          operation && typeof operation === 'object' && 'op' in operation
+            ? String((operation as { op: unknown }).op)
+            : String(operation)
+        return `Error in operation ${i + 1} ("${opName}"): ${isError(err) ? err.message : String(err)}`
       }
     }
 

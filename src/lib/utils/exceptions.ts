@@ -41,7 +41,7 @@ export type CreatedException<T extends any[] = []> = typeof BaseException &
  * @typeParam T - Tuple of printf format argument types. Pass a non-empty tuple to require
  *   callers to supply interpolation values at the throw site.
  *
- * @param name - The `name` property set on thrown instances (used by {@link isNamedException}).
+ * @param name - The `name` property set on thrown instances (used by `isNamedException`).
  * @param message - Printf-style template string for the error message.
  * @param code - Machine-readable error code stored on the static and instance `code` property.
  * @param status - HTTP status code associated with this exception class.

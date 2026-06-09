@@ -227,13 +227,21 @@ export class Tool<A extends SpooledArtifact = SpooledArtifact> {
     return isInstanceOf(value, 'Tool', Tool)
   }
 
+  /** The tool's unique name, as exposed to the model in the tool definition. */
   declare readonly name: string
+  /** Human/model-facing description of what the tool does. */
   declare readonly description: string
+  /** Validation schema for the tool's arguments; also drives the generated parameter definition. */
   declare readonly inputSchema: Schema
+  /** Resolver for the artifact constructor used to wrap the handler's output, if any. */
   declare readonly artifactConstructor: ArtifactConstructorResolver<A> | undefined
+  /** Arbitrary per-tool metadata registry, passed through to the handler. */
   declare readonly meta: Registry
+  /** When `true`, the tool's results are not persisted to history (transient/one-shot). */
   declare readonly ephemeral: boolean
+  /** When `true`, the tool's output is treated as trusted content by the LLM battery's envelopes. */
   declare readonly trusted: boolean
+  /** How registration resolves a name clash in a {@link ToolRegistry}: throw, replace, or keep the existing. */
   declare readonly onCollision: 'throw' | 'replace' | 'keep'
 
   #name: string

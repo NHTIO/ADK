@@ -36,6 +36,7 @@ const literalKey = (prop: TSESTree.Property): string | undefined => {
 const isUndefinedValue = (node: TSESTree.Node): boolean =>
   node.type === 'Identifier' && node.name === 'undefined'
 
+/** ESLint rule: flags a Thought constructed with a payload but no replayCompatibility tag. */
 const thoughtPayloadRequiresReplayTagRule = createRule({
   name: 'thought-payload-requires-replay-tag',
   meta: {

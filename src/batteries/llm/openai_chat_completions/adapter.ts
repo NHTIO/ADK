@@ -648,7 +648,11 @@ export class OpenAIChatCompletionsAdapter {
             ctx.nack(new E_OPENAI_CHAT_COMPLETIONS_REQUEST_TIMEOUT([requestTimeoutMs]))
             return
           }
-          // Generic transport failure — surface as HTTP_ERROR with status 0.
+          // Generic transport failure (DNS, connection refused, TLS, socket drop) —
+          // fetch rejected before any HTTP response, so status is 0. Eligible for
+          // retry up to maxAttempts, mirroring the request-timeout branch above and
+          // the embeddings adapter. retriableStatuses gates HTTP responses only; it
+          // never applies here because there is no response.
           helpers.log.error({
             kind: 'transport-error',
             message: `Transport failure on attempt ${attempt}/${maxAttempts}: ${isError(err) ? err.message : String(err)}`,
@@ -658,6 +662,22 @@ export class OpenAIChatCompletionsAdapter {
               detail: isError(err) ? err.message : String(err),
             },
           })
+          if (attempt < maxAttempts) {
+            const delay = computeBackoff(attempt, retryCfg)
+            helpers.log.debug({
+              kind: 'retry-attempt',
+              message: `Retrying after transport failure in ~${delay}ms (attempt ${attempt + 1}/${maxAttempts})`,
+              payload: {
+                reason: 'transport-error',
+                delayMs: delay,
+                attempt: attempt + 1,
+                maxAttempts,
+              },
+            })
+            await sleepWithJitter(delay, ctx.abortSignal)
+            attempt += 1
+            continue
+          }
           ctx.nack(
             new E_OPENAI_CHAT_COMPLETIONS_HTTP_ERROR([0, isError(err) ? err.message : String(err)])
           )

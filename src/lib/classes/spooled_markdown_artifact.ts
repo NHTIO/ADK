@@ -58,6 +58,7 @@ interface MarkdownIndex {
  * requests it via `cat(bodyStartLine, bodyEndLine + 1)`.
  */
 export interface MarkdownSection {
+  /** ATX heading depth: 1 (`#`) through 6 (`######`). */
   depth: 1 | 2 | 3 | 4 | 5 | 6
   /** The heading text. */
   heading: string

@@ -36,14 +36,33 @@ export type SSEFrame =
   | { delayMs: number }
   | { error: string | Error }
 
+/**
+ * A single NDJSON (newline-delimited JSON) frame in a cassette — the streaming shape Ollama's
+ * native `/api/chat` emits. Unlike SSE there is no `data:` prefix and no `[DONE]` sentinel:
+ * `{ json }` is serialised and terminated with a single `\n`; `{ raw }` is enqueued verbatim (use
+ * for partial-line / split-object tests); `{ delayMs }` pauses the stream; `{ error }` aborts the
+ * stream with the supplied error. Stream termination is signalled in-band by a frame whose JSON
+ * carries `done: true`, not by a separate sentinel frame.
+ */
+export type NdjsonFrame =
+  | { json: unknown }
+  | { raw: string }
+  | { delayMs: number }
+  | { error: string | Error }
+
 /** Programmatic representation of one HTTP response. */
 export interface CassetteResponse {
   status?: number
   headers?: Record<string, string>
-  /** JSON body for single-response (non-streaming). Mutually exclusive with `sse`. */
+  /** JSON body for single-response (non-streaming). Mutually exclusive with `sse` / `ndjson`. */
   body?: unknown
-  /** SSE frames for streaming responses. Mutually exclusive with `body`. */
+  /** SSE frames for streaming responses. Mutually exclusive with `body` / `ndjson`. */
   sse?: ReadonlyArray<SSEFrame>
+  /**
+   * NDJSON frames for newline-delimited streaming responses (Ollama native `/api/chat`).
+   * Mutually exclusive with `body` / `sse`. Served with `content-type: application/x-ndjson`.
+   */
+  ndjson?: ReadonlyArray<NdjsonFrame>
 }
 
 /** Match criteria for a single request — all supplied criteria must hold. */
@@ -119,9 +138,62 @@ const renderSseFrame = (
   }
 }
 
+const renderNdjsonFrame = (
+  frame: NdjsonFrame,
+  controller: ReadableStreamDefaultController<Uint8Array>
+): Promise<void> | void => {
+  if ('json' in frame) {
+    controller.enqueue(encoder.encode(`${JSON.stringify(frame.json)}\n`))
+    return
+  }
+  if ('raw' in frame) {
+    controller.enqueue(encoder.encode(frame.raw))
+    return
+  }
+  if ('delayMs' in frame) {
+    return new Promise((resolve) => setTimeout(resolve, frame.delayMs))
+  }
+  if ('error' in frame) {
+    const err = isError(frame.error) ? frame.error : new Error(frame.error)
+    controller.error(err)
+    return
+  }
+}
+
 /** Build a `Response` object from a `CassetteResponse`. */
 export const materializeCassetteResponse = (resp: CassetteResponse): Response => {
   const status = resp.status ?? 200
+  if (resp.ndjson) {
+    const frames = resp.ndjson
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        try {
+          let errored = false
+          for (const f of frames) {
+            if (isObject(f) && 'error' in f) {
+              const errVal = (f as { error: unknown }).error
+              const err = isError(errVal) ? errVal : new Error(String(errVal))
+              controller.error(err)
+              errored = true
+              break
+            }
+            const result = renderNdjsonFrame(f, controller)
+            if (isInstanceOf(result, 'Promise', Promise)) await result
+          }
+          if (!errored) controller.close()
+        } catch (e) {
+          controller.error(e as Error)
+        }
+      },
+    })
+    return new Response(body, {
+      status,
+      headers: {
+        'content-type': 'application/x-ndjson',
+        ...(resp.headers ?? {}),
+      },
+    })
+  }
   if (resp.sse) {
     const frames = resp.sse
     const body = new ReadableStream<Uint8Array>({
@@ -500,6 +572,138 @@ export const singleStreamingCassette = (
       label: 'single-stream',
       request: { method: 'POST' },
       response: { sse: buildStreamingResponse(input) },
+    },
+  ],
+})
+
+// ─── Ollama native /api/chat builders ─────────────────────────────────────────
+
+/** Native Ollama generation-stats fields carried on the terminal (`done: true`) object. */
+export interface OllamaStats {
+  total_duration?: number
+  load_duration?: number
+  prompt_eval_count?: number
+  prompt_eval_duration?: number
+  eval_count?: number
+  eval_duration?: number
+}
+
+/** Native Ollama tool-call shape — `arguments` is a JSON OBJECT, and there is no `id`/`type`. */
+export interface OllamaToolCallSpec {
+  name: string
+  arguments: Record<string, unknown>
+}
+
+/**
+ * Programmatically build a non-streaming Ollama `/api/chat` response object (`done: true`).
+ * Note the native shape: a single top-level `message` (not `choices[]`), `thinking` for reasoning,
+ * `tool_calls[].function.arguments` as an object, and `done_reason` + ns stats at the top level.
+ */
+export const buildOllamaChatResponse = (input: {
+  content?: string
+  thinking?: string
+  toolCalls?: ReadonlyArray<OllamaToolCallSpec>
+  model?: string
+  doneReason?: 'stop' | 'load' | 'unload'
+  stats?: OllamaStats
+}): Record<string, unknown> => {
+  const message: Record<string, unknown> = {
+    role: 'assistant',
+    content: input.content ?? '',
+  }
+  if (input.thinking !== undefined) message.thinking = input.thinking
+  if (input.toolCalls && input.toolCalls.length > 0) {
+    message.tool_calls = input.toolCalls.map((tc) => ({
+      function: { name: tc.name, arguments: tc.arguments },
+    }))
+  }
+  return {
+    model: input.model ?? 'llama3.2',
+    created_at: '2026-01-01T00:00:00.000000Z',
+    message,
+    done: true,
+    done_reason: input.doneReason ?? 'stop',
+    ...(input.stats ?? {}),
+  }
+}
+
+/**
+ * Programmatically build NDJSON frames for a streaming Ollama `/api/chat` response.
+ * Emits a `message` chunk per content / thinking delta (and whole `tool_calls` on a single chunk,
+ * as Ollama does — no fragment accumulation), then a terminal `{ done: true, ...stats }` frame.
+ * There is no `[DONE]` sentinel; the `done: true` frame IS the terminator.
+ */
+export const buildOllamaStreamFrames = (input: {
+  contentDeltas?: ReadonlyArray<string>
+  thinkingDeltas?: ReadonlyArray<string>
+  toolCalls?: ReadonlyArray<OllamaToolCallSpec>
+  model?: string
+  doneReason?: 'stop' | 'load' | 'unload'
+  stats?: OllamaStats
+}): NdjsonFrame[] => {
+  const model = input.model ?? 'llama3.2'
+  const createdAt = '2026-01-01T00:00:00.000000Z'
+  const frames: NdjsonFrame[] = []
+  const chunk = (message: Record<string, unknown>): NdjsonFrame => ({
+    json: { model, created_at: createdAt, message, done: false },
+  })
+  for (const d of input.thinkingDeltas ?? []) {
+    frames.push(chunk({ role: 'assistant', content: '', thinking: d }))
+  }
+  for (const d of input.contentDeltas ?? []) {
+    frames.push(chunk({ role: 'assistant', content: d }))
+  }
+  if (input.toolCalls && input.toolCalls.length > 0) {
+    frames.push(
+      chunk({
+        role: 'assistant',
+        content: '',
+        tool_calls: input.toolCalls.map((tc) => ({
+          function: { name: tc.name, arguments: tc.arguments },
+        })),
+      })
+    )
+  }
+  // Terminal frame: empty message + done:true + stats. This is the NDJSON terminator.
+  frames.push({
+    json: {
+      model,
+      created_at: createdAt,
+      message: { role: 'assistant', content: '' },
+      done: true,
+      done_reason: input.doneReason ?? 'stop',
+      ...(input.stats ?? {}),
+    },
+  })
+  return frames
+}
+
+/** One-liner cassette for a single non-streaming Ollama `/api/chat` response. */
+export const singleOllamaResponseCassette = (
+  name: string,
+  input: Parameters<typeof buildOllamaChatResponse>[0]
+): Cassette => ({
+  name,
+  interactions: [
+    {
+      label: 'single-ollama-response',
+      request: { method: 'POST' },
+      response: { body: buildOllamaChatResponse(input) },
+    },
+  ],
+})
+
+/** One-liner cassette for a single streaming Ollama `/api/chat` response. */
+export const singleOllamaStreamCassette = (
+  name: string,
+  input: Parameters<typeof buildOllamaStreamFrames>[0]
+): Cassette => ({
+  name,
+  interactions: [
+    {
+      label: 'single-ollama-stream',
+      request: { method: 'POST' },
+      response: { ndjson: buildOllamaStreamFrames(input) },
     },
   ],
 })

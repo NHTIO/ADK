@@ -36,6 +36,7 @@ import type {
  * Connection options for {@link WeaviateVectorStore}.
  */
 export interface WeaviateVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection?: {
     url?: string
     host?: string
@@ -127,6 +128,7 @@ export class WeaviateVectorStore extends BaseVectorStore {
   #weaviate: any = null
   #dims = new Map<string, number>()
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }

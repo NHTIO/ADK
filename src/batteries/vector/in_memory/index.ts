@@ -32,6 +32,7 @@ export class InMemoryVectorStore extends BaseVectorStore {
   #collections = new Map<string, Map<string, StoredRow>>()
   #dims = new Map<string, number>()
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return true
   }

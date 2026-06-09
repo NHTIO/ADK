@@ -93,6 +93,7 @@ const makeHelpers = (): DispatchExecutorHelpers & {
       warn: noopLog,
       error: noopLog,
     },
+    reportGenerationStats: noopLog,
     _events: events,
   } as unknown as DispatchExecutorHelpers & { _events: typeof events }
 }

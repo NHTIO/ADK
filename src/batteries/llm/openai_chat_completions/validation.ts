@@ -287,7 +287,10 @@ export const openAIChatCompletionsOptionsSchema = validator
     presence_penalty: validator.number().min(-2).max(2).optional(),
     prompt_cache_key: validator.string().optional(),
     prompt_cache_retention: validator.string().valid('in_memory', '24h').optional(),
-    reasoning_effort: validator.string().valid('minimal', 'low', 'medium', 'high').optional(),
+    reasoning_effort: validator
+      .string()
+      .valid('none', 'minimal', 'low', 'medium', 'high')
+      .optional(),
     response_format: responseFormatSchema.optional(),
     safety_identifier: validator.string().optional(),
     seed: validator.number().integer().optional(),

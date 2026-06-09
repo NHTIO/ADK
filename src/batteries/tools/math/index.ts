@@ -114,16 +114,20 @@ function evaluateLatex(latex: string): number {
   // \sinh, \cosh, \tanh, \ln, \log, \exp, \abs, etc.
   expr = expr.replace(/\\(sin|cos|tan|cot|sec|csc|sinh|cosh|tanh|ln|log|exp|abs|det)/g, '$1')
 
-  // Subscript-based log: \log_2(x) → log2(x), or just strip subscript for single-arg
-  expr = expr.replace(/log_\{?(\w+)\}?\(/g, (_, base) => {
-    const baseLower = base.toLowerCase()
-    if (baseLower === '10') return 'log10('
-    if (baseLower === '2') return 'log2('
-    if (baseLower === 'e') return 'ln('
-    // Generic base: convert log_b(x) to ln(x)/ln(b) — evaluatex handles the
-    // resulting expression fine.
-    return `ln(/ln(${base})`
-  })
+  // Subscript-based log: \log_2(x) → log2(x), \log_10(x) → log10(x), \log_e(x) → ln(x), and a
+  // generic base \log_b(arg) → (ln(arg)/ln(b)) via change of base. The argument is captured here
+  // (single level of nested parens) so the change-of-base form is well-formed — previously the
+  // argument was not captured and the output was the malformed `ln(/ln(b)`.
+  expr = expr.replace(
+    /log_\{?(\w+)\}?\(((?:[^()]|\([^()]*\))*)\)/g,
+    (_, base: string, arg: string) => {
+      const baseLower = base.toLowerCase()
+      if (baseLower === '10') return `log10(${arg})`
+      if (baseLower === '2') return `log2(${arg})`
+      if (baseLower === 'e') return `ln(${arg})`
+      return `(ln(${arg})/ln(${base}))`
+    }
+  )
   // Strip any remaining subscripts (e.g. x_1, a_n)
   expr = expr.replace(/_\{[^}]*\}/g, '')
   expr = expr.replace(/_\w/g, '')
@@ -153,6 +157,11 @@ function evaluateLatex(latex: string): number {
   expr = expr.replace(/\\qquad/g, ' ')
   // Strip \text{...} blocks entirely
   expr = expr.replace(/\\text\{([^{}]*)\}/g, '')
+
+  // Scientific notation: evaluatex doesn't understand `2e3` natively (it reads `e3` as a symbol),
+  // so rewrite a numeric literal's exponent into an explicit power: `2e3` → `(2*10^(3))`,
+  // `1.5e-8` → `(1.5*10^(-8))`. Done BEFORE implicit-multiplication insertion.
+  expr = expr.replace(/(\d(?:\.\d+)?)[eE]([+-]?\d+)/g, '($1*10^($2))')
 
   // Implicit multiplication: 2x, 3(x+1), etc.
   expr = expr.replace(/(\d)([a-zA-Z(])/g, '$1*$2')
@@ -549,6 +558,12 @@ export const calculateTool = new Tool({
 
     try {
       const result = math.evaluate!(expression)
+      // A scalar that overflowed float64 (e.g. `2^5000`, `factorial(200)`) comes back as
+      // `Infinity`/`NaN`. Surface that as a clear error rather than printing `Result: Infinity`,
+      // which reads like a genuine answer.
+      if (typeof result === 'number' && !Number.isFinite(result)) {
+        return `Error: result is not finite (${result}) — the value overflows JavaScript's numeric range.`
+      }
       const node = math.parse!(expression)
       const katex = node.toTex()
       return `Result: ${result}\nKaTeX: $${katex} = ${result}$`

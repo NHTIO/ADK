@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { makeToolCtxStub } from '../../../../_fixtures/tool_ctx_stub'
+import { callTool, makeToolCtxStub } from '../../../../_fixtures/tool_ctx_stub'
 import { E_INVALID_TOOL_ARGS } from '../../../../../src/lib/exceptions/runtime'
 import { formatListTool, formatNumberTool } from '../../../../../src/batteries/tools/formatting'
 
@@ -115,6 +115,37 @@ describe('formatNumberTool', () => {
   })
 })
 
+describe('formatNumberTool no-crash adversarial cases (callTool)', () => {
+  // NaN / Infinity / 1e308 all fail validator.number() (not-a-number / infinity / not-safe),
+  // so the CORRECT, non-crashing behaviour is a clean E_INVALID_TOOL_ARGS schema rejection —
+  // not a resolved result. (A clean rejection is acceptable; an E_TOOL_DOWNSTREAM_ERROR is not.)
+  it('formatNumber: NaN is rejected cleanly by the schema', async () => {
+    const result = await callTool(formatNumberTool, { value: Number.NaN })
+    expect(result.kind).toBe('threw')
+    if (result.kind === 'threw') expect(result.errorName).toBe('E_INVALID_TOOL_ARGS')
+  })
+
+  it('formatNumber: Infinity is rejected cleanly by the schema', async () => {
+    const result = await callTool(formatNumberTool, { value: Number.POSITIVE_INFINITY })
+    expect(result.kind).toBe('threw')
+    if (result.kind === 'threw') expect(result.errorName).toBe('E_INVALID_TOOL_ARGS')
+  })
+
+  it('formatNumber: 1e308 (not a safe integer) is rejected cleanly by the schema', async () => {
+    const result = await callTool(formatNumberTool, { value: 1e308 })
+    expect(result.kind).toBe('threw')
+    if (result.kind === 'threw') expect(result.errorName).toBe('E_INVALID_TOOL_ARGS')
+  })
+
+  it('formatNumber: missing currency for currency style returns graceful error', async () => {
+    const result = await callTool(formatNumberTool, { value: 100, style: 'currency' })
+    expect(result.kind).toBe('resolved')
+    if (result.kind === 'resolved') {
+      expect(result.out).toMatch(/^Error:/)
+    }
+  })
+})
+
 describe('formatListTool', () => {
   describe('bullet', () => {
     it('joins items with bullet prefix', async () => {
@@ -124,6 +155,19 @@ describe('formatListTool', () => {
     it('respects indent', async () => {
       const out = await runList({ items: ['a'], indent: 4 })
       expect(out).toBe('    • a')
+    })
+
+    it('clamps a large indent to the 100-space maximum', async () => {
+      const out = await runList({ items: ['a'], indent: 10000 })
+      expect(out).toBe(' '.repeat(100) + '• a')
+    })
+
+    // An enormous finite indent (which passes the number schema) must not reach an unbounded
+    // `' '.repeat(indent)` (RangeError). It clamps to 100 and renders normally.
+    it('does not crash on an enormous indent (1e9) — clamps to 100', async () => {
+      const result = await callTool(formatListTool, { items: ['a'], indent: 1e9 })
+      expect(result.kind).toBe('resolved')
+      if (result.kind === 'resolved') expect(result.out).toBe(' '.repeat(100) + '• a')
     })
   })
 

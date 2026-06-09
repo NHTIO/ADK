@@ -21,6 +21,7 @@ import type { SearchPlan, UpsertPlan, DeletePlan, CollectionSpec } from '../plan
 import type { VectorMatch, VectorStoreCapabilities, BaseVectorStoreOptions } from '../types'
 
 export interface MilvusVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection?: {
     address?: string
     url?: string
@@ -71,6 +72,7 @@ export class MilvusVectorStore extends BaseVectorStore {
   get #opts() {
     return this.options as MilvusVectorStoreOptions
   }
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }
@@ -286,6 +288,7 @@ export class MilvusVectorStore extends BaseVectorStore {
       throw new E_VECTOR_STORE_DELETE_FAILED([String(err)])
     }
   }
+  /** Project a raw Milvus hit into a {@link VectorMatch} per the requested projection, normalizing its score. */
   projectHit(hit: any, projection: any, metric: string): VectorMatch {
     const out: VectorMatch = {}
     if (projection.id) {
@@ -306,11 +309,13 @@ export class MilvusVectorStore extends BaseVectorStore {
     }
     return out
   }
+  /** Instance wrapper over the module-level {@link translateMilvusFilter}. */
   translateMilvusFilter(filter?: VectorFilter): string {
     return translateMilvusFilter(filter)
   }
 }
 
+/** Translate a neutral {@link VectorFilter} into a Milvus boolean filter expression string. */
 export const translateMilvusFilter = (filter?: VectorFilter): string => {
   if (!filter) return ''
   if (isRawFilter(filter)) {

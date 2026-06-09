@@ -20,6 +20,7 @@ import type { VectorFilter } from '../filters'
 import type { SearchPlan, UpsertPlan, DeletePlan, CollectionSpec } from '../plan'
 import type { VectorMatch, VectorStoreCapabilities, BaseVectorStoreOptions } from '../types'
 
+/** Translate a neutral {@link VectorFilter} into a Qdrant filter object. */
 export const translateQdrantFilter = (
   filter?: VectorFilter
 ): Record<string, unknown> | undefined => {
@@ -101,6 +102,7 @@ export const translateQdrantFilter = (
 }
 
 export interface QdrantVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection?: { url?: string; host?: string; port?: number; apiKey?: string; https?: boolean }
 }
 
@@ -152,6 +154,7 @@ export class QdrantVectorStore extends BaseVectorStore {
   get #opts() {
     return this.options as QdrantVectorStoreOptions
   }
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }
@@ -302,6 +305,7 @@ export class QdrantVectorStore extends BaseVectorStore {
       throw new E_VECTOR_STORE_DELETE_FAILED([String(err)])
     }
   }
+  /** Project a raw Qdrant hit into a {@link VectorMatch} per the requested projection, normalizing its score. */
   projectHit(hit: any, projection: any, metric: string): VectorMatch {
     const out: VectorMatch = {}
     const payload = hit.payload || {}
@@ -332,6 +336,7 @@ export class QdrantVectorStore extends BaseVectorStore {
     }
     return out
   }
+  /** Instance wrapper over the module-level {@link translateQdrantFilter}. */
   translateQdrantFilter(filter?: VectorFilter): Record<string, unknown> | undefined {
     return translateQdrantFilter(filter)
   }

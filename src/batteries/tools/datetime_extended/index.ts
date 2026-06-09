@@ -354,15 +354,16 @@ export const datePeriodTool = new Tool({
         result = boundary === 'start' ? dt.startOf('month') : dt.endOf('month')
         break
       case 'quarter': {
+        // Months since the fiscal year began (0–11), then the offset into the current quarter.
+        // Stepping back that many whole months from the start of `dt`'s month lands on the quarter
+        // start — and crucially handles quarters that span the calendar-year boundary (e.g. an
+        // FY-Feb Q4 of Nov–Jan): subtracting months rolls the year back correctly, where the old
+        // `dt.set({month})` kept the current year and produced a date in the wrong quarter.
         const monthInFY = (dt.month - fyStart + 12) % 12
-        const qIndex = Math.floor(monthInFY / 3)
-        const qStartMonth = ((qIndex * 3 + fyStart - 1) % 12) + 1
-        const qStart = dt.set({ month: qStartMonth, day: 1 }).startOf('day')
-        const adjusted = qStart > dt ? qStart.minus({ months: 3 }) : qStart
+        const monthsIntoQuarter = monthInFY % 3
+        const qStart = dt.startOf('month').minus({ months: monthsIntoQuarter })
         result =
-          boundary === 'start'
-            ? adjusted
-            : adjusted.plus({ months: 3 }).minus({ days: 1 }).endOf('day')
+          boundary === 'start' ? qStart : qStart.plus({ months: 3 }).minus({ days: 1 }).endOf('day')
         break
       }
       case 'year':

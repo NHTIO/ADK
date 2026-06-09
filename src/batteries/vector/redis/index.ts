@@ -38,6 +38,7 @@ import type {
 } from '../types'
 
 export interface RedisVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection?: { url?: string; username?: string; password?: string }
 }
 
@@ -159,6 +160,7 @@ export class RedisVectorStore extends BaseVectorStore {
     return this.options as RedisVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }

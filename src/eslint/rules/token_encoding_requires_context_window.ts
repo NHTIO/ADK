@@ -33,6 +33,7 @@ const isNullOrUndefined = (node: TSESTree.Node): boolean =>
   (node.type === 'Literal' && node.value === null) ||
   (node.type === 'Identifier' && node.name === 'undefined')
 
+/** ESLint rule: flags setting a tokenEncoding without also setting a contextWindow. */
 const tokenEncodingRequiresContextWindowRule = createRule({
   name: 'token-encoding-requires-context-window',
   meta: {

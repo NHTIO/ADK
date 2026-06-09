@@ -147,7 +147,9 @@ export const formatListTool = new Tool({
       style: string
       indent: number
     }
-    const indent = Math.max(0, Math.floor(rawIndent))
+    // Clamp indent to a sane maximum: an unbounded value reaches `' '.repeat(indent)` and throws
+    // RangeError (Invalid string length). 100 spaces is far past any real formatting need.
+    const indent = Math.min(100, Math.max(0, Math.floor(rawIndent)))
     const pad = ' '.repeat(indent)
 
     if (items.length === 0) return ''

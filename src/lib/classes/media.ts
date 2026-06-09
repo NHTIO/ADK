@@ -179,15 +179,25 @@ const conservativeHazardForKind = (kind: MediaKind): MediaModalityHazard => {
  * Shape returned by {@link Media.toJSON}. Metadata-only — bytes and the reader are stripped so
  * naive event/log serialisation never materialises bytes.
  */
+/** The plain-object, JSON-safe form of a {@link Media} produced by {@link Media.toJSON}. */
 export interface SerializedMedia {
+  /** Stable identifier for this media asset. */
   id: string
+  /** High-level modality of the asset (e.g. image, audio, document). */
   kind: MediaKind
+  /** MIME type of the underlying bytes (e.g. `image/png`). */
   mimeType: string
+  /** Original or suggested file name for the asset. */
   filename: string
+  /** Optional provenance string (URL, path, or other origin marker). */
   source?: string
+  /** Trust tier governing how the asset's content is framed to the model. */
   trustTier: MediaTrustTier
+  /** Whether the modality can carry hidden instructions (`extractable-instructions`) or is opaque-perceptual. */
   modalityHazard: MediaModalityHazard
+  /** Adapter-scoped side-channel data keyed by name (e.g. provider upload handles). */
   stash: Record<string, MediaStashEntry>
+  /** Size of the underlying bytes in bytes, when known. */
   byteLength?: number
 }
 

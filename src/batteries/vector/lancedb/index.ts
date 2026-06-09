@@ -35,6 +35,7 @@ import type {
 } from '../types'
 
 export interface LanceDBVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection: { uri: string }
 }
 
@@ -78,6 +79,7 @@ export class LanceDBVectorStore extends BaseVectorStore {
     return this.options as LanceDBVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }

@@ -169,6 +169,10 @@ export const compareRecordsTool = new Tool({
       if (x === y) return true
       if (typeof x !== typeof y) return false
       if (x === null || y === null) return x === y
+      // An array and a plain object are never equal, even if the object has matching integer-like
+      // keys ([1,2] vs {"0":1,"1":2}). Without this guard, a one-sided array falls through to the
+      // Object.keys() comparison and is wrongly reported as identical.
+      if (Array.isArray(x) !== Array.isArray(y)) return false
       if (Array.isArray(x) && Array.isArray(y)) {
         if (x.length !== y.length) return false
         for (const [i, element] of x.entries()) {

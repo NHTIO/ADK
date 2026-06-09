@@ -120,7 +120,7 @@ const drainStream = async (stream: ReadableStream<Uint8Array>): Promise<Uint8Arr
  * owns the bytes, the reader is a view. Mutating the store after handing out a reader does not
  * invalidate the reader.
  *
- * Implements {@link @nhtio/adk!SpoolStore} (i.e. `ByteStore<SpoolReader>`).
+ * Implements {@link @nhtio/adk/common!SpoolStore} (i.e. `ByteStore<SpoolReader>`).
  *
  * @example
  * ```ts

@@ -15,25 +15,46 @@ import type {
   RetrievableDeleteFn,
 } from '@nhtio/adk'
 
+/** Configuration for wiring a vector store to the ADK's retrievable lifecycle callbacks. */
 export interface VectorRetrievableGlueOptions {
+  /** The callable vector store the callbacks query and write to. */
   store: CallableVectorStore
+  /** Collection the retrievables live in. */
   collection: string
+  /** Trust tier for fetched matches — a fixed tier, or a per-match function. */
   trustTier: RetrievableTrustTier | ((m: VectorMatch) => RetrievableTrustTier)
+  /** Maximum number of retrievables to fetch per turn (default 5). */
   topK?: number
+  /** Optional filter applied to every retrieval query. */
   filter?: VectorFilter
+  /** Derives the retrieval query from the turn context; defaults to the last user message. */
   deriveQuery?: (
     ctx: TurnContext
   ) => string | number[] | undefined | Promise<string | number[] | undefined>
+  /** Maps a {@link VectorMatch} to a raw retrievable (trust tier applied separately). */
   toRetrievable?: (m: VectorMatch) => Omit<RawRetrievable, 'trustTier'>
 }
 
+/** The four retrievable-lifecycle callbacks produced by {@link createVectorRetrievableCallbacks}. */
 export interface VectorRetrievableCallbacks {
+  /** Fetches retrievables relevant to the current turn. */
   fetchRetrievablesCallback: RetrievableRetrievalFn
+  /** Persists a new retrievable into the store. */
   storeRetrievableCallback: RetrievableStoreFn
+  /** Replaces an existing retrievable (upsert). */
   mutateRetrievableCallback: RetrievableMutateFn
+  /** Deletes a retrievable by id. */
   deleteRetrievableCallback: RetrievableDeleteFn
 }
 
+/**
+ * Build the retrievable-lifecycle callbacks (fetch/store/mutate/delete) that bridge a callable
+ * vector store to the ADK's retrievable subsystem, applying the supplied query derivation,
+ * match-to-retrievable mapping, and trust-tier assignment.
+ *
+ * @param opts - The store, collection, and behaviour overrides.
+ * @returns The four wired {@link VectorRetrievableCallbacks}.
+ */
 export const createVectorRetrievableCallbacks = (
   opts: VectorRetrievableGlueOptions
 ): VectorRetrievableCallbacks => {

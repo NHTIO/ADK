@@ -98,6 +98,7 @@ const getCB = async (): Promise<any> => {
 }
 
 export interface CouchbaseVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection: {
     url: string
     username: string
@@ -148,6 +149,7 @@ export class CouchbaseVectorStore extends BaseVectorStore {
     return `${this.#phys(collection)}_vec`
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }

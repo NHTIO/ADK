@@ -26,18 +26,27 @@ export type VectorMetadata = Record<string, VectorMetadataValue>
 
 /** A stored vector record. All fields are optional; at minimum, an id is required. */
 export interface VectorRecord {
+  /** Unique record identifier within its collection. */
   id: string
+  /** The embedding vector; omit to let the backend encode `document` server-side. */
   vector?: number[]
+  /** The source document/text associated with the record. */
   document?: string
+  /** Arbitrary metadata attached to the record. */
   metadata?: VectorMetadata
 }
 
 /** A result row from a vector search or filter scan. All fields are opt-in via .select(). */
 export interface VectorMatch {
+  /** The matched record's id (when projected). */
   id?: string
+  /** Similarity score for the match (when applicable). */
   score?: number
+  /** The record's metadata (when projected). */
   metadata?: VectorMetadata
+  /** The record's document body (when projected). */
   document?: string
+  /** The record's stored vector (when projected). */
   vector?: number[]
 }
 
@@ -77,25 +86,39 @@ export type VectorConsistency = 'strong' | 'best-effort' | 'eventual'
  *     store-level `consistency` option is set; `modes` enumerates what it accepts.
  */
 export interface VectorConsistencyCapability {
+  /** Whether the backend honours a caller-supplied {@link VectorConsistency} (else it is a no-op). */
   configurable: boolean
+  /** The consistency mode applied when neither a per-op nor store-level mode is set. */
   default: VectorConsistency
+  /** The consistency modes the backend accepts. */
   modes: VectorConsistency[]
 }
 
+/** Fixed per-adapter capability flags — static truth about what a backend supports. */
 export interface VectorStoreCapabilities {
-  transactions: boolean // multi-op ACID (pgvector, sqlite-vec only)
-  namedVectors: boolean // multi-vector collections (Qdrant, Weaviate)
-  rename: boolean // renameCollection supported
-  rawSql: boolean // .whereRaw() accepts a SQL string + bindings
-  builtInEncoding: boolean // backend embeds text server-side (Pinecone, Weaviate)
-  consistency: VectorConsistencyCapability // read-after-write story + configurable default
+  /** Multi-op ACID transactions (pgvector, sqlite-vec only). */
+  transactions: boolean
+  /** Multi-vector collections (Qdrant, Weaviate). */
+  namedVectors: boolean
+  /** Whether `renameCollection` is supported. */
+  rename: boolean
+  /** Whether `.whereRaw()` accepts a SQL string plus bindings. */
+  rawSql: boolean
+  /** Whether the backend embeds text server-side (Pinecone, Weaviate). */
+  builtInEncoding: boolean
+  /** The backend's read-after-write story and configurable default. */
+  consistency: VectorConsistencyCapability
 }
 
 /** Shared base options every adapter extends with its own connection block. */
 export interface BaseVectorStoreOptions {
+  /** Distance metric used for similarity (e.g. cosine, euclidean, dot). Defaults to the adapter's preferred metric. */
   metric?: DistanceMetric
+  /** Function that turns text into vectors. Required unless the backend has built-in encoding. */
   encoder?: VectorEncoderFn
+  /** Embedding dimensionality. Required by backends that must declare it at collection-creation time. */
   dimensions?: number
+  /** Collection name used when a call omits an explicit one. */
   defaultCollection?: string
   /**
    * Store-wide read-after-write guarantee for writes. Overrides the adapter's declared
@@ -108,8 +131,12 @@ export interface BaseVectorStoreOptions {
 
 /** Options for ensuring a collection exists. */
 export interface EnsureCollectionOptions {
+  /** Name of the collection to ensure. */
   collection: string
+  /** Embedding dimensionality of the collection's vector column. */
   dimensions: number
+  /** Distance metric for the collection (defaults to the adapter's preferred metric). */
   metric?: DistanceMetric
+  /** When `true`, ensuring an existing collection is a no-op rather than an error. */
   ifNotExists?: boolean
 }

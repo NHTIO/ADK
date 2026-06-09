@@ -36,6 +36,7 @@ import type {
 const EMBEDDER = 'default'
 
 export interface MeilisearchVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection?: { host?: string; apiKey?: string }
 }
 
@@ -67,6 +68,7 @@ export class MeilisearchVectorStore extends BaseVectorStore {
     return this.options as MeilisearchVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }

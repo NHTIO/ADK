@@ -16,7 +16,9 @@
  * satisfies it structurally, so batteries can pass their own richer config objects directly.
  */
 export interface BackoffConfig {
+  /** Base delay in milliseconds for the first retry; doubles each attempt (default 500). */
   baseDelayMs?: number
+  /** Upper bound in milliseconds on any single backoff delay (default 30_000). */
   maxDelayMs?: number
 }
 

@@ -34,6 +34,7 @@ export class OramaVectorStore extends BaseVectorStore {
   #orama: any | null = null
   #dbs = new Map<string, any>()
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return true
   }

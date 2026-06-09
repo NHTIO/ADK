@@ -127,6 +127,7 @@ export class BaseException extends Error {
     Error.captureStackTrace(this, ErrorConstructor)
   }
 
+  /** Tag used by `Object.prototype.toString` — reports the concrete exception class name. */
   get [Symbol.toStringTag]() {
     return this.constructor.name
   }

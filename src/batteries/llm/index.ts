@@ -21,3 +21,30 @@ export type {
   WebLLMEngine,
   WebLLMInitProgressReport,
 } from './webllm_chat_completions'
+
+export { OllamaAdapter } from './ollama'
+export { ollamaOptionsSchema } from './ollama'
+export { validateOptions as validateOllamaOptions } from './ollama'
+export {
+  E_INVALID_OLLAMA_OPTIONS,
+  E_OLLAMA_CONTEXT_OVERFLOW,
+  E_OLLAMA_HTTP_ERROR,
+  E_OLLAMA_STREAM_ERROR,
+  E_OLLAMA_STREAM_STALLED,
+  E_OLLAMA_REQUEST_TIMEOUT,
+  E_OLLAMA_INVALID_TOOL_CALL_ARGS,
+  E_OLLAMA_UNSUPPORTED_MEDIA_MODALITY,
+} from './ollama'
+export type {
+  OllamaThink,
+  OllamaFormat,
+  OllamaRuntimeOptions,
+  OllamaToolCall,
+  OllamaMessage,
+  OllamaTool,
+  OllamaChatRequestBody,
+  OllamaChatStreamChunk,
+  OllamaChatResponse,
+  OllamaHelpers,
+  OllamaAdapterOptions,
+} from './ollama'

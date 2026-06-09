@@ -73,6 +73,7 @@ const getS3Vectors = async (): Promise<{
 }
 
 export interface S3VectorsVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection: {
     bucket: string
     region?: string
@@ -191,6 +192,7 @@ export class S3VectorsVectorStore extends BaseVectorStore {
     }
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }

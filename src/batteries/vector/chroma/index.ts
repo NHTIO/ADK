@@ -26,6 +26,7 @@ import type {
 } from '../types'
 
 export interface ChromaVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection?: { url?: string; host?: string; port?: number; ssl?: boolean }
 }
 
@@ -45,6 +46,7 @@ const getSpace = (metric: string): string => {
   return 'cosine'
 }
 
+/** Translate a neutral {@link VectorFilter} into Chroma's `where` filter object. */
 export const translateChromaWhere = (
   filter?: VectorFilter
 ): Record<string, unknown> | undefined => {
@@ -131,6 +133,7 @@ export class ChromaVectorStore extends BaseVectorStore {
     return this.options as ChromaVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }
@@ -174,6 +177,7 @@ export class ChromaVectorStore extends BaseVectorStore {
     this.#collectionCache.clear()
   }
 
+  /** Resolve (and cache) the underlying Chroma collection handle for `name`. */
   async getCollection(name: string): Promise<any> {
     let collection = this.#collectionCache.get(name)
     if (collection) return collection

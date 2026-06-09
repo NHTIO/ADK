@@ -9,8 +9,8 @@
  */
 
 import { Tool } from '@nhtio/adk/common'
-import { isError } from '@nhtio/adk/guards'
 import { validator } from '@nhtio/validation'
+import { isError, isObject } from '@nhtio/adk/guards'
 
 function csvEscape(value: unknown): string {
   const str = value === null || value === undefined ? '' : String(value)
@@ -78,13 +78,23 @@ export const formatTableTool = new Tool({
     if (!Array.isArray(rows)) return 'Error: Input must be a JSON array.'
     if (rows.length === 0) return 'Empty array — no data to display.'
 
+    // Columns default to the first row's keys, but only an object row has keys. If columns aren't
+    // given and the first row isn't an object, there's nothing to tabulate — error clearly rather
+    // than throwing on `Object.keys(null)`.
+    if (!explicitColumns && !isObject(rows[0])) {
+      return 'Error: Cannot infer columns — the first row is not an object. Provide "columns", or pass an array of objects.'
+    }
     const columns = explicitColumns ?? Object.keys(rows[0] as Record<string, unknown>)
+
+    // Read a cell safely: a null/primitive row has no properties, so it yields empty cells rather
+    // than throwing on `row[col]`.
+    const cell = (row: unknown, col: string): unknown =>
+      isObject(row) ? (row as Record<string, unknown>)[col] : undefined
 
     if (format === 'csv') {
       const lines = [columns.map(csvEscape).join(',')]
       for (const row of rows) {
-        const obj = row as Record<string, unknown>
-        lines.push(columns.map((col) => csvEscape(obj[col])).join(','))
+        lines.push(columns.map((col) => csvEscape(cell(row, col))).join(','))
       }
       return lines.join('\n')
     }
@@ -92,8 +102,7 @@ export const formatTableTool = new Tool({
     if (format === 'tsv') {
       const lines = [columns.map(tsvEscape).join('\t')]
       for (const row of rows) {
-        const obj = row as Record<string, unknown>
-        lines.push(columns.map((col) => tsvEscape(obj[col])).join('\t'))
+        lines.push(columns.map((col) => tsvEscape(cell(row, col))).join('\t'))
       }
       return lines.join('\n')
     }
@@ -101,8 +110,7 @@ export const formatTableTool = new Tool({
     const header = '| ' + columns.map(mdEscape).join(' | ') + ' |'
     const separator = '| ' + columns.map(() => '---').join(' | ') + ' |'
     const dataRows = rows.map((row) => {
-      const obj = row as Record<string, unknown>
-      return '| ' + columns.map((col) => mdEscape(obj[col])).join(' | ') + ' |'
+      return '| ' + columns.map((col) => mdEscape(cell(row, col))).join(' | ') + ' |'
     })
     return [header, separator, ...dataRows].join('\n')
   },

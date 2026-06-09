@@ -35,6 +35,7 @@ import type {
 } from '../types'
 
 export interface TypesenseVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection?: {
     host?: string
     port?: number
@@ -71,6 +72,7 @@ export class TypesenseVectorStore extends BaseVectorStore {
     return this.options as TypesenseVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }

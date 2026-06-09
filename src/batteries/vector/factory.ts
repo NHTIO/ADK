@@ -7,9 +7,11 @@ import { validateCreateConfig, resolveClientCtor } from './validation'
 import type { CallableVectorStore, BaseVectorStore } from './contract'
 import type { BaseVectorStoreOptions, VectorEncoderFn, EncodeKind } from './types'
 
-// The adapter class shape the factory accepts as 'client'.
+/** The adapter class shape the factory accepts as `client` — a constructor with an optional availability probe. */
 export interface VectorStoreConstructor<O extends BaseVectorStoreOptions = BaseVectorStoreOptions> {
+  /** Construct the adapter from its options. */
   new (options: O): BaseVectorStore
+  /** Optional static probe: `false` short-circuits creation with a driver-unavailable error. */
   isAvailable?: () => boolean
 }
 
@@ -25,10 +27,13 @@ export type VectorStoreClient<O extends BaseVectorStoreOptions = BaseVectorStore
   | (() => VectorStoreConstructor<O> | { default: VectorStoreConstructor<O> })
   | (() => Promise<VectorStoreConstructor<O> | { default: VectorStoreConstructor<O> }>)
 
+/** Configuration accepted by {@link createVectorStore}: the adapter `client` plus its `options`. */
 export interface CreateVectorStoreConfig<
   O extends BaseVectorStoreOptions = BaseVectorStoreOptions,
 > {
+  /** The adapter class, or a (possibly async) resolver of it. See {@link VectorStoreClient}. */
   client: VectorStoreClient<O>
+  /** Options passed to the resolved adapter's constructor. */
   options: O
 }
 
@@ -52,9 +57,17 @@ export const createVectorStore = async <O extends BaseVectorStoreOptions = BaseV
 
 // Helper: adapt an embeddings-battery-shaped object (has embedMany(texts, { kind })) into a VectorEncoderFn.
 // The embeddings adapters expose: embedMany(texts: string[], opts?: { kind?: 'query'|'document' }): Promise<number[][]>
+/** The minimal shape of an embeddings-battery adapter usable as a vector encoder. */
 export interface EmbeddingsLike {
+  /** Embed a batch of texts, optionally hinting query vs. document encoding. */
   embedMany(texts: string[], opts?: { kind?: EncodeKind }): Promise<number[][]>
 }
+/**
+ * Adapt an {@link EmbeddingsLike} object into a {@link VectorEncoderFn} for use as a store encoder.
+ *
+ * @param adapter - The embeddings adapter to wrap.
+ * @returns An encoder function forwarding to `adapter.embedMany`.
+ */
 export const encoderFromEmbeddings = (adapter: EmbeddingsLike): VectorEncoderFn => {
   return (texts: string[], kind: EncodeKind) => adapter.embedMany(texts, { kind })
 }

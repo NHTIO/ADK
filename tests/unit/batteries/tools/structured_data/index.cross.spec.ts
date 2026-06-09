@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { makeToolCtxStub } from '../../../../_fixtures/tool_ctx_stub'
+import { callTool, makeToolCtxStub } from '../../../../_fixtures/tool_ctx_stub'
 import { E_INVALID_TOOL_ARGS } from '../../../../../src/lib/exceptions/runtime'
 import {
   formatTableTool,
@@ -98,6 +98,54 @@ describe('formatTableTool', () => {
     it('returns documented message for empty arrays', async () => {
       const out = await runTable({ data: '[]', format: 'csv' })
       expect(out).toMatch(/Empty array/)
+    })
+    describe('formatTableTool no-crash adversarial cases (callTool)', () => {
+      it('formatTable: [null] without columns returns graceful error', async () => {
+        const result = await callTool(formatTableTool, { data: '[null]', format: 'csv' })
+        expect(result.kind).toBe('resolved')
+      })
+
+      it('formatTable: [{a:1},null] with columns returns graceful error', async () => {
+        const result = await callTool(formatTableTool, {
+          data: JSON.stringify([{ a: 1 }, null]),
+          format: 'csv',
+          columns: ['a'],
+        })
+        expect(result.kind).toBe('resolved')
+      })
+
+      it('formatTable: primitive rows array returns graceful error', async () => {
+        const result = await callTool(formatTableTool, {
+          data: JSON.stringify(['a', 'b']),
+          format: 'csv',
+        })
+        expect(result.kind).toBe('resolved')
+      })
+
+      it('formatTable: JSON object (not array) returns graceful error', async () => {
+        const result = await callTool(formatTableTool, {
+          data: JSON.stringify({ a: 1, b: 2 }),
+          format: 'csv',
+        })
+        expect(result.kind).toBe('resolved')
+      })
+
+      it('formatTable: deeply-nested data does not crash', async () => {
+        const result = await callTool(formatTableTool, {
+          data: JSON.stringify([{ a: { b: { c: { d: 'deep' } } } }]),
+          format: 'csv',
+        })
+        expect(result.kind).toBe('resolved')
+      })
+
+      it('formatTable: very large array does not crash', async () => {
+        const largeData = Array.from({ length: 10000 }, (_, i) => ({ col: i }))
+        const result = await callTool(formatTableTool, {
+          data: JSON.stringify(largeData),
+          format: 'csv',
+        })
+        expect(result.kind).toBe('resolved')
+      })
     })
   })
 })

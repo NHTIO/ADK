@@ -23,6 +23,8 @@ export type {
   DispatchExecutorLogEntry,
   DispatchExecutorLogLevel,
   LogEvent,
+  GenerationStats,
+  GenerationStatsEvent,
   DispatchStartEvent,
   DispatchEndEvent,
   IterationStartEvent,

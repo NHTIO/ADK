@@ -10,6 +10,7 @@
 
 import { Tool } from '@nhtio/adk/common'
 import { validator } from '@nhtio/validation'
+import { bigScale, formatBig, DEFAULT_PRECISION } from '@nhtio/adk/lib/helpers/bignum'
 
 type UnitDef = { category: string; factor: number; label: string }
 
@@ -149,16 +150,33 @@ export const convertUnitTool = new Tool({
       .string()
       .required()
       .description('Target unit key (must be in the same category as source)'),
+    precision: validator
+      .number()
+      .default(DEFAULT_PRECISION)
+      .description(`Significant digits in the result (default: ${DEFAULT_PRECISION}).`),
   }),
   handler: async (args) => {
-    const { value, from, to } = args as { value: number; from: string; to: string }
+    const { value, from, to, precision } = args as {
+      value: number
+      from: string
+      to: string
+      precision: number
+    }
 
     if (TEMP_UNITS.has(from) || TEMP_UNITS.has(to)) {
       if (!TEMP_UNITS.has(from))
         return `Error: "${from}" is not a temperature unit. Use C, F, or K.`
       if (!TEMP_UNITS.has(to)) return `Error: "${to}" is not a temperature unit. Use C, F, or K.`
-      const result = fromKelvin(toKelvin(value, from as TempUnit), to as TempUnit)
-      const rounded = Number.parseFloat(result.toPrecision(10))
+      // Temperatures are small bounded values (schema rejects |value| > 2^53), so float64 math
+      // is exact enough; only the display precision changes.
+      const kelvin = toKelvin(value, from as TempUnit)
+      // Reject physically impossible temperatures below absolute zero (0 K) rather than silently
+      // returning a nonsensical value like "-1 K = -274.15 °C". A tiny epsilon absorbs float noise.
+      if (kelvin < -1e-9) {
+        return `Error: ${value}${TEMP_LABELS[from as TempUnit]} is below absolute zero (0 K); not a physical temperature.`
+      }
+      const result = fromKelvin(kelvin, to as TempUnit)
+      const rounded = formatBig(result, precision)
       return `${value}${TEMP_LABELS[from as TempUnit]} = ${rounded}${TEMP_LABELS[to as TempUnit]}`
     }
 
@@ -170,9 +188,10 @@ export const convertUnitTool = new Tool({
       return `Error: Cannot convert "${from}" (${fromDef.category}) to "${to}" (${toDef.category}) — different categories.`
     }
 
-    const inBase = value * fromDef.factor
-    const result = inBase / toDef.factor
-    const rounded = Number.parseFloat(result.toPrecision(10))
+    // `value * fromFactor / toFactor` in BigNumber so huge ratios (e.g. TB→bit) don't overflow to
+    // Infinity, tiny ratios (e.g. in→km) don't underflow to 0, and safe integers keep full digits.
+    const result = bigScale(value, fromDef.factor, toDef.factor)
+    const rounded = formatBig(result, precision)
     return `${value} ${fromDef.label} = ${rounded} ${toDef.label}`
   },
 })

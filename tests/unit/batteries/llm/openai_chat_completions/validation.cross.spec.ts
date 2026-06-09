@@ -101,6 +101,12 @@ describe('OpenAI Chat Completions option validation', () => {
       expectAccept({ ...baseValid, reasoning_effort: 'medium' })
     })
 
+    it('accepts reasoning_effort none (Ollama: disables thinking) and round-trips', () => {
+      expectAccept({ ...baseValid, reasoning_effort: 'none' })
+      const resolved = validateOptions({ ...baseValid, reasoning_effort: 'none' })
+      expect(resolved.reasoning_effort).toBe('none')
+    })
+
     it('accepts response_format text', () => {
       expectAccept({ ...baseValid, response_format: { type: 'text' } })
     })

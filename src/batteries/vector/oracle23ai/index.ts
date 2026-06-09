@@ -56,6 +56,7 @@ const getOracle = async (): Promise<any> => {
 const ident = (name: string): string => '"' + name.replace(/"/g, '""') + '"'
 
 export interface Oracle23aiVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection: {
     connectString: string // 'host:1521/FREEPDB1'
     user: string
@@ -89,6 +90,7 @@ export class Oracle23aiVectorStore extends BaseVectorStore {
     return prefix + collection
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }

@@ -23,7 +23,7 @@ export { Tool } from './lib/classes/tool'
 /**
  * @primaryExport
  */
-export type { RawTool, ToolHandler } from './lib/classes/tool'
+export type { RawTool, ToolHandler, ArtifactConstructorResolver } from './lib/classes/tool'
 /**
  * @primaryExport
  */

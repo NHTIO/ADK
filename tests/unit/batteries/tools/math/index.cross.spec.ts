@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { callTool } from '../../../../_fixtures/tool_ctx_stub'
 import { E_INVALID_TOOL_ARGS } from '../../../../../src/lib/exceptions/runtime'
 import { calculateTool, evaluateKatexTool } from '../../../../../src/batteries/tools/math'
 import type { DispatchContext } from '../../../../../src/lib/contracts/dispatch_context'
@@ -176,6 +177,53 @@ describe('calculateTool', () => {
     })
   })
 
+  describe('edge cases', () => {
+    it('evaluates `0^0` to 1', async () => {
+      const out = await runCalculate('0^0')
+      expect(out).toContain('Result: 1')
+    })
+
+    it('evaluates negative exponents correctly: `2^-2` = 0.25', async () => {
+      const out = await runCalculate('2^-2')
+      expect(out).toContain('Result: 0.25')
+    })
+
+    it('reports a non-finite result (1/0) as an error rather than "Result: Infinity"', async () => {
+      const out = await runCalculate('1/0')
+      expect(out).toMatch(/^Error: result is not finite/)
+    })
+
+    it('reports 0/0 (NaN) as a non-finite error', async () => {
+      const out = await runCalculate('0/0')
+      expect(out).toMatch(/^Error: result is not finite/)
+    })
+
+    it('evaluates `0!` to 1 (factorial of zero)', async () => {
+      const out = await runCalculate('0!')
+      expect(out).toContain('Result: 1')
+    })
+
+    it('respects operator precedence: `(2 + 3) * 4` = 20', async () => {
+      const out = await runCalculate('(2 + 3) * 4')
+      expect(out).toContain('Result: 20')
+    })
+
+    it('evaluates `sin(pi/2)` to 1', async () => {
+      const out = await runCalculate('sin(pi/2)')
+      expect(out).toContain('Result: 1')
+    })
+
+    it('evaluates `cos(pi)` to -1', async () => {
+      const out = await runCalculate('cos(pi)')
+      expect(out).toContain('Result: -1')
+    })
+
+    it('evaluates `log(1, 10)` to 0', async () => {
+      const out = await runCalculate('log(1, 10)')
+      expect(out).toContain('Result: 0')
+    })
+  })
+
   describe('tool surface', () => {
     it('has name `calculate`', () => {
       expect(calculateTool.name).toBe('calculate')
@@ -183,6 +231,40 @@ describe('calculateTool', () => {
 
     it('has a description that mentions math', () => {
       expect(calculateTool.description.toLowerCase()).toContain('math')
+    })
+  })
+  describe('calculateTool no-crash adversarial cases (callTool)', () => {
+    it('calculate: deeply-nested \\frac does not crash', async () => {
+      const katex = Array.from({ length: 10 }, () => '\\frac{1}{}').join('')
+      const result = await callTool(evaluateKatexTool, { katex: katex })
+      expect(result.kind).toBe('resolved')
+    })
+
+    it('calculate: malformed LaTeX does not crash', async () => {
+      const result = await callTool(evaluateKatexTool, { katex: '\\frac{a' })
+      expect(result.kind).toBe('resolved')
+    })
+
+    it('calculate: 1000-char limit boundary does not crash', async () => {
+      const katex = '\\frac{1}{2} + '.repeat(80) + '0' // ~1000 chars
+      const result = await callTool(evaluateKatexTool, { katex })
+      expect(result.kind).toBe('resolved')
+    })
+
+    it('calculate: malformed LaTeX expression does not crash', async () => {
+      const result = await callTool(calculateTool, { expression: '2 + * 3' })
+      expect(result.kind).toBe('resolved')
+    })
+
+    it('calculate: deeply nested parentheses does not crash', async () => {
+      const nested = '('.repeat(100) + '1' + ')'.repeat(100)
+      const result = await callTool(calculateTool, { expression: nested })
+      expect(result.kind).toBe('resolved')
+    })
+
+    it('calculate: expression with unknown symbol does not crash', async () => {
+      const result = await callTool(calculateTool, { expression: 'unknownFunction(5)' })
+      expect(result.kind).toBe('resolved')
     })
   })
 })
@@ -404,5 +486,22 @@ describe('evaluateKatexTool', () => {
       expect(out).toContain('Result: 3.5')
       expect(out).not.toContain('(numeric)')
     })
+  })
+})
+
+// ── Edge cases surfaced by an independent model review (verified against the source) ──────
+describe('evaluateKatexTool — review-surfaced parsing bugs', () => {
+  // EXPECTED-RED: the implicit-multiplication pass turns scientific notation 2e3 into 2*e3, which
+  // evaluatex reads as 2 * e * 3 (or errors). Either way 2e3 (=2000) cannot be evaluated.
+  it('evaluates scientific notation 2e3 to 2000', async () => {
+    const out = await runEvaluateKatex('2e3')
+    expect(out).toMatch(/Result:\s*2000\b/)
+  })
+
+  // EXPECTED-RED: the change-of-base substitution returns `ln(/ln(3)` (a typo missing the argument
+  // capture), producing the invalid expression `ln(/ln(3)9)` → syntax error. log_3(9) should be 2.
+  it('evaluates log_3(9) to 2 via change of base', async () => {
+    const out = await runEvaluateKatex('\\log_3(9)')
+    expect(out).toMatch(/Result:\s*2\b/)
   })
 })

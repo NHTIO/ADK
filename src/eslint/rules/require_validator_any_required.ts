@@ -94,6 +94,7 @@ const chainCalls = (calls: TSESTree.CallExpression[], name: string): boolean =>
       c.callee.property.name === name
   )
 
+/** ESLint rule: flags a validator `any()` schema lacking an explicit required/optional/forbidden disposition. */
 const requireValidatorAnyRequiredRule = createRule({
   name: 'require-validator-any-required',
   meta: {

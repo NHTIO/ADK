@@ -74,7 +74,7 @@ export { ToolCall } from './lib/classes/tool_call'
 export type { RawToolCall, ToolCallResults } from './lib/classes/tool_call'
 
 export { Tool } from './lib/classes/tool'
-export type { RawTool, ToolHandler } from './lib/classes/tool'
+export type { RawTool, ToolHandler, ArtifactConstructorResolver } from './lib/classes/tool'
 export type {
   SpooledArtifactConstructor,
   ToolMethodDescriptor,

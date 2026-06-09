@@ -63,9 +63,13 @@ import type { SpoolReader, SpoolStore } from '@nhtio/adk/common'
  * with the DOM-lib `OpfsFileHandle` — at call sites you pass real OPFS handles directly.
  */
 export interface OpfsFileHandle {
+  /** Discriminant: always `'file'`. */
   readonly kind: 'file'
+  /** The entry's name. */
   readonly name: string
+  /** Resolve a readable {@link OpfsFile} snapshot of the handle's contents. */
   getFile(): Promise<OpfsFile>
+  /** Open a writable stream that replaces the file's contents. */
   createWritable(): Promise<OpfsWritableFileStream>
 }
 
@@ -77,10 +81,15 @@ export interface OpfsFileHandle {
  * handles directly.
  */
 export interface OpfsDirectoryHandle {
+  /** Discriminant: always `'directory'`. */
   readonly kind: 'directory'
+  /** The directory's name. */
   readonly name: string
+  /** Resolve a child file handle, optionally creating it. */
   getFileHandle(name: string, options?: { create?: boolean }): Promise<OpfsFileHandle>
+  /** Resolve a child directory handle, optionally creating it. */
   getDirectoryHandle(name: string, options?: { create?: boolean }): Promise<OpfsDirectoryHandle>
+  /** Remove a child entry, optionally recursively. */
   removeEntry(name: string, options?: { recursive?: boolean }): Promise<void>
 }
 
@@ -89,7 +98,9 @@ export interface OpfsDirectoryHandle {
  * main-thread write path.
  */
 export interface OpfsWritableFileStream {
+  /** Append/write a chunk to the stream. */
   write(data: Uint8Array | ArrayBufferView | ArrayBuffer | string): Promise<void>
+  /** Flush and close the stream, committing the written contents. */
   close(): Promise<void>
 }
 
@@ -99,9 +110,13 @@ export interface OpfsWritableFileStream {
  * actually call.
  */
 export interface OpfsBlob {
+  /** Byte length of the blob. */
   readonly size: number
+  /** Return a sub-range of the blob as a new blob. */
   slice(start?: number, end?: number, contentType?: string): OpfsBlob
+  /** Read the blob's contents as text. */
   text(): Promise<string>
+  /** Open a readable byte stream over the blob. */
   stream(): OpfsReadableStream
 }
 
@@ -109,6 +124,7 @@ export interface OpfsBlob {
  * Minimal subset of the DOM `File` interface used by {@link OpfsSpoolReader}.
  */
 export interface OpfsFile extends OpfsBlob {
+  /** The file's name. */
   readonly name: string
 }
 
@@ -117,6 +133,7 @@ export interface OpfsFile extends OpfsBlob {
  * index construction.
  */
 export interface OpfsReadableStream {
+  /** Acquire a reader over the stream. */
   getReader(): OpfsReadableStreamReader
 }
 
@@ -125,7 +142,9 @@ export interface OpfsReadableStream {
  * streaming-mode index construction.
  */
 export interface OpfsReadableStreamReader {
+  /** Read the next chunk, or signal end-of-stream with `done: true`. */
   read(): Promise<{ done: false; value: Uint8Array } | { done: true; value: undefined }>
+  /** Release the reader's lock on the stream. */
   releaseLock(): void
 }
 

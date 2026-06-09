@@ -23,6 +23,10 @@ export * from './math'
 export * from './memory'
 export * from './parsing'
 export * from './retrievables'
+// NOTE: searxng exports a *factory* (`createSearxngSearchTool`), not a ready-made `Tool`. It is
+// re-exported here for discoverability, but unlike its siblings it must NOT be bulk-registered
+// via `Object.values(batteries)` — call the factory first, then register the returned tool.
+export * from './searxng'
 export * from './standing_instructions'
 export * from './statistics'
 export * from './string_processing'

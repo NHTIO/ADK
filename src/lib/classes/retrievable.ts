@@ -44,7 +44,7 @@ export interface RawRetrievable {
   /**
    * The retrieved content. A plain `string` or {@link @nhtio/adk!Tokenizable} for small inline text, or a
    * {@link @nhtio/adk!SpooledArtifact} when the extracted text is large and lives in a consumer
-   * {@link @nhtio/adk!ByteStore} (persist it via {@link @nhtio/adk!DispatchContext.storeRetrievableBytes}, wrap
+   * {@link @nhtio/adk/common!ByteStore} (persist it via {@link @nhtio/adk!DispatchContext.storeRetrievableBytes}, wrap
    * the returned reader in a `SpooledArtifact`, and pass it here). Reader-backed content keeps the
    * body out of the permanent heap, but token estimation and render still materialise it
    * transiently (see {@link Retrievable.estimateTokens}).

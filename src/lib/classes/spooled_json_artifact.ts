@@ -83,7 +83,7 @@ function inferFormat(content: string): JsonArtifactFormat {
  *
  * @remarks
  * Construct with an optional `format` hint. When omitted the format is auto-detected on first
- * access by reading the full artifact and running {@link inferFormat}. Once detected (or
+ * access by reading the full artifact and inferring the format. Once detected (or
  * provided), the format is cached for the lifetime of the instance.
  *
  * All JSON methods are async, consistent with {@link @nhtio/adk!SpooledArtifact}.

@@ -21,7 +21,9 @@ import type { VectorFilter } from '../filters'
 import type { SearchPlan, UpsertPlan, DeletePlan, CollectionSpec } from '../plan'
 import type { VectorMatch, VectorStoreCapabilities, BaseVectorStoreOptions } from '../types'
 
-interface PgVectorOptions extends BaseVectorStoreOptions {
+/** Construction options for {@link PgVectorStore}. */
+export interface PgVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection details: a connection string, or a discrete host/port/credentials object. */
   connection?:
     | string
     | {
@@ -32,6 +34,7 @@ interface PgVectorOptions extends BaseVectorStoreOptions {
         password?: string
         database?: string
       }
+  /** An existing `pg` Pool/Client to reuse instead of constructing one from `connection`. */
   pool?: any
 }
 
@@ -48,6 +51,7 @@ const METRIC_TO_OPERATOR: Record<string, { op: string; opclass: string }> = {
   euclidean: { op: '<->', opclass: 'vector_l2_ops' },
 }
 
+/** Translate a neutral {@link VectorFilter} into a parameterized SQL `WHERE` fragment plus its bind params. */
 export const translatePgFilter = (filter: VectorFilter): { sql: string; params: unknown[] } => {
   const params: unknown[] = []
 
@@ -167,14 +171,15 @@ export class PgVectorStore extends BaseVectorStore {
   #_txClient: PGClient | null = null
   #_externalPool = false
 
-  constructor(options: PgVectorOptions) {
+  constructor(options: PgVectorStoreOptions) {
     super(options)
   }
 
-  get #opts(): PgVectorOptions {
-    return this.options as PgVectorOptions
+  get #opts(): PgVectorStoreOptions {
+    return this.options as PgVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }
@@ -240,6 +245,7 @@ export class PgVectorStore extends BaseVectorStore {
     this.#_txClient = null
   }
 
+  /** The active transaction client when inside a transaction, otherwise the connection pool. */
   get clientOrPool(): PoolOrClient {
     if (this.#_txClient) {
       return this.#_txClient
@@ -250,6 +256,7 @@ export class PgVectorStore extends BaseVectorStore {
     return this.#_pool
   }
 
+  /** Ensure the pool is connected (idempotent); a no-op once connected. */
   async ensureConnected(): Promise<void> {
     await this.connect()
   }

@@ -145,6 +145,7 @@ const computeScore = (vec: number[], query: number[], metric: DistanceMetric): n
 }
 
 export interface VespaVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection?: {
     endpoint?: string
     configUrl?: string
@@ -168,6 +169,7 @@ export class VespaVectorStore extends BaseVectorStore {
     return this.options as VespaVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined' && typeof fetch === 'function'
   }

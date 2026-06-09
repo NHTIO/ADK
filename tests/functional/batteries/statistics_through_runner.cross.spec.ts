@@ -9,7 +9,7 @@ describe('statistics batteries through TurnRunner', () => {
   it('statsDescribeTool produces a SpooledJsonArtifact', async () => {
     const exec = scriptedExecutor([
       {
-        toolCalls: [{ tool: 'stats_describe', args: { numbers: '[1, 2, 3, 4, 5]' } }],
+        toolCalls: [{ tool: 'stats_describe', args: { numbers: [1, 2, 3, 4, 5] } }],
       },
       { ack: true },
     ])
@@ -33,9 +33,11 @@ describe('statistics batteries through TurnRunner', () => {
     expect(reader).toBeDefined()
     const artifact = new SpooledJsonArtifact(reader!, 'json')
     const lines = await artifact.cat()
-    const parsed = JSON.parse(lines.join('\n')) as Record<string, number>
+    const parsed = JSON.parse(lines.join('\n')) as Record<string, unknown>
     expect(parsed.count).toBe(5)
-    expect(parsed.mean).toBe(3)
+    // Computed aggregates (mean/sum/variance/std_dev) are emitted as precision-formatted STRINGS
+    // via BigNumber (lossless + overflow-safe); order statistics (median) stay numbers.
+    expect(parsed.mean).toBe('3')
     expect(parsed.median).toBe(3)
   })
 
@@ -51,7 +53,7 @@ describe('statistics batteries through TurnRunner', () => {
         toolCalls: [
           {
             tool: 'stats_describe',
-            args: { numbers: '[10, 20, 30, 40, 50]' },
+            args: { numbers: [10, 20, 30, 40, 50] },
           },
         ],
       },
@@ -72,7 +74,8 @@ describe('statistics batteries through TurnRunner', () => {
 
     const statsArtifact = new SpooledJsonArtifact(statsReader!, 'json')
     const statsLines = await statsArtifact.cat()
-    const parsed = JSON.parse(statsLines.join('\n')) as Record<string, number>
-    expect(parsed.mean).toBe(30)
+    const parsed = JSON.parse(statsLines.join('\n')) as Record<string, unknown>
+    // `mean` is a precision-formatted BigNumber string (see statsDescribeTool).
+    expect(parsed.mean).toBe('30')
   })
 })

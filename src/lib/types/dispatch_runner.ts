@@ -136,6 +136,25 @@ export interface DispatchExecutorHelpers {
    * warnings, context-window perBucket breakdowns. Use it instead of `console.*`.
    */
   log: DispatchExecutorLogChannel
+
+  /**
+   * Emit a provider-agnostic {@link GenerationStats} record for the generation that just
+   * completed this iteration (token usage, wall-clock durations, finish reason).
+   *
+   * @remarks
+   * A dedicated egress for *generation accounting*, distinct from the diagnostic `log` channel:
+   * subscribers (cost meters, latency dashboards, token-budget guards) listen on the runner's
+   * `generationStats` observability hook without string-matching a log `kind`. The runner
+   * enriches every emission with the active `dispatchId` and 0-based `iteration` index, mirroring
+   * {@link DispatchExecutorHelpers.log}.
+   *
+   * Emit-only and side-effect-only — like `log`, it never throws, never mutates the
+   * {@link @nhtio/adk!DispatchContext}, and never participates in ack / nack flow. Every field on
+   * {@link GenerationStats} is optional, so a provider supplies only what its wire format reports
+   * (e.g. OpenAI surfaces token counts but no durations; Ollama surfaces both). Call it at most
+   * once per generation, after the response (or stream) has settled.
+   */
+  reportGenerationStats(stats: GenerationStats): void
 }
 
 /**
@@ -211,6 +230,65 @@ export interface LogEvent {
   message: string
   /** Optional structured detail block. */
   payload?: Record<string, unknown>
+}
+
+/**
+ * Provider-agnostic generation accounting for a single completed generation, emitted via
+ * {@link DispatchExecutorHelpers.reportGenerationStats}.
+ *
+ * @remarks
+ * Every field is optional so each battery supplies only what its wire format reports — OpenAI
+ * Chat Completions surfaces token counts (its `usage` block) but no wall-clock durations; Ollama's
+ * native `/api/chat` surfaces both token counts and nanosecond durations on its terminal chunk.
+ *
+ * Durations are carried in their **native nanosecond** unit (the `Ns` suffix is load-bearing) and
+ * are never normalised here — normalising to milliseconds would be lossy and providers without
+ * durations would gain meaningless zeros. `raw` preserves the full provider-native stats object
+ * verbatim for forward-compatibility, so a subscriber can read a field this shape has not yet
+ * promoted to a typed member.
+ */
+export interface GenerationStats {
+  /** Tokens in the prompt / input (OpenAI `usage.prompt_tokens`, Ollama `prompt_eval_count`). */
+  promptTokens?: number
+  /** Tokens in the completion / output (OpenAI `usage.completion_tokens`, Ollama `eval_count`). */
+  completionTokens?: number
+  /** Total tokens, when the provider reports a combined figure. */
+  totalTokens?: number
+  /** Total wall-clock generation time in nanoseconds (Ollama `total_duration`). */
+  totalDurationNs?: number
+  /** Time spent loading the model in nanoseconds (Ollama `load_duration`). */
+  loadDurationNs?: number
+  /** Time spent evaluating the prompt in nanoseconds (Ollama `prompt_eval_duration`). */
+  promptEvalDurationNs?: number
+  /** Time spent generating the response in nanoseconds (Ollama `eval_duration`). */
+  evalDurationNs?: number
+  /** Why generation stopped (Ollama `done_reason`, OpenAI `finish_reason`). */
+  finishReason?: string
+  /** Model identifier the provider echoed back. */
+  model?: string
+  /** Stable provider discriminator (e.g. `'ollama'`, `'openai_chat_completions'`). */
+  provider?: string
+  /** Full provider-native stats object, verbatim, for forward-compatibility. */
+  raw?: Record<string, unknown>
+}
+
+/**
+ * Payload fired on the observability `generationStats` hook for every record emitted via
+ * {@link DispatchExecutorHelpers.reportGenerationStats}.
+ *
+ * @remarks
+ * The runner enriches the executor-supplied {@link GenerationStats} with the active `dispatchId`
+ * and 0-based `iteration` index (and an `emittedAt` timestamp) so subscribers can correlate stats
+ * across multiple in-flight dispatches without threading extra context — exactly as {@link LogEvent}
+ * does for the `log` channel.
+ */
+export interface GenerationStatsEvent extends GenerationStats {
+  /** Stable identifier for the dispatch that produced the event. */
+  dispatchId: string
+  /** 0-based iteration index within the dispatch. */
+  iteration: number
+  /** When the event was emitted. */
+  emittedAt: DateTime
 }
 
 /**
@@ -377,6 +455,8 @@ export type DispatchRunnerObservabilityHooks = {
   error: [[BaseException], []]
   /** Fired for every structured log event emitted by the executor via {@link DispatchExecutorHelpers.log}. */
   log: [[LogEvent], []]
+  /** Fired for every generation-stats record emitted via {@link DispatchExecutorHelpers.reportGenerationStats}. */
+  generationStats: [[GenerationStatsEvent], []]
 }
 
 /**

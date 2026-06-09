@@ -8,6 +8,7 @@ import { isObject } from '@nhtio/adk/guards'
 import { validator } from '@nhtio/validation'
 import type { VectorMetadata, VectorMetadataValue } from './types'
 
+/** A comparison operator usable in a {@link FilterCondition}. */
 export type FilterOperator =
   | 'eq'
   | 'ne'
@@ -20,39 +21,65 @@ export type FilterOperator =
   | 'exists'
   | 'contains'
 
+/** A raw, adapter-dialect filter expression: literal text plus positional bindings. */
 export interface RawExpr {
+  /** The raw expression text. */
   __raw: string
+  /** Positional binding values substituted into the expression. */
   bindings: unknown[]
 }
 
+/**
+ * Construct a {@link RawExpr} from literal text and optional positional `bindings`.
+ *
+ * @param sql - The raw expression text.
+ * @param bindings - Positional binding values.
+ */
 export const raw = (sql: string, bindings: unknown[] = []): RawExpr => ({ __raw: sql, bindings })
 
+/** Type guard: `true` if `v` is a {@link RawExpr}. */
 export const isRawExpr = (v: unknown): v is RawExpr =>
   isObject(v) && typeof v.__raw === 'string' && Array.isArray(v.bindings)
 
+/** A single field comparison: `field op value`. */
 export interface FilterCondition {
+  /** The metadata field path (dot-separated for nested fields). */
   field: string
+  /** The comparison operator. */
   op: FilterOperator
+  /** The value(s) compared against, or a {@link RawExpr}; omitted for `exists`. */
   value?: VectorMetadataValue | VectorMetadataValue[] | RawExpr
 }
+/** A boolean combination of nested filters. Exactly one of `and`/`or`/`not` is meaningful. */
 export interface FilterGroup {
+  /** All nested filters must match. */
   and?: VectorFilter[]
+  /** At least one nested filter must match. */
   or?: VectorFilter[]
+  /** The nested filter must not match. */
   not?: VectorFilter
 }
+/** An adapter-dialect raw filter forwarded to the backend verbatim. */
 export interface RawFilter {
+  /** The dialect the raw expression is written in (e.g. `'sql'`). */
   $dialect: string
+  /** The raw expression — a string, or a structured dialect-specific payload. */
   $raw: string | unknown
+  /** Positional binding values for the raw expression. */
   $bindings?: unknown[]
 }
+/** Any filter node: a {@link FilterCondition}, a {@link FilterGroup}, or a {@link RawFilter}. */
 export type VectorFilter = FilterCondition | FilterGroup | RawFilter
 
+/** Type guard: `true` if `f` is a {@link FilterCondition}. */
 export const isFilterCondition = (f: VectorFilter): f is FilterCondition =>
   typeof (f as FilterCondition).field === 'string' && typeof (f as FilterCondition).op === 'string'
 
+/** Type guard: `true` if `f` is a {@link RawFilter}. */
 export const isRawFilter = (f: VectorFilter): f is RawFilter =>
   typeof (f as RawFilter).$dialect === 'string'
 
+/** Type guard: `true` if `f` is a {@link FilterGroup} (neither a condition nor a raw filter). */
 export const isFilterGroup = (f: VectorFilter): f is FilterGroup =>
   !isFilterCondition(f) && !isRawFilter(f)
 
@@ -76,6 +103,7 @@ const filterConditionSchema = validator.object<FilterCondition>({
     .optional(),
 })
 
+/** Recursive validator schema for any {@link VectorFilter} (condition, raw, or nested group). */
 export const vectorFilterSchema = validator
   .alternatives(
     filterConditionSchema,
@@ -105,6 +133,16 @@ const getField = (metadata: VectorMetadata, path: string): VectorMetadataValue |
   return current
 }
 
+/**
+ * Evaluate a {@link VectorFilter} against a record's metadata in memory — the reference semantics
+ * adapters must match for client-side filtering and conformance.
+ *
+ * @param filter - The filter to evaluate.
+ * @param metadata - The record metadata to test.
+ * @returns `true` if the metadata satisfies the filter.
+ * @throws when the filter (or a nested value) is a raw expression, which the in-memory evaluator
+ *   cannot interpret.
+ */
 export const evaluateFilter = (filter: VectorFilter, metadata: VectorMetadata): boolean => {
   if (isRawFilter(filter)) {
     throw new Error('raw filters are not evaluable by the in-memory filter evaluator')

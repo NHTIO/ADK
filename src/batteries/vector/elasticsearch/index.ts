@@ -33,6 +33,7 @@ import type {
 } from '../types'
 
 export interface ElasticsearchVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection?: {
     node?: string // default 'http://localhost:9200'
     auth?: { username: string; password: string } | { apiKey: string }
@@ -139,6 +140,7 @@ export class ElasticsearchVectorStore extends BaseVectorStore {
     return this.options as ElasticsearchVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }

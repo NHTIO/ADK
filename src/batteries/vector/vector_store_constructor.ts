@@ -43,7 +43,7 @@ const VECTOR_STORE_METHODS = [
  * @remarks
  * Invoked at validate-time, so inspecting the constructor's prototype is safe. The check is
  * duck-typed: the value must be a function whose `prototype` carries every canonical adapter
- * instance method. This mirrors {@link spooledArtifactConstructorSchema}'s cross-realm-safe
+ * instance method. This mirrors `spooledArtifactConstructorSchema`'s cross-realm-safe
  * pattern — `instanceof BaseVectorStore` would be tighter but would couple this contract to the
  * class value and reject structurally-valid (e.g. cross-realm) adapters.
  */

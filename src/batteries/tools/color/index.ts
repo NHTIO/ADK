@@ -16,6 +16,11 @@ type HSL = { h: number; s: number; l: number }
 
 function hexToRgb(hex: string): RGB | null {
   const cleaned = hex.replace(/^#/, '')
+  // Reject any non-hex character up front. `Number.parseInt('1Z', 16)` silently drops the trailing
+  // 'Z' and returns 1 (passing the NaN check below), so '#1Z2Z3Z' would otherwise be accepted as a
+  // bogus colour rgb(1, 2, 3).
+  if (!/^[0-9a-fA-F]+$/.test(cleaned)) return null
+
   let r: number
   let g: number
   let b: number

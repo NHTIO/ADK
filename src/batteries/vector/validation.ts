@@ -12,6 +12,7 @@ import type { VectorRecord } from './types'
 
 const detail = (e: ValidationError): string => e.details.map((d) => d.message).join('; ')
 
+/** Validator schema for {@link @nhtio/adk/batteries/vector!BaseVectorStoreOptions}; allows adapter-specific extra keys. */
 export const baseVectorStoreOptionsSchema = validator
   .object({
     metric: validator.string().valid('cosine', 'dot', 'euclidean').optional(),
@@ -28,6 +29,7 @@ export const baseVectorStoreOptionsSchema = validator
   })
   .unknown(true)
 
+/** Validator schema for a single {@link @nhtio/adk/batteries/vector!VectorRecord}; rejects unknown keys. */
 export const vectorRecordSchema = validator
   .object({
     id: validator.string().min(1).required(),
@@ -56,6 +58,12 @@ const clientSchema = validator.alternatives(
   )
 )
 
+/**
+ * Validate a {@link @nhtio/adk/batteries/vector!CreateVectorStoreConfig} shape (client + options).
+ *
+ * @param input - The raw config to validate.
+ * @throws {@link @nhtio/adk/batteries/vector!E_INVALID_VECTOR_STORE_CONFIG} when the shape is invalid.
+ */
 export const validateCreateConfig = (input: unknown): void => {
   const schema = validator
     .object({
@@ -97,6 +105,12 @@ export const resolveClientCtor = async (client: unknown): Promise<new (options: 
   return resolved as new (options: any) => any
 }
 
+/**
+ * Validate a batch of {@link @nhtio/adk/batteries/vector!VectorRecord}s, including that vectors contain only finite numbers.
+ *
+ * @param records - The records to validate.
+ * @throws {@link @nhtio/adk/batteries/vector!E_INVALID_VECTOR_RECORD} (carrying the offending index) on the first invalid record.
+ */
 export const validateRecords = (records: VectorRecord[]): void => {
   for (const [i, record] of records.entries()) {
     const { error } = vectorRecordSchema.validate(record, { abortEarly: false, convert: false })

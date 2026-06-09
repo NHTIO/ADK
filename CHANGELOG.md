@@ -5,6 +5,191 @@ All notable changes to `@nhtio/adk` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2026-06-09
+
+### Fixed
+
+- **OpenAI Chat Completions battery now accepts `reasoning_effort: 'none'`.** The request
+  validator constrained `reasoning_effort` to `['minimal', 'low', 'medium', 'high']` and rejects
+  unknown top-level keys (`.unknown(false)`), so there was no way to send `none` — the documented
+  value Ollama's OpenAI-compatible `/v1/chat/completions` needs to turn a thinking model's (e.g.
+  Gemma's) reasoning **off**. `'none'` is now in the enum (and the `reasoning_effort` type union);
+  it flows to the wire through the existing body-assembly passthrough, and the strict-unknown-key
+  protection is unchanged. The WebLLM battery is unaffected — upstream WebLLM has no
+  `reasoning_effort` field and disables thinking via `extra_body.enable_thinking`, already an open
+  passthrough there.
+
+- **OpenAI Chat Completions battery now retries transport failures (HTTP status 0).** When `fetch`
+  rejected before any HTTP response arrived (DNS failure, connection refused, TLS error, socket
+  drop), the adapter immediately `nack`'d with status 0 **without consulting `retry.maxAttempts`** —
+  so a single transient network blip killed the turn even when retries were configured. The
+  transport-failure branch now retries with backoff up to `maxAttempts` before surfacing the error,
+  matching the request-timeout branch beside it and the sibling embeddings adapter. Governed by the
+  existing `retry.maxAttempts` knob; `retriableStatuses` is untouched (it gates HTTP responses,
+  which transport errors never produce).
+
+- **Bundled deterministic tools now do exactly what their descriptions say.** A correctness audit
+  of the 17 deterministic tool batteries (`src/batteries/tools/*`) — driven by a schema-fuzzing
+  invariant harness and two independent model reviews, with every finding verified against the
+  running tool — surfaced a class of defects where a tool would throw an unexpected runtime error,
+  refuse work it advertised, or silently return a wrong value. All are fixed; each tool was changed
+  to meet its label (no description or test was weakened to match broken behaviour):
+  - **`json_transform`** — `top_n` returned the wrong end of the range (comparator inverted; `desc`
+    now returns the largest *n*, `asc` the smallest); `unique_by` never deduplicated object/array
+    key values (reference-identity `Set` → now value-serialised); `sum` over a non-numeric array
+    silently returned `0` (now a clear error); a `null` operation entry crashed the dispatch (now a
+    clean schema rejection).
+  - **`compare_records`** — a nested array and an integer-keyed object (`[1,2]` vs `{"0":1,"1":2}`)
+    were reported equal; they are now distinct.
+  - **`color_contrast` / `color_scheme` / `color_adjust`** — `hexToRgb` accepted hex strings with
+    trailing non-hex characters (`#1Z2Z3Z` → silent `rgb(1,2,3)`); invalid hex is now rejected.
+  - **`string_transform`** — `reverse` split astral characters/emoji into broken surrogate halves
+    (`A💥B` now reverses to `B💥A`); `slug` destroyed non-decomposing Latin-1 letters (`føtex` →
+    `f-tex`), now transliterated (`fotex`).
+  - **`parse_yaml`** — an empty/whitespace/BOM-only document returned a non-string (`undefined`),
+    now `null`; `.NaN` / `.inf` / `-.inf` were silently corrupted to `null`, now preserved.
+  - **`format_table`** — null/primitive rows threw; they now render empty cells or return a clear
+    "provide columns" error.
+  - **`format_list`** — an unbounded `indent` threw `RangeError`; it is now clamped to 100.
+  - **`evaluate_katex`** — scientific notation (`2e3`) misparsed, and `\log_b(x)` change-of-base
+    produced malformed output; both now evaluate correctly.
+  - **`encode_text`** — HTML-entity decoding of astral code points used `String.fromCharCode`
+    (truncating to 16 bits); `&#127881;` / `&#x1F389;` now decode to 🎉 via `String.fromCodePoint`.
+  - **`date_period`** — fiscal-quarter boundaries spanning the calendar-year boundary were computed
+    in the wrong year (e.g. FY-Feb, `2024-01-15` → now correctly `2023-11-01`).
+  - **`convert_unit`** — temperatures below absolute zero are now rejected instead of silently
+    returned.
+  - **`calculate`** — a non-finite scalar result (`1/0`, `2^5000`) now returns a clear error rather
+    than printing `Result: Infinity`.
+
+- **Updated three stale functional tests to the corrected `stats_describe` contract.** The
+  `statistics`/`flydrive` through-runner tests still passed `stats_describe`'s `numbers` as a JSON
+  **string** and asserted numeric `mean`/`sum` — both invalidated by the tool-correctness pass above,
+  which retyped `numbers` to a real array (restoring NaN/∞/`>2^53` rejection) and emits computed
+  aggregates as precision-formatted BigNumber **strings**. The tests now pass actual arrays and
+  assert the string-valued aggregates; no production behaviour changed.
+
+### Added
+
+- **SearXNG search tool battery (`@nhtio/adk/batteries/tools/searxng`).** A web-search tool for any
+  [SearXNG](https://docs.searxng.org/dev/search_api.html) instance, exposed via a **factory** —
+  `createSearxngSearchTool(config)` — rather than a ready-made constant. It is the first
+  factory-style tool battery: a search tool has to know *which* instance to query and is usually
+  behind custom authentication, so it needs per-deployment config that cannot be baked in at module
+  load. Because it exports a factory (not a `Tool`), it must not be bulk-registered via
+  `Object.values(batteries)` — call the factory first, then register the returned tool.
+  - **Custom-header auth** — `config.headers` accepts a static `Record<string,string>` or a
+    sync/async resolver (`() => headers | Promise<headers>`); the resolver runs on every search, so
+    refreshable bearer tokens work. Caller headers override the default `Accept`/`User-Agent`.
+  - **Two-level output-format control** — `config.resultFormat: 'normalized' | 'raw' | 'either'`
+    (default `'either'`). Pinning it forces the shape AND removes the model-facing `format` arg from
+    the schema; leaving it neutral lets the model choose per call. `normalized` trims each result to
+    `{title,url,content,engine,score,publishedDate}` plus non-empty `answers`/`infoboxes`/
+    `suggestions`/`corrections`; `raw` returns the full SearXNG JSON.
+  - **Input/output middleware pipelines** — `config.inputPipeline` / `config.outputPipeline` are
+    onion middleware `(ctx, next)` built on `@nhtio/middleware`. Input stages mutate the
+    query/params/headers before the request or `ctx.shortCircuit(string)` to skip the fetch (cache
+    hit); output stages filter/re-rank `ctx.results`, mutate `ctx.raw`, or set `ctx.output` verbatim
+    (e.g. rendered markdown). A `ctx.stash` Map carries across both; a fresh runner is minted per
+    invocation (middleware runners are single-use).
+  - **Configurable spool artifact** — `config.artifactConstructor` (default `() => SpooledJsonArtifact`)
+    is passed straight through to the `Tool`; set `() => SpooledMarkdownArtifact` or
+    `() => SpooledArtifact` to match a custom `outputPipeline` render.
+  - **Graceful failures** — a disabled-JSON instance (SearXNG disables JSON by default → HTTP 403),
+    network errors, timeouts, and thrown pipeline stages all return `Error:` strings the model can
+    react to; only malformed args throw (`E_INVALID_TOOL_ARGS`). Invalid config throws the
+    battery-scoped `E_INVALID_SEARXNG_CONFIG` at factory-call time.
+  - Documented as a featured-battery page, with a TypeDoc `@warning` recording the upstream quirk
+    that SearXNG's `number_of_results` is frequently `0` even when results exist
+    ([searxng#2987](https://github.com/searxng/searxng/issues/2987),
+    [searxng#2457](https://github.com/searxng/searxng/issues/2457)) — the tool passes it through
+    verbatim; use `results.length`. Covered by a cross-env unit spec (stubbed `fetch`, all three
+    artifact types round-tripped) and an env-gated live integration spec
+    (`TEST_SEARXNG_URL` / `TEST_SEARXNG_HEADERS`).
+
+- **Documentation-coverage gate (`bin/doc_coverage.ts`, `pnpm run doc:coverage`).** A standalone
+  helper that bootstraps TypeDoc read-only over the same entrypoints the published docs use
+  (`bin/utils/index.ts` `getEntries`) and reports every public API symbol missing a TSDoc comment,
+  grouped by its deepest `@module` submodule. Modes: a human report (default), `--json`, `--ci`
+  (non-zero exit when any non-allowlisted symbol is undocumented — wired into CI as a job, currently
+  `allow_failure: true`), `--hook` (emits a Claude Code `additionalContext` envelope and always exits
+  0), and `--primary` (audits `@primaryExport` placement). The shared `blockTags` list moved to an
+  exported `BLOCK_TAGS` const so the helper and `makeApiDocs` never drift. **The entire public API
+  surface is now documented — the gate reports zero undocumented symbols.** Every interface,
+  type, class member, options field, wire shape, and exported function across the LLM, vector,
+  embeddings, storage, and ESLint-rule batteries carries an accurate TSDoc comment.
+
+  The API-doc build is also link-clean: every TypeDoc cross-reference now resolves. Types that
+  documented symbols referenced but that were not themselves exported are now public —
+  `ArtifactConstructorResolver` (`@nhtio/adk/forge`), the four `DispatchRetrievable*Fn` callback
+  types (`@nhtio/adk/types`), and the pgvector / sqlite-vec adapter options interfaces, renamed for
+  consistency with the other 24 adapters to `PgVectorStoreOptions` and
+  `SqliteVecVectorStoreOptions`. Vendor types referenced in comments (`BigNumber`, `Set`, `Disk`)
+  now link to their upstream docs via `externalSymbolLinkMappings`, and broken `{@link}` targets
+  (wrong or non-exported names) were corrected. The internal, sentinel-gated `DispatchRunner`
+  constructor is marked `@internal` (construct via the static `DispatchRunner.dispatch`).
+
+- **Native Ollama LLM battery (`@nhtio/adk/batteries/llm/ollama`).** Ships `OllamaAdapter`, an
+  executor targeting Ollama's **native `/api/chat`** endpoint — distinct from pointing the OpenAI
+  Chat Completions battery at `/v1`, which it complements rather than replaces. Works with both
+  local Ollama (`http://localhost:11434`, no auth — the default `baseURL`) and cloud Ollama
+  (`https://ollama.com`, `apiKey` → `Authorization: Bearer`); only `baseURL` plus the auth header
+  differ. Native-only capabilities the `/v1` compat layer cannot express are first-class: per-request
+  context size via the nested `options.num_ctx`, native reasoning via `think`
+  (`boolean | 'low' | 'medium' | 'high'`) surfaced as `message.thinking`, structured output via
+  `format` (`'json'` or a JSON schema), and model lifecycle via `keep_alive`. Generation params live
+  in a nested `options` block (not at the top level, unlike the OpenAI wire). The adapter parses
+  NDJSON streaming (terminated by `done: true`, no `[DONE]` sentinel), takes tool-call `arguments` as
+  a JSON object (no `JSON.parse`), labels tool-result history messages with `tool_name` (not
+  `tool_call_id`), and follows every cross-battery design rule (trust-framed envelopes, per-tool
+  trust, swappable helpers, `ctx.stash.ollama` per-iteration overrides, `ToolCall.inline` handling,
+  trust-tier-distinct buckets). Native `/api/chat` carries images only; other modalities route
+  through `unsupportedMediaPolicy`. `tool_choice` is intentionally unsupported (native `/api/chat`
+  has no such field). Ollama is HTTP-only — Unix-socket deployments are reached via a bridge or a
+  custom `fetch`.
+
+- **Dedicated generation-stats observability channel on `DispatchRunner`.** Executors can emit
+  provider-agnostic generation accounting (token counts, nanosecond durations, finish reason, model,
+  provider, plus the raw provider object) via a new `helpers.reportGenerationStats(stats)` method;
+  the runner enriches each record with `dispatchId` / `iteration` / `emittedAt` and fires it on a new
+  `generationStats` observability hook (subscribe through `observers.generationStats`). This is
+  additive and non-breaking — `DispatchExecutorHelpers` is runner-produced, so existing executors
+  gain the method without change. The native Ollama battery emits its terminal-chunk stats through
+  this channel; the new `GenerationStats` / `GenerationStatsEvent` types are exported from
+  `@nhtio/adk/dispatch_runner`.
+
+- **Shared Chat-family helper submodule.** The wire-shape-agnostic translation helpers (trust
+  envelopes, memory/retrievable/standing-instruction rendering, system-prompt assembly, JSON-schema
+  and function-tool conversion, thought filtering) were extracted to an internal
+  `src/batteries/llm/chat_common` module shared by the OpenAI Chat Completions and native Ollama
+  batteries. Behaviour-preserving: every existing `@nhtio/adk/batteries/llm/openai_chat_completions`
+  helper export keeps its name and value identity (the battery re-exports the shared names), and the
+  WebLLM battery is untouched. The shared module is internal — not a public package subpath.
+
+- **NDJSON cassette support in the cross-env test harness.** `tests/_fixtures/cassette.ts` gained an
+  `ndjson` response mode (parallel to the existing SSE `sse` mode) plus Ollama-native programmatic
+  builders (`buildOllamaChatResponse`, `buildOllamaStreamFrames`, `singleOllamaResponseCassette`,
+  `singleOllamaStreamCassette`) for deterministic native-wire replay.
+
+- **Arbitrary-precision numeric handling across the math tools.** A shared
+  `src/lib/helpers/bignum.ts` (a BigNumber-configured `mathjs` instance) backs the numeric
+  batteries so float64 limitations no longer corrupt results: large in-range sums stay exact
+  instead of overflowing to `Infinity`, tiny ratios don't underflow to `0`, and precision is
+  preserved end-to-end (`sum([0.1, 0.2]) → 0.3`). `statistics`, `data_structure`, and
+  `unit_conversion` now compute aggregates/conversions through it. The `statistics` tools take
+  typed number arrays (`validator.array().items(validator.number())`) instead of JSON strings —
+  restoring schema rejection of `NaN`/`Infinity`/`> 2^53` at the boundary and removing the prior
+  silent-drop behaviour. Tools that format numeric output gained an optional `precision` argument
+  (significant digits, default 8). **This changes those tool signatures and some output shapes**
+  (computed aggregates may be precision-formatted strings).
+
+- **Tool correctness test infrastructure.** A `callTool` helper in
+  `tests/_fixtures/tool_ctx_stub.ts` captures a tool invocation's resolve-vs-throw outcome as a
+  value (making the no-crash contract directly assertable), and a new
+  `tests/unit/batteries/tools/fuzz.node.spec.ts` invariant harness introspects every bundled tool's
+  schema, feeds adversarial input, and asserts each call either resolves to a string/`Uint8Array`
+  or rejects with `E_INVALID_TOOL_ARGS` — never any other throw.
+
 ## 2026-06-07
 
 ### Added

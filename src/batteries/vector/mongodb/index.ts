@@ -40,6 +40,7 @@ import type {
 const INDEX = 'vec_idx'
 
 export interface MongoDBVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection: {
     url: string
     database?: string
@@ -84,6 +85,7 @@ export class MongoDBVectorStore extends BaseVectorStore {
     return this.options as MongoDBVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }

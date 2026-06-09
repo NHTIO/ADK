@@ -192,9 +192,11 @@ const makeCtx = (overrides: CtxOverrides = {}): MockCtx => {
 const makeHelpers = (): DispatchExecutorHelpers & {
   _events: Array<{ kind: string; id: string; payload: unknown }>
   _logs: Array<{ level: string; kind: string; message: string; payload?: unknown }>
+  _stats: Array<Record<string, unknown>>
 } => {
   const events: Array<{ kind: string; id: string; payload: unknown }> = []
   const logs: Array<{ level: string; kind: string; message: string; payload?: unknown }> = []
+  const stats: Array<Record<string, unknown>> = []
   const captureLog =
     (level: 'trace' | 'debug' | 'info' | 'warn' | 'error') =>
     (entry: { kind: string; message: string; payload?: Record<string, unknown> }) => {
@@ -217,11 +219,16 @@ const makeHelpers = (): DispatchExecutorHelpers & {
       warn: vi.fn(captureLog('warn')),
       error: vi.fn(captureLog('error')),
     },
+    reportGenerationStats: vi.fn((s: Record<string, unknown>) => {
+      stats.push(s)
+    }),
     _events: events,
     _logs: logs,
+    _stats: stats,
   } as unknown as DispatchExecutorHelpers & {
     _events: typeof events
     _logs: typeof logs
+    _stats: typeof stats
   }
 }
 

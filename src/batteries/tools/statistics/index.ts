@@ -12,6 +12,13 @@ import { isError } from '@nhtio/adk/guards'
 import { validator } from '@nhtio/validation'
 import { Tool, SpooledJsonArtifact } from '@nhtio/adk/common'
 import {
+  bigSum,
+  bigMean,
+  formatBig,
+  bigToNumber,
+  DEFAULT_PRECISION,
+} from '@nhtio/adk/lib/helpers/bignum'
+import {
   equalIntervalBreaks,
   interquartileRange,
   max,
@@ -27,22 +34,28 @@ import {
   zScore,
 } from 'simple-statistics'
 
+/**
+ * Normalise the `numbers`/`x`/`y` input to a `number[]`.
+ *
+ * @remarks
+ * The input schema is `validator.array().items(validator.number())`, which already rejects
+ * `NaN`, `±Infinity`, and magnitudes `> Number.MAX_SAFE_INTEGER` before the handler runs — so by
+ * the time a value reaches here it is a finite, in-range float64. This guard only enforces
+ * non-emptiness (and defensively re-checks the array shape). It deliberately NO LONGER silently
+ * drops non-finite entries: those can't arrive through the typed schema, and a silent filter hid
+ * real input errors.
+ */
 function parseNumbers(input: unknown): number[] | { error: string } {
-  let arr: unknown = input
-  if (typeof input === 'string') {
-    try {
-      arr = JSON.parse(input)
-    } catch {
-      return { error: 'Invalid JSON — expected an array of numbers.' }
-    }
-  }
-  if (!Array.isArray(arr)) return { error: 'Input must be a JSON array of numbers.' }
-  const nums = (arr as unknown[]).filter(
-    (v): v is number => typeof v === 'number' && Number.isFinite(v)
-  )
-  if (nums.length === 0) return { error: 'No finite numbers found in the array.' }
-  return nums
+  if (!Array.isArray(input)) return { error: 'Input must be an array of numbers.' }
+  if (input.length === 0) return { error: 'Array must contain at least one number.' }
+  return input as number[]
 }
+
+/** Shared `precision` schema fragment (significant digits for numeric output, default 8). */
+const precisionField = validator
+  .number()
+  .default(DEFAULT_PRECISION)
+  .description(`Significant digits for numeric output (default: ${DEFAULT_PRECISION}).`)
 
 /**
  * Compute descriptive statistics for a JSON array of numbers.
@@ -57,29 +70,36 @@ export const statsDescribeTool = new Tool({
   description:
     'Compute descriptive statistics for a numeric array: count, sum, min, max, range, mean, median, mode, variance, standard deviation, quartiles (Q1–Q3), IQR, and key percentiles.',
   inputSchema: validator.object({
-    numbers: validator.string().required().description('JSON array of numbers'),
+    numbers: validator.array().items(validator.number()).required().description('Array of numbers'),
+    precision: precisionField,
   }),
   artifactConstructor: () => SpooledJsonArtifact,
   handler: async (args) => {
-    const { numbers } = args as { numbers: string }
+    const { numbers, precision } = args as { numbers: number[]; precision: number }
     const nums = parseNumbers(numbers)
     if ('error' in nums) return `Error: ${nums.error}`
 
     const sorted = [...nums].sort((a, b) => a - b)
     const modeVal = mode(nums)
+    // Computed aggregates (sum/mean/variance/std_dev) are emitted as `precision`-significant-digit
+    // STRINGS via BigNumber: this is lossless (no toPrecision round-trip) and overflow-safe (a sum
+    // exceeding float64 stays exact, e.g. 2e308 instead of Infinity). Order statistics
+    // (min/max/median/quartiles/range) are always input elements or midpoints — in-range by
+    // construction — so they remain numbers.
+    const fmt = (n: number): string => formatBig(n, precision)
 
     return JSON.stringify(
       {
         count: nums.length,
-        sum: Number.parseFloat(sum(nums).toPrecision(12)),
+        sum: formatBig(bigSum(nums), precision),
         min: min(nums),
         max: max(nums),
         range: max(nums) - min(nums),
-        mean: Number.parseFloat(mean(nums).toPrecision(10)),
+        mean: formatBig(bigMean(nums), precision),
         median: median(nums),
         mode: modeVal,
-        variance: Number.parseFloat(variance(nums).toPrecision(8)),
-        std_dev: Number.parseFloat(standardDeviation(nums).toPrecision(8)),
+        variance: fmt(variance(nums)),
+        std_dev: fmt(standardDeviation(nums)),
         q1: quantile(sorted, 0.25),
         q2: quantile(sorted, 0.5),
         q3: quantile(sorted, 0.75),
@@ -107,14 +127,19 @@ export const statsCorrelateTool = new Tool({
   description:
     'Compute the Pearson correlation coefficient between two numeric arrays. Returns the r value (-1 to 1), r², and a plain-English interpretation.',
   inputSchema: validator.object({
-    x: validator.string().required().description('JSON array of numbers (first variable)'),
-    y: validator
-      .string()
+    x: validator
+      .array()
+      .items(validator.number())
       .required()
-      .description('JSON array of numbers (second variable, same length as x)'),
+      .description('Array of numbers (first variable)'),
+    y: validator
+      .array()
+      .items(validator.number())
+      .required()
+      .description('Array of numbers (second variable, same length as x)'),
   }),
   handler: async (args) => {
-    const { x: rawX, y: rawY } = args as { x: string; y: string }
+    const { x: rawX, y: rawY } = args as { x: number[]; y: number[] }
     const x = parseNumbers(rawX)
     if ('error' in x) return `Error in x: ${x.error}`
     const y = parseNumbers(rawY)
@@ -123,6 +148,13 @@ export const statsCorrelateTool = new Tool({
     if (x.length !== y.length)
       return `Error: Arrays must be the same length (x: ${x.length}, y: ${y.length}).`
     if (x.length < 2) return 'Error: At least 2 data points required.'
+
+    // Pearson r is undefined when either variable has zero variance (constant) — the formula
+    // divides by a standard deviation of 0. Report that explicitly instead of emitting `r = NaN`,
+    // which reads like a real (negligible) correlation.
+    if (standardDeviation(x) === 0 || standardDeviation(y) === 0) {
+      return 'Correlation is undefined: at least one variable is constant (zero variance), so Pearson r cannot be computed.'
+    }
 
     try {
       const r = sampleCorrelation(x, y)
@@ -159,7 +191,7 @@ export const statsTransformTool = new Tool({
   description:
     'Transform a numeric array: normalize (min-max or z-score), compute running totals, rolling averages, percent change between consecutive values, rank each value, or detect outliers.',
   inputSchema: validator.object({
-    numbers: validator.string().required().description('JSON array of numbers'),
+    numbers: validator.array().items(validator.number()).required().description('Array of numbers'),
     operation: validator
       .string()
       .valid(
@@ -180,46 +212,60 @@ export const statsTransformTool = new Tool({
       .number()
       .default(3.0)
       .description('For outliers_zscore: z-score threshold (default: 3.0)'),
+    precision: precisionField,
   }),
   handler: async (args) => {
-    const { numbers, operation, window, threshold } = args as {
-      numbers: string
+    const { numbers, operation, window, threshold, precision } = args as {
+      numbers: number[]
       operation: string
       window: number
       threshold: number
+      precision: number
     }
     const nums = parseNumbers(numbers)
     if ('error' in nums) return `Error: ${nums.error}`
+
+    // Round a float to `precision` significant digits without the toPrecision/parse noise.
+    const round = (n: number): number => Number.parseFloat(formatBig(n, precision))
 
     switch (operation) {
       case 'normalize_min_max': {
         const lo = min(nums)
         const hi = max(nums)
         if (lo === hi) return JSON.stringify(nums.map(() => 0))
-        return JSON.stringify(nums.map((v) => Number.parseFloat(((v - lo) / (hi - lo)).toFixed(8))))
+        return JSON.stringify(nums.map((v) => round((v - lo) / (hi - lo))))
       }
 
       case 'normalize_z_score': {
         const m = mean(nums)
         const sd = standardDeviation(nums)
         if (sd === 0) return JSON.stringify(nums.map(() => 0))
-        return JSON.stringify(nums.map((v) => Number.parseFloat(zScore(v, m, sd).toFixed(8))))
+        return JSON.stringify(nums.map((v) => round(zScore(v, m, sd))))
       }
 
       case 'normalize_percent_of_sum': {
         const total = sum(nums)
         if (total === 0) return JSON.stringify(nums.map(() => 0))
-        return JSON.stringify(nums.map((v) => Number.parseFloat(((v / total) * 100).toFixed(4))))
+        return JSON.stringify(nums.map((v) => round((v / total) * 100)))
       }
 
       case 'running_total': {
-        const totals: number[] = []
-        let acc = 0
-        for (const v of nums) {
-          acc += v
-          totals.push(Number.parseFloat(acc.toPrecision(12)))
-        }
-        return JSON.stringify(totals)
+        // Each prefix sum is computed exactly via BigNumber (so a cumulative total exceeding
+        // float64 stays exact instead of overflowing to Infinity). Each entry is a plain number
+        // when it fits float64 (the common case), or a precise string when it would otherwise
+        // overflow to Infinity → JSON null.
+        return JSON.stringify(
+          nums.map((_, i) => {
+            const big = bigSum(nums.slice(0, i + 1))
+            const asNum = bigToNumber(big)
+            // Number only when exactly representable; otherwise the exact string (covers both
+            // overflow and the silent-rounding gap above 2^53).
+            if (Number.isFinite(asNum) && Math.abs(asNum) <= Number.MAX_SAFE_INTEGER) {
+              return round(asNum)
+            }
+            return formatBig(big, precision)
+          })
+        )
       }
 
       case 'rolling_avg': {
@@ -227,7 +273,7 @@ export const statsTransformTool = new Tool({
         return JSON.stringify(
           nums.map((_, i) => {
             const slice = nums.slice(Math.max(0, i - w + 1), i + 1)
-            return Number.parseFloat(mean(slice).toPrecision(8))
+            return round(mean(slice))
           })
         )
       }
@@ -295,11 +341,16 @@ export const statsHistogramTool = new Tool({
   name: 'stats_histogram',
   description: 'Bin a numeric array into equal-width histogram buckets and display counts.',
   inputSchema: validator.object({
-    numbers: validator.string().required().description('JSON array of numbers'),
+    numbers: validator.array().items(validator.number()).required().description('Array of numbers'),
     bins: validator.number().default(10).description('Number of bins (default: 10, max: 100)'),
+    precision: precisionField,
   }),
   handler: async (args) => {
-    const { numbers, bins } = args as { numbers: string; bins: number }
+    const { numbers, bins, precision } = args as {
+      numbers: number[]
+      bins: number
+      precision: number
+    }
     const nums = parseNumbers(numbers)
     if ('error' in nums) return `Error: ${nums.error}`
 
@@ -327,7 +378,7 @@ export const statsHistogramTool = new Tool({
         ).length
         const pct = ((count / nums.length) * 100).toFixed(1)
         const bar = '█'.repeat(maxCount > 0 ? Math.round((count / maxCount) * 20) : 0)
-        const range = `[${breaks[i].toPrecision(4)}, ${breaks[i + 1].toPrecision(4)}${isLast ? ']' : ')'}`
+        const range = `[${formatBig(breaks[i], precision)}, ${formatBig(breaks[i + 1], precision)}${isLast ? ']' : ')'}`
         rows.push(`${range.padEnd(22)} ${String(count).padStart(4)} (${pct.padStart(5)}%) ${bar}`)
       }
 

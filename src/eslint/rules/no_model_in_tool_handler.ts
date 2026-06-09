@@ -37,6 +37,7 @@ const literalKey = (prop: TSESTree.Property): string | undefined => {
   return undefined
 }
 
+/** ESLint rule: flags referencing the model or LLM adapter inside a tool handler. */
 const noModelInToolHandlerRule = createRule({
   name: 'no-model-in-tool-handler',
   meta: {

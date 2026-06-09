@@ -30,7 +30,9 @@ import type {
 } from '../types'
 
 export interface PineconeVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Pinecone API key. */
   apiKey: string
+  /** Name of the Pinecone index this store operates against. */
   index: string
   /**
    * When set, the physical Pinecone namespace becomes `${namespacePrefix}__${collection}`.
@@ -40,6 +42,7 @@ export interface PineconeVectorStoreOptions extends BaseVectorStoreOptions {
    * namespaces are implicit (born on first upsert), so a fresh prefix costs nothing.
    */
   namespacePrefix?: string
+  /** Connection and authentication parameters for the backend. */
   connection?: { controllerHostUrl?: string }
 }
 
@@ -170,6 +173,7 @@ export class PineconeVectorStore extends BaseVectorStore {
     // best-effort: resolve regardless
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }
@@ -559,6 +563,7 @@ const isFilterOnId = (filter?: VectorFilter): boolean => {
   return false
 }
 
+/** Translate a neutral {@link VectorFilter} into a Pinecone metadata filter object. */
 export const translatePineconeFilter = (
   filter?: VectorFilter
 ): Record<string, unknown> | undefined => {

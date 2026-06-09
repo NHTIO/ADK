@@ -10,6 +10,7 @@
  * Coverage:
  *   - Transient 503 → retry succeeds → final assistant message persisted
  *   - Persistent 503 → retry exhausts → ctx.nack with E_..._HTTP_ERROR
+ *   - Transport failure (fetch rejects, status 0) → retry succeeds / exhausts → nack
  *   - 429 with `Retry-After` seconds honored (clamped to maxDelayMs)
  *   - Non-retriable 400 → no retry, immediate nack
  *   - Mid-stream byte drop → E_..._STREAM_ERROR via nack
@@ -177,6 +178,76 @@ describe.skipIf(SKIP)('failure injection — retry on transient 503', () => {
 
       expect(calls).toBe(3)
       // Dispatch settled (one way or another) — either turnEnd or error event.
+      const turnEnds = events.filter((e) => e.kind === 'turnEnd')
+      const errs = events.filter((e) => e.kind === 'error')
+      expect(turnEnds.length + errs.length).toBeGreaterThanOrEqual(1)
+    }
+  )
+})
+
+describe.skipIf(SKIP)('failure injection — transport failure (status 0) retry', () => {
+  it(
+    'fetch rejects twice (no HTTP response), then 200 → dispatch settles with retry',
+    { timeout: 30_000 },
+    async () => {
+      let calls = 0
+      const chaosFetch: typeof fetch = async () => {
+        calls += 1
+        // Reject before any HTTP response — DNS/connection/TLS class failure.
+        if (calls <= 2) throw new TypeError('fetch failed: ECONNREFUSED')
+        return okJsonResponse('recovered')
+      }
+
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: TEST_MODEL,
+        apiKey: TEST_API_KEY!,
+        ...(TEST_BASE_URL ? { baseURL: TEST_BASE_URL } : {}),
+        stream: false,
+        fetch: chaosFetch,
+        retry: { maxAttempts: 3, baseDelayMs: 5, maxDelayMs: 50 },
+        autoAck: true,
+      })
+
+      const { run, events } = makeFixtureRunner({
+        executorCallback: adapter.executor(),
+      })
+
+      const results = await Promise.allSettled([run({ systemPrompt: 'Reply "ok".' })])
+
+      expect(results[0].status).toBe('fulfilled')
+      expect(calls).toBe(3)
+      expect(events.filter((e) => e.kind === 'turnEnd').length).toBe(1)
+    }
+  )
+
+  it(
+    'fetch rejects persistently → exhausts maxAttempts, then nack',
+    { timeout: 30_000 },
+    async () => {
+      let calls = 0
+      const chaosFetch: typeof fetch = async () => {
+        calls += 1
+        throw new TypeError('fetch failed: ECONNREFUSED')
+      }
+
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: TEST_MODEL,
+        apiKey: TEST_API_KEY!,
+        ...(TEST_BASE_URL ? { baseURL: TEST_BASE_URL } : {}),
+        stream: false,
+        fetch: chaosFetch,
+        retry: { maxAttempts: 3, baseDelayMs: 5, maxDelayMs: 20 },
+        autoAck: true,
+      })
+
+      const { run, events } = makeFixtureRunner({
+        executorCallback: adapter.executor(),
+      })
+
+      await Promise.allSettled([run({ systemPrompt: 'Reply "ok".' })])
+
+      // All three attempts consumed before surfacing the transport failure.
+      expect(calls).toBe(3)
       const turnEnds = events.filter((e) => e.kind === 'turnEnd')
       const errs = events.filter((e) => e.kind === 'error')
       expect(turnEnds.length + errs.length).toBeGreaterThanOrEqual(1)

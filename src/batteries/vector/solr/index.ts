@@ -35,6 +35,7 @@ import type {
 } from '../types'
 
 export interface SolrVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Connection and authentication parameters for the backend. */
   connection: { url: string }
 }
 
@@ -59,6 +60,7 @@ export class SolrVectorStore extends BaseVectorStore {
     return this.options as SolrVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined' && typeof fetch === 'function'
   }

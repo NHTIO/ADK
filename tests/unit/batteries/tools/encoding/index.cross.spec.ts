@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { makeToolCtxStub } from '../../../../_fixtures/tool_ctx_stub'
+import { callTool, makeToolCtxStub } from '../../../../_fixtures/tool_ctx_stub'
 import { E_INVALID_TOOL_ARGS } from '../../../../../src/lib/exceptions/runtime'
 import {
   encodeTextTool,
@@ -255,6 +255,90 @@ describe('unicodeNormalizeTool', () => {
       await expect(runNormalize({ text: 'x', operation: 'shake' })).rejects.toBeInstanceOf(
         E_INVALID_TOOL_ARGS
       )
+    })
+  })
+})
+
+// ── Correctness audit (independent oracles + the astral html-entity decode fix) ──────────
+describe('encoding — correctness audit', () => {
+  const oracleB64 = (s: string): string => {
+    const bytes = new TextEncoder().encode(s)
+    let bin = ''
+    for (const b of bytes) bin += String.fromCharCode(b)
+    return btoa(bin)
+  }
+
+  describe('base64 round-trips (oracle: TextEncoder/btoa)', () => {
+    for (const sample of ['hello world 123', 'héllo, 世界', '🌍 globe', 'a\nb\tc\0d']) {
+      it(`encodes ${JSON.stringify(sample)} to match the independent oracle`, async () => {
+        const r = await callTool(encodeTextTool, {
+          text: sample,
+          scheme: 'base64',
+          direction: 'encode',
+        })
+        expect(r.kind).toBe('resolved')
+        if (r.kind === 'resolved') expect(r.out).toBe(oracleB64(sample))
+      })
+      it(`round-trips ${JSON.stringify(sample)} encode->decode to identity`, async () => {
+        const enc = await callTool(encodeTextTool, {
+          text: sample,
+          scheme: 'base64',
+          direction: 'encode',
+        })
+        if (enc.kind !== 'resolved') {
+          expect(enc.kind).toBe('resolved')
+          return
+        }
+        const dec = await callTool(encodeTextTool, {
+          text: enc.out,
+          scheme: 'base64',
+          direction: 'decode',
+        })
+        expect(dec.kind).toBe('resolved')
+        if (dec.kind === 'resolved') expect(dec.out).toBe(sample)
+      })
+    }
+  })
+
+  describe('html_entities decode of astral entities (uses fromCodePoint)', () => {
+    it('decodes a large decimal entity to the correct astral character', async () => {
+      const r = await callTool(encodeTextTool, {
+        text: '&#127881;',
+        scheme: 'html_entities',
+        direction: 'decode',
+      })
+      expect(r.kind).toBe('resolved')
+      if (r.kind === 'resolved') expect(r.out).toBe('🎉')
+    })
+    it('decodes a large hex entity to the correct astral character', async () => {
+      const r = await callTool(encodeTextTool, {
+        text: '&#x1F389;',
+        scheme: 'html_entities',
+        direction: 'decode',
+      })
+      expect(r.kind).toBe('resolved')
+      if (r.kind === 'resolved') expect(r.out).toBe('🎉')
+    })
+  })
+
+  describe('unicode_normalize (oracle: String.prototype.normalize)', () => {
+    for (const op of ['nfc', 'nfd', 'nfkc', 'nfkd'] as const) {
+      it(`${op} matches String.prototype.normalize`, async () => {
+        const text = 'éﬁÅ'
+        const r = await callTool(unicodeNormalizeTool, { text, operation: op })
+        expect(r.kind).toBe('resolved')
+        if (r.kind === 'resolved') {
+          expect(r.out).toBe(text.normalize(op.toUpperCase() as 'NFC' | 'NFD' | 'NFKC' | 'NFKD'))
+        }
+      })
+    }
+    it('code_points reports the astral code point, not surrogate halves', async () => {
+      const r = await callTool(unicodeNormalizeTool, { text: '💥', operation: 'code_points' })
+      expect(r.kind).toBe('resolved')
+      if (r.kind === 'resolved') {
+        expect(r.out).toContain('U+1F4A5')
+        expect(r.out).not.toMatch(/U\+D8[0-9A-F]{2}/)
+      }
     })
   })
 })

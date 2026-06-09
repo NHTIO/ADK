@@ -18,7 +18,9 @@ import {
 import type { SearchPlan, UpsertPlan, DeletePlan, CollectionSpec } from '../plan'
 import type { VectorMatch, VectorStoreCapabilities, BaseVectorStoreOptions } from '../types'
 
-interface SqliteVecOptions extends BaseVectorStoreOptions {
+/** Construction options for {@link SqliteVecVectorStore}. */
+export interface SqliteVecVectorStoreOptions extends BaseVectorStoreOptions {
+  /** Database location: a filesystem path, or `':memory:'` for an in-memory database. */
   connection: {
     path: string
   }
@@ -48,14 +50,15 @@ export class SqliteVecVectorStore extends BaseVectorStore {
   #_cache: CachedStore | null = null
   #_dims: Map<string, number> = new Map()
 
-  constructor(options: SqliteVecOptions) {
+  constructor(options: SqliteVecVectorStoreOptions) {
     super(options)
   }
 
-  get #opts(): SqliteVecOptions {
-    return this.options as SqliteVecOptions
+  get #opts(): SqliteVecVectorStoreOptions {
+    return this.options as SqliteVecVectorStoreOptions
   }
 
+  /** Static availability probe: whether this adapter's runtime driver can load in the current environment. */
   static isAvailable(): boolean {
     return typeof process !== 'undefined'
   }
@@ -105,6 +108,7 @@ export class SqliteVecVectorStore extends BaseVectorStore {
     }
   }
 
+  /** The underlying SQLite database handle; throws if the store is not connected. */
   get db(): any {
     if (!this.#_cache?.db) {
       throw new Error('Not connected')

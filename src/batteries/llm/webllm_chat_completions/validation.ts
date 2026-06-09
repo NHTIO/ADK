@@ -127,6 +127,10 @@ const toolChoiceSchema = validator.alternatives(
     .unknown(false)
 )
 
+/**
+ * Validator schema for {@link WebLLMChatCompletionsAdapterOptions}. Rejects unknown keys
+ * (`.unknown(false)`) so typos and removed fields fail loud, and fills in defaults.
+ */
 export const webLLMChatCompletionsOptionsSchema = validator
   .object<WebLLMChatCompletionsAdapterOptions>({
     engine: validator.object().unknown(true).optional(),
@@ -201,6 +205,14 @@ const isValidationError = (value: unknown): value is ValidationError =>
 const formatValidationDetails = (err: ValidationError): string =>
   err.details.map((d) => d.message).join(' and ')
 
+/**
+ * Validates raw adapter options against {@link webLLMChatCompletionsOptionsSchema}, filling in
+ * defaults.
+ *
+ * @param input - The raw options object to validate.
+ * @returns The resolved options object with defaults applied.
+ * @throws {@link @nhtio/adk/batteries!E_INVALID_WEBLLM_CHAT_COMPLETIONS_OPTIONS} when `input` is invalid.
+ */
 export const validateOptions = (input: unknown): WebLLMChatCompletionsAdapterOptions => {
   const { value, error } = webLLMChatCompletionsOptionsSchema.validate(input, {
     abortEarly: false,

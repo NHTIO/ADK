@@ -27,6 +27,16 @@ const base64ToUtf8 = (b64: string): string => {
 }
 
 /**
+ * Convert a numeric HTML-entity code point to its string, handling astral characters correctly.
+ * Returns the original entity text `fallback` for code points outside the valid Unicode range
+ * (0 – 0x10FFFF) so `String.fromCodePoint` never throws a RangeError.
+ */
+const codePointToString = (cp: number, fallback: string): string => {
+  if (!Number.isInteger(cp) || cp < 0 || cp > 0x10ffff) return fallback
+  return String.fromCodePoint(cp)
+}
+
+/**
  * Encode or decode text using common schemes: base64, url (percent-encoding), html_entities.
  *
  * @remarks
@@ -78,16 +88,24 @@ export const encodeTextTool = new Tool({
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;')
         }
-        return text
-          .replace(/&amp;/g, '&')
-          .replace(/&lt;/g, '<')
-          .replace(/&gt;/g, '>')
-          .replace(/&quot;/g, '"')
-          .replace(/&#39;/g, "'")
-          .replace(/&#(\d+);/g, (_, code: string) => String.fromCharCode(Number.parseInt(code, 10)))
-          .replace(/&#x([0-9a-fA-F]+);/g, (_, hex: string) =>
-            String.fromCharCode(Number.parseInt(hex, 16))
-          )
+        return (
+          text
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            // Use fromCodePoint, not fromCharCode: a numeric entity above U+FFFF (e.g. an emoji like
+            // &#127881; = 🎉) is an astral code point. fromCharCode truncates to 16 bits and yields a
+            // broken/empty character; fromCodePoint produces the correct surrogate pair. Out-of-range
+            // code points (> U+10FFFF) are left as-is rather than throwing.
+            .replace(/&#(\d+);/g, (m, code: string) =>
+              codePointToString(Number.parseInt(code, 10), m)
+            )
+            .replace(/&#x([0-9a-fA-F]+);/g, (m, hex: string) =>
+              codePointToString(Number.parseInt(hex, 16), m)
+            )
+        )
       }
 
       return `Error: Unknown scheme "${scheme}".`

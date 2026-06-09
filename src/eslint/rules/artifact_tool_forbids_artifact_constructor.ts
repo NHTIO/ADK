@@ -29,6 +29,7 @@ const literalKey = (prop: TSESTree.Property): string | undefined => {
 const isUndefinedValue = (node: TSESTree.Node): boolean =>
   node.type === 'Identifier' && node.name === 'undefined'
 
+/** ESLint rule: flags `new ArtifactTool({ … })` that sets the forbidden `artifactConstructor` option. */
 const artifactToolForbidsArtifactConstructorRule = createRule({
   name: 'artifact-tool-forbids-artifact-constructor',
   meta: {

@@ -99,6 +99,7 @@ const getLlamaTokenizer = () => {
  * transparently as strings in most contexts.
  */
 export class Tokenizable {
+  /** The set of supported token-encoding identifiers, re-exposed as a static for convenience. */
   public static TokenEncoding = TokenEncoding
 
   /**
@@ -114,7 +115,9 @@ export class Tokenizable {
   declare toString: () => string
   declare valueOf: () => string
   declare toLocaleString: () => string
+  /** Replace the wrapped string value (and invalidate the cached token estimates). */
   declare set: (value: string) => void
+  /** Estimate the token count of the wrapped string under the given {@link TokenEncoding}. */
   declare estimateTokens: (encoding: TokenEncoding) => number
 
   #value: string

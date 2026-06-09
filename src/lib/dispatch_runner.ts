@@ -33,6 +33,8 @@ import type {
   DispatchExecutorLogEntry,
   DispatchExecutorLogLevel,
   LogEvent,
+  GenerationStats,
+  GenerationStatsEvent,
   ContextDelta,
   DispatchRunnerFunctionalHooks,
   DispatchRunnerObservabilityHooks,
@@ -124,6 +126,12 @@ const dispatchInputSchema = validator.object<RawDispatchRunnerInput>({
  */
 const CONSTRUCT_TOKEN = Symbol('DispatchRunner.construct')
 
+/**
+ * Runs a single dispatch iteration of an agentic turn: it drives the executor through the
+ * input/output middleware pipelines, emitting functional and observability hook events along the
+ * way. Construction is gated — obtain one via the static {@link DispatchRunner.dispatch} entry
+ * point rather than `new`.
+ */
 export class DispatchRunner {
   #functionalHooks: Hooks<DispatchRunnerFunctionalHooks>
   #observabilityHooks: Hooks<DispatchRunnerObservabilityHooks>
@@ -139,6 +147,12 @@ export class DispatchRunner {
   #sourceCtx: TurnContext | undefined
   #deltaQueue: ContextDelta[]
 
+  /**
+   * Construction is gated by an internal sentinel `token` — call the static
+   * {@link DispatchRunner.dispatch} entry point instead of `new`.
+   *
+   * @internal
+   */
   constructor(
     token: typeof CONSTRUCT_TOKEN,
     sourceCtx: TurnContext | undefined,
@@ -429,6 +443,16 @@ export class DispatchRunner {
       error: makeLogEmitter('error'),
     }
 
+    const reportGenerationStats = (stats: GenerationStats): void => {
+      const event: GenerationStatsEvent = {
+        ...stats,
+        dispatchId: ctx.dispatchId,
+        iteration: ctx.iteration,
+        emittedAt: DateTime.now(),
+      }
+      void observabilityHooks.runner('generationStats').run(event)
+    }
+
     const messageStreams = new Map<
       string,
       { full: string; createdAt: DateTime; isComplete: boolean }
@@ -523,6 +547,7 @@ export class DispatchRunner {
         ctx.emitToolCall(content)
       },
       log,
+      reportGenerationStats,
     }
   }
 
