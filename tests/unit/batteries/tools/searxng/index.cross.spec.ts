@@ -6,9 +6,10 @@ import {
   SpooledArtifact,
   SpooledJsonArtifact,
   SpooledMarkdownArtifact,
-} from '../../../../../src/common'
+} from '../../../../../src/spooled_artifact'
 import {
   createSearxngSearchTool,
+  createSearxngSearchToolSync,
   E_INVALID_SEARXNG_CONFIG,
   type SearxngToolConfig,
 } from '../../../../../src/batteries/tools/searxng'
@@ -47,7 +48,7 @@ const stubFetch = (
 }
 
 const run = async (config: SearxngToolConfig, args: Record<string, unknown>): Promise<string> => {
-  const tool = createSearxngSearchTool(config)
+  const tool = await createSearxngSearchTool(config)
   return (await tool.executor(makeToolCtxStub())(args)) as string
 }
 
@@ -57,22 +58,23 @@ afterEach(() => {
 })
 
 describe('createSearxngSearchTool — factory validation', () => {
-  it('throws E_INVALID_SEARXNG_CONFIG on missing instanceUrl', () => {
-    expect(() => createSearxngSearchTool({} as SearxngToolConfig)).toThrow(E_INVALID_SEARXNG_CONFIG)
-  })
-
-  it('throws E_INVALID_SEARXNG_CONFIG on unparseable instanceUrl', () => {
-    expect(() => createSearxngSearchTool({ instanceUrl: 'not a url' })).toThrow(
+  it('rejects E_INVALID_SEARXNG_CONFIG on missing instanceUrl (async)', async () => {
+    await expect(createSearxngSearchTool({} as SearxngToolConfig)).rejects.toBeInstanceOf(
       E_INVALID_SEARXNG_CONFIG
     )
   })
 
-  it('names the tool searxng_search by default and honours an override', () => {
-    expect(createSearxngSearchTool({ instanceUrl: 'https://x.example' }).name).toBe(
-      'searxng_search'
+  it('throws E_INVALID_SEARXNG_CONFIG on unparseable instanceUrl (sync)', () => {
+    expect(() => createSearxngSearchToolSync({ instanceUrl: 'not a url' })).toThrow(
+      E_INVALID_SEARXNG_CONFIG
     )
+  })
+
+  it('names the tool searxng_search by default and honours an override', async () => {
+    const def = await createSearxngSearchTool({ instanceUrl: 'https://x.example' })
+    expect(def.name).toBe('searxng_search')
     expect(
-      createSearxngSearchTool({ instanceUrl: 'https://x.example', name: 'web_search' }).name
+      createSearxngSearchToolSync({ instanceUrl: 'https://x.example', name: 'web_search' }).name
     ).toBe('web_search')
   })
 })
@@ -163,12 +165,12 @@ describe('createSearxngSearchTool — output shapes', () => {
   })
 
   it('pinned resultFormat removes the model-facing format field from the schema', () => {
-    const neutral = createSearxngSearchTool({ instanceUrl: 'https://x.example' })
-    const pinned = createSearxngSearchTool({
+    const neutral = createSearxngSearchToolSync({ instanceUrl: 'https://x.example' })
+    const pinned = createSearxngSearchToolSync({
       instanceUrl: 'https://x.example',
       resultFormat: 'normalized',
     })
-    const keys = (t: ReturnType<typeof createSearxngSearchTool>) =>
+    const keys = (t: ReturnType<typeof createSearxngSearchToolSync>) =>
       Object.keys((t.describe().inputSchema as { keys: Record<string, unknown> }).keys)
     expect(keys(neutral)).toContain('format')
     expect(keys(pinned)).not.toContain('format')
@@ -322,23 +324,41 @@ describe('createSearxngSearchTool — output pipeline', () => {
   })
 })
 
-describe('createSearxngSearchTool — artifact argument', () => {
-  it('defaults to SpooledJsonArtifact', () => {
-    const tool = createSearxngSearchTool({ instanceUrl: 'https://x.example' })
-    expect(tool.artifactConstructor!()).toBe(SpooledJsonArtifact)
+describe('createSearxngSearchTool — artifact resolver', () => {
+  it('defaults to SpooledJsonArtifact (async + sync)', async () => {
+    const asyncTool = await createSearxngSearchTool({ instanceUrl: 'https://x.example' })
+    expect(asyncTool.artifactConstructor!()).toBe(SpooledJsonArtifact)
+    expect(
+      createSearxngSearchToolSync({ instanceUrl: 'https://x.example' }).artifactConstructor!()
+    ).toBe(SpooledJsonArtifact)
   })
 
-  it('passes an explicit markdown/text constructor through unchanged', () => {
-    const md = createSearxngSearchTool({
+  it('accepts a bare constructor, a sync resolver, and an async/dynamic-import resolver', async () => {
+    const ctor = createSearxngSearchToolSync({
       instanceUrl: 'https://x.example',
-      artifactConstructor: () => SpooledMarkdownArtifact,
+      artifact: SpooledMarkdownArtifact,
     })
-    const text = createSearxngSearchTool({
+    const sync = createSearxngSearchToolSync({
       instanceUrl: 'https://x.example',
-      artifactConstructor: () => SpooledArtifact,
+      artifact: () => SpooledArtifact,
     })
-    expect(md.artifactConstructor!()).toBe(SpooledMarkdownArtifact)
-    expect(text.artifactConstructor!()).toBe(SpooledArtifact)
+    const asyncTool = await createSearxngSearchTool({
+      instanceUrl: 'https://x.example',
+      artifact: async () => ({ default: SpooledMarkdownArtifact }),
+    })
+    expect(ctor.artifactConstructor!()).toBe(SpooledMarkdownArtifact)
+    expect(sync.artifactConstructor!()).toBe(SpooledArtifact)
+    expect(asyncTool.artifactConstructor!()).toBe(SpooledMarkdownArtifact)
+  })
+
+  it('sync factory rejects an async resolver with E_INVALID_SEARXNG_CONFIG', () => {
+    expect(() =>
+      createSearxngSearchToolSync({
+        instanceUrl: 'https://x.example',
+        // @ts-expect-error — async resolver is not assignable to the sync subset
+        artifact: async () => SpooledMarkdownArtifact,
+      })
+    ).toThrow(E_INVALID_SEARXNG_CONFIG)
   })
 })
 
@@ -351,7 +371,7 @@ describe('createSearxngSearchTool — artifact round-trip (end-to-end)', () => {
 
   /** Run the tool and wrap its output in whatever artifact the tool declares. */
   const runThroughArtifact = async (config: SearxngToolConfig, args: Record<string, unknown>) => {
-    const tool = createSearxngSearchTool(config)
+    const tool = await createSearxngSearchTool(config)
     const out = (await tool.executor(makeToolCtxStub())(args)) as string
     const Ctor = tool.artifactConstructor!()
     const artifact = new Ctor(new InMemorySpoolReader(out))
@@ -388,7 +408,7 @@ describe('createSearxngSearchTool — artifact round-trip (end-to-end)', () => {
     const { artifact } = await runThroughArtifact(
       {
         instanceUrl: 'https://x.example',
-        artifactConstructor: () => SpooledMarkdownArtifact,
+        artifact: () => SpooledMarkdownArtifact,
         outputPipeline: [
           async (ctx, next) => {
             ctx.output = [
@@ -416,7 +436,7 @@ describe('createSearxngSearchTool — artifact round-trip (end-to-end)', () => {
     const { out, artifact } = await runThroughArtifact(
       {
         instanceUrl: 'https://x.example',
-        artifactConstructor: () => SpooledArtifact,
+        artifact: () => SpooledArtifact,
         outputPipeline: [
           async (ctx, next) => {
             ctx.output = ctx.results.map((r) => `${r.title}\t${r.url}`).join('\n')
@@ -439,7 +459,7 @@ describe('createSearxngSearchTool — fresh runner per invocation', () => {
     stubFetch()
     let inputRuns = 0
     let outputRuns = 0
-    const tool = createSearxngSearchTool({
+    const tool = await createSearxngSearchTool({
       instanceUrl: 'https://x.example',
       inputPipeline: [
         async (_ctx, next) => {

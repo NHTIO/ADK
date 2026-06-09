@@ -29,7 +29,7 @@ const readArtifact = async (
   args: Record<string, unknown>,
   config: Parameters<typeof createSearxngSearchTool>[0]
 ): Promise<string[]> => {
-  const tool = createSearxngSearchTool(config)
+  const tool = await createSearxngSearchTool(config)
   const exec = scriptedExecutor([{ toolCalls: [{ tool: tool.name, args }] }, { ack: true }])
   const { run, store } = makeFixtureRunner({ executorCallback: exec, tools: [tool] })
   await run()
@@ -129,7 +129,7 @@ d('SearXNG search tool (integration)', () => {
         instanceUrl: url!,
         headers,
         resultFormat: 'normalized',
-        artifactConstructor: () => SpooledMarkdownArtifact,
+        artifact: () => SpooledMarkdownArtifact,
         outputPipeline: [
           async (ctx, next) => {
             ctx.output = ctx.results

@@ -23,9 +23,11 @@ export * from './math'
 export * from './memory'
 export * from './parsing'
 export * from './retrievables'
-// NOTE: searxng exports a *factory* (`createSearxngSearchTool`), not a ready-made `Tool`. It is
-// re-exported here for discoverability, but unlike its siblings it must NOT be bulk-registered
-// via `Object.values(batteries)` — call the factory first, then register the returned tool.
+// NOTE: scrapper and searxng export *factories* (e.g. `createScrapperArticleTool`,
+// `createSearxngSearchTool`), not ready-made `Tool` constants. They are re-exported here for
+// discoverability, but unlike their siblings they must NOT be bulk-registered via
+// `Object.values(batteries)` — call a factory first, then register the returned tool.
+export * from './scrapper'
 export * from './searxng'
 export * from './standing_instructions'
 export * from './statistics'
@@ -33,5 +35,8 @@ export * from './string_processing'
 export * from './structured_data'
 export * from './text_analysis'
 export * from './text_comparison'
+// web_retrieval is the RAG glue (pure converters + storeRetrievables) shared by the scrapper and
+// searxng batteries — functions, not Tools; safe to re-export for discoverability.
+export * from './web_retrieval'
 export * from './time'
 export * from './unit_conversion'

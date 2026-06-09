@@ -71,13 +71,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Scrapper web-extraction tool battery (`@nhtio/adk/batteries/tools/scrapper`).** Tools for any
+  [Scrapper](https://github.com/amerkurev/scrapper) instance — a headless-browser service that gives
+  an agent browser-grade page reading (JS-rendered pages a plain fetch can't see) as a **stateless**
+  HTTP call: fresh incognito context per request, no stored session/cookies/credentials. Two verbs,
+  each with an async factory (accepts a dynamic-import `artifact` resolver) and a sync variant:
+  `createScrapperArticleTool`/`…Sync` (`/api/article`) and `createScrapperLinksTool`/`…Sync`
+  (`/api/links`). Like the SearXNG battery these are factories (not constants) and must not be
+  bulk-registered via `Object.values(batteries)`.
+  - **Per-parameter disposition** — for every modeled knob the factory chooses: `fixed` (pinned;
+    sent always, removed from the model schema), `defaults` (model-overridable), or open
+    (model-settable). `url` is always required; `fixedQuery` is a raw kebab passthrough for
+    un-modeled params, keeping the battery generic across instances/versions.
+  - **Two distinct header channels** — `config.headers` (static or sync/async resolver) authenticates
+    to the Scrapper *instance*; the `extra_http_headers` *param* (`'K:v;K2:v2'`) is what the scraper's
+    browser sends to the *target site*.
+  - Same SearXNG-style two-level output (`resultFormat` normalized/raw/either), `artifact` resolver,
+    and input/output middleware pipelines (`shortCircuit`, fresh runner per call). Errors degrade to
+    `Error:` strings (parses Scrapper's `{detail:[{msg}]}`; missing `url` → HTTP 422); bad config →
+    `E_INVALID_SCRAPPER_CONFIG`. Documented as a featured-battery page with TSDoc `@warning`s for the
+    `scroll_down`-needs-`sleep` and instance-relative-URI gotchas. Cross-env unit spec (stubbed
+    `fetch`, disposition, resolver, all-three-artifact round-trips) + env-gated live integration spec
+    (`TEST_SCRAPPER_URL` / `TEST_SCRAPPER_HEADERS`).
+
+- **Web-retrieval RAG glue (`@nhtio/adk/batteries/tools/web_retrieval`).** The shared seam from
+  search/scrape results to turn `Retrievable`s, used by both the Scrapper and SearXNG batteries.
+  Pure converters — `searxngResultsToRetrievables`, `scrapperArticleToRetrievable`,
+  `scrapperLinksToRetrievables` — return plain `RawRetrievable[]` (zero core-class instantiation;
+  core referenced as `import type` only). `storeRetrievables(ctx, raws, { retrievable })` constructs
+  and stores records via a **resolver-injected** `Retrievable` constructor (ctor / sync / async /
+  dynamic-import), so the module never value-imports core. Long page text becomes a reader-backed
+  `SpooledArtifact` via a caller `spool` hook (the converter recommends an open
+  `ArtifactConstructorResolver` for the content — markdown/json/text — so a consumer's own subclass
+  works unchanged; no chunker). Web content defaults to `trustTier: 'third-party-public'` (a
+  constant, not URL inference — CONTRIBUTING DD#12).
+
+- **Shared tool-battery helpers (`@nhtio/adk/batteries/tools/_shared`).** Internal building blocks
+  for the configured-HTTP tool batteries: `resolveArtifact`/`resolveArtifactSync` (resolver → sync
+  `() => Ctor`), the onion middleware-pipeline runners (fresh runner per call, short-circuit +
+  non-terminal detection), header resolution, and the `ArtifactResolver`/`SyncArtifactResolver`
+  types. SearXNG and Scrapper both build on it instead of carrying copies.
+
 - **SearXNG search tool battery (`@nhtio/adk/batteries/tools/searxng`).** A web-search tool for any
-  [SearXNG](https://docs.searxng.org/dev/search_api.html) instance, exposed via a **factory** —
-  `createSearxngSearchTool(config)` — rather than a ready-made constant. It is the first
-  factory-style tool battery: a search tool has to know *which* instance to query and is usually
-  behind custom authentication, so it needs per-deployment config that cannot be baked in at module
-  load. Because it exports a factory (not a `Tool`), it must not be bulk-registered via
-  `Object.values(batteries)` — call the factory first, then register the returned tool.
+  [SearXNG](https://docs.searxng.org/dev/search_api.html) instance, exposed via **factories** —
+  async `createSearxngSearchTool(config)` and sync `createSearxngSearchToolSync(config)` — rather
+  than a ready-made constant. It is the first factory-style tool battery: a search tool has to know
+  *which* instance to query and is usually behind custom authentication, so it needs per-deployment
+  config that cannot be baked in at module load. Because it exports factories (not a `Tool`), they
+  must not be bulk-registered via `Object.values(batteries)` — call a factory first, then register
+  the returned tool.
   - **Custom-header auth** — `config.headers` accepts a static `Record<string,string>` or a
     sync/async resolver (`() => headers | Promise<headers>`); the resolver runs on every search, so
     refreshable bearer tokens work. Caller headers override the default `Accept`/`User-Agent`.
@@ -92,9 +134,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     hit); output stages filter/re-rank `ctx.results`, mutate `ctx.raw`, or set `ctx.output` verbatim
     (e.g. rendered markdown). A `ctx.stash` Map carries across both; a fresh runner is minted per
     invocation (middleware runners are single-use).
-  - **Configurable spool artifact** — `config.artifactConstructor` (default `() => SpooledJsonArtifact`)
-    is passed straight through to the `Tool`; set `() => SpooledMarkdownArtifact` or
-    `() => SpooledArtifact` to match a custom `outputPipeline` render.
+  - **Configurable spool artifact (resolver)** — `config.artifact` (default `() => SpooledJsonArtifact`)
+    is an open `ArtifactConstructorResolver`: a ctor, a sync resolver, or — via the async factory —
+    an async/dynamic-import resolver (`() => import('@nhtio/adk/spooled_artifact').then(m => m.SpooledMarkdownArtifact)`),
+    so a consumer's own `SpooledArtifact` subclass works with no battery change. The async factory
+    resolves it before building the `Tool` (whose `artifactConstructor` must be sync); the sync
+    factory accepts only the sync subset.
   - **Graceful failures** — a disabled-JSON instance (SearXNG disables JSON by default → HTTP 403),
     network errors, timeouts, and thrown pipeline stages all return `Error:` strings the model can
     react to; only malformed args throw (`E_INVALID_TOOL_ARGS`). Invalid config throws the

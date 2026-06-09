@@ -5,23 +5,37 @@
  *
  * @remarks
  * Unlike the other bundled tool categories — every one of which exports a ready-made,
- * stateless `Tool` constant — the SearXNG battery exports a **factory**,
- * {@link createSearxngSearchTool}. A search tool has to talk to a *specific* SearXNG instance,
- * usually behind custom authentication, so it needs per-deployment configuration (a base URL
- * and headers) that cannot be baked in at module load.
+ * stateless `Tool` constant — the SearXNG battery exports **factories**,
+ * {@link createSearxngSearchTool} (async) and {@link createSearxngSearchToolSync}. A search tool
+ * has to talk to a *specific* SearXNG instance, usually behind custom authentication, so it needs
+ * per-deployment configuration (a base URL and headers) that cannot be baked in at module load.
  *
- * Because this module exports a factory rather than a `Tool` instance, it MUST NOT be
- * bulk-registered via `Object.values(batteries)`. Call the factory first, then register the
- * returned tool: `new ToolRegistry([createSearxngSearchTool({ instanceUrl })])`.
+ * Because this module exports factories rather than `Tool` instances, they MUST NOT be
+ * bulk-registered via `Object.values(batteries)`. Call a factory first, then register the
+ * returned tool: `new ToolRegistry([await createSearxngSearchTool({ instanceUrl })])`.
  *
  * @see https://docs.searxng.org/dev/search_api.html
  */
 
+import { Tool } from '@nhtio/adk/forge'
+import { isError } from '@nhtio/adk/guards'
 import { validator } from '@nhtio/validation'
 import { Middleware } from '@nhtio/middleware'
-import { isError, isObject } from '@nhtio/adk/guards'
 import { E_INVALID_SEARXNG_CONFIG } from './exceptions'
-import { Tool, SpooledJsonArtifact, type ArtifactConstructorResolver } from '@nhtio/adk/common'
+import { SpooledJsonArtifact } from '@nhtio/adk/spooled_artifact'
+import {
+  resolveHeaders,
+  resolveArtifact,
+  resolveArtifactSync,
+  makeShortCircuit,
+  isShortCircuit,
+  runInputPipeline,
+  runOutputPipeline,
+  type ArtifactResolver,
+  type SyncArtifactResolver,
+  type SpooledArtifactCtor,
+  type MiddlewareFn,
+} from '../_shared'
 import type { Schema } from '@nhtio/validation'
 import type { NextFn } from '@nhtio/middleware'
 
@@ -89,7 +103,7 @@ export interface SearxngRequestContext {
  * @remarks
  * Stages reshape, redact, enrich, or re-rank {@link SearxngResponseContext.results}, mutate the
  * raw body, or set {@link SearxngResponseContext.output} to override the serialised string
- * verbatim (e.g. to render markdown that matches a markdown `artifactConstructor`).
+ * verbatim (e.g. to render markdown that matches a markdown `artifact` resolver).
  */
 export interface SearxngResponseContext {
   /** The tool's name (read-only). */
@@ -120,8 +134,14 @@ export type SearxngOutputMiddlewareFn = (
   next: NextFn
 ) => void | Promise<void>
 
-/** Configuration for {@link createSearxngSearchTool}. */
-export interface SearxngToolConfig {
+/**
+ * Configuration for {@link createSearxngSearchTool} (async) and
+ * {@link createSearxngSearchToolSync} (sync — `artifact` narrowed to the sync subset).
+ *
+ * @typeParam A - The {@link ArtifactResolver} variant accepted: the full resolver (async factory)
+ *   or the sync subset ({@link createSearxngSearchToolSync}).
+ */
+export interface SearxngToolConfig<A = ArtifactResolver> {
   /** Base URL of the SearXNG instance, e.g. `https://searx.example.org`. Required. */
   instanceUrl: string
   /** Custom request headers — a static object or a (sync/async) resolver for refreshable auth. */
@@ -138,11 +158,12 @@ export interface SearxngToolConfig {
   /** Tool description override. */
   description?: string
   /**
-   * Spool artifact constructor for the tool's output. Default `() => SpooledJsonArtifact`.
-   * Pass `() => SpooledMarkdownArtifact` (paired with an output stage that renders markdown into
-   * `ctx.output`) or `() => SpooledArtifact` for plain text.
+   * Spool-artifact resolver for the tool's output. Default `() => SpooledJsonArtifact`. Accepts a
+   * constructor, a sync resolver, or — via {@link createSearxngSearchTool} — an async /
+   * dynamic-import resolver. Pass `() => SpooledMarkdownArtifact` (paired with an output stage that
+   * renders markdown into `ctx.output`) or `() => SpooledArtifact` for plain text.
    */
-  artifactConstructor?: ArtifactConstructorResolver
+  artifact?: A
   /** Stages run before the HTTP request. See {@link SearxngRequestContext}. */
   inputPipeline?: SearxngInputMiddlewareFn[]
   /** Stages run after the response is parsed. See {@link SearxngResponseContext}. */
@@ -154,17 +175,6 @@ const DEFAULT_TIMEOUT = 10_000
 const DEFAULT_DESCRIPTION =
   'Search the web via a SearXNG metasearch instance. Returns aggregated results (title, url, ' +
   'snippet, source engine) plus any answers, infoboxes, and suggestions.'
-
-/** Internal sentinel a short-circuiting input stage throws to unwind the pipeline immediately. */
-const SHORT_CIRCUIT = Symbol('searxng.shortCircuit')
-
-interface ShortCircuitSignal {
-  [SHORT_CIRCUIT]: true
-  result: string
-}
-
-const isShortCircuit = (value: unknown): value is ShortCircuitSignal =>
-  isObject(value) && (value as Record<symbol, unknown>)[SHORT_CIRCUIT] === true
 
 /** Normalise a loose SearXNG result item into a {@link SearxngResult}. */
 const normaliseResult = (raw: unknown): SearxngResult => {
@@ -179,57 +189,41 @@ const normaliseResult = (raw: unknown): SearxngResult => {
   return out
 }
 
-/** Resolve the configured headers (static object or resolver) for a single request. */
-const resolveHeaders = async (headers: SearxngToolConfig['headers']): Promise<SearxngHeaders> => {
-  if (typeof headers === 'function') return { ...(await headers()) }
-  return { ...(headers ?? {}) }
+const fail = (reason: string): never => {
+  throw new E_INVALID_SEARXNG_CONFIG([reason])
+}
+
+/** Validate `instanceUrl` and return the trailing-slash-normalised base. */
+const validateInstanceUrl = (config: { instanceUrl?: string }): string => {
+  if (typeof config?.instanceUrl !== 'string' || config.instanceUrl.trim() === '') {
+    fail('instanceUrl is required')
+  }
+  try {
+    new URL(config.instanceUrl as string)
+  } catch {
+    fail(`instanceUrl is not a valid URL: ${config.instanceUrl}`)
+  }
+  return (config.instanceUrl as string).replace(/\/+$/, '')
 }
 
 /**
- * Create a configured SearXNG search {@link Tool}.
- *
- * @remarks
- * The handler always requests `format=json`. Note that SearXNG ships with JSON output
- * **disabled** by default (it is abused by bots); an instance that has not enabled
- * `search.formats: [json]` in its `settings.yml` answers with HTTP 403, which the tool returns
- * as a graceful `Error:` string naming the setting.
- *
- * @warning
- * Do not trust the `number_of_results` field for a result count — SearXNG frequently reports `0`
- * in JSON output even when `results` is non-empty. This is a long-standing upstream quirk, not a
- * tool defect (see {@link https://github.com/searxng/searxng/issues/2987 | searxng#2987} and
- * {@link https://github.com/searxng/searxng/issues/2457 | searxng#2457}). The tool passes the
- * field through verbatim; use `results.length` as the authoritative count.
- *
- * @param config - The instance URL, optional custom headers, output-format policy, artifact
- *   type, and input/output middleware pipelines. See {@link SearxngToolConfig}.
- * @returns A `Tool` ready to register in a `ToolRegistry`.
- * @throws {@link E_INVALID_SEARXNG_CONFIG} when `instanceUrl` is missing or unparseable.
+ * Assemble the `Tool` from validated config + an already-resolved sync artifact constructor.
+ * Shared by both the async and sync factories — they differ only in how `artifact` is resolved.
  */
-export const createSearxngSearchTool = (config: SearxngToolConfig): Tool => {
-  if (typeof config?.instanceUrl !== 'string' || config.instanceUrl.trim() === '') {
-    throw new E_INVALID_SEARXNG_CONFIG(['instanceUrl is required'])
-  }
-  try {
-    // Parse-validate only; the normalised string below is what we actually use.
-    new URL(config.instanceUrl)
-  } catch {
-    throw new E_INVALID_SEARXNG_CONFIG([`instanceUrl is not a valid URL: ${config.instanceUrl}`])
-  }
-  // Normalise away a trailing slash so `new URL('/search', base)` resolves cleanly.
-  const instanceUrl = config.instanceUrl.replace(/\/+$/, '')
-
+const assembleTool = (
+  config: SearxngToolConfig<unknown>,
+  instanceUrl: string,
+  artifactConstructor: () => SpooledArtifactCtor
+): Tool => {
   const timeout = config.timeout ?? DEFAULT_TIMEOUT
   const resultFormat: SearxngResultFormat = config.resultFormat ?? 'either'
   const toolName = config.name ?? DEFAULT_NAME
-  const artifactConstructor: ArtifactConstructorResolver =
-    config.artifactConstructor ?? (() => SpooledJsonArtifact)
 
   // Stages are fixed at factory time; build the Middleware shells once. A fresh `.runner()` is
   // minted per invocation inside the handler (runners are single-use).
-  const inputMw = new Middleware<SearxngInputMiddlewareFn>()
+  const inputMw = new Middleware<MiddlewareFn<SearxngRequestContext>>()
   for (const fn of config.inputPipeline ?? []) inputMw.add(fn)
-  const outputMw = new Middleware<SearxngOutputMiddlewareFn>()
+  const outputMw = new Middleware<MiddlewareFn<SearxngResponseContext>>()
   for (const fn of config.outputPipeline ?? []) outputMw.add(fn)
   const hasInput = (config.inputPipeline ?? []).length > 0
   const hasOutput = (config.outputPipeline ?? []).length > 0
@@ -315,14 +309,11 @@ export const createSearxngSearchTool = (config: SearxngToolConfig): Tool => {
           headers,
           instanceUrl,
           stash,
-          shortCircuit: (result: string) => {
-            const signal: ShortCircuitSignal = { [SHORT_CIRCUIT]: true, result }
-            throw signal
-          },
+          shortCircuit: makeShortCircuit(),
         }
 
         if (hasInput) {
-          const short = await runInputPipeline(inputMw, requestCtx)
+          const short = await runInputPipeline(inputMw, requestCtx, 'SearXNG')
           if (short !== undefined) return short
         }
 
@@ -368,7 +359,7 @@ export const createSearxngSearchTool = (config: SearxngToolConfig): Tool => {
           stash,
         }
 
-        if (hasOutput) await runOutputPipeline(outputMw, responseCtx)
+        if (hasOutput) await runOutputPipeline(outputMw, responseCtx, 'SearXNG')
 
         // 8. Serialise and return.
         if (typeof responseCtx.output === 'string') return responseCtx.output
@@ -380,6 +371,67 @@ export const createSearxngSearchTool = (config: SearxngToolConfig): Tool => {
       }
     },
   })
+}
+
+/**
+ * Create a configured SearXNG search {@link Tool} (async — accepts a dynamic-import `artifact`).
+ *
+ * @remarks
+ * Async because `artifact` may be an async / dynamic-import resolver, which must be resolved to the
+ * sync `() => Ctor` that `Tool.artifactConstructor` requires before the tool is built (the
+ * wrap-site invokes it synchronously). For the common case where you reference the artifact class
+ * directly, use {@link createSearxngSearchToolSync} and skip the `await`.
+ *
+ * The handler always requests `format=json`. Note that SearXNG ships with JSON output
+ * **disabled** by default (it is abused by bots); an instance that has not enabled
+ * `search.formats: [json]` in its `settings.yml` answers with HTTP 403, which the tool returns
+ * as a graceful `Error:` string naming the setting.
+ *
+ * @warning
+ * Do not trust the `number_of_results` field for a result count — SearXNG frequently reports `0`
+ * in JSON output even when `results` is non-empty. This is a long-standing upstream quirk, not a
+ * tool defect (see {@link https://github.com/searxng/searxng/issues/2987 | searxng#2987} and
+ * {@link https://github.com/searxng/searxng/issues/2457 | searxng#2457}). The tool passes the
+ * field through verbatim; use `results.length` as the authoritative count.
+ *
+ * @param config - The instance URL, optional custom headers, output-format policy, `artifact`
+ *   resolver, and input/output middleware pipelines. See {@link SearxngToolConfig}.
+ * @returns A promise of a `Tool` ready to register in a `ToolRegistry`.
+ * @throws {@link E_INVALID_SEARXNG_CONFIG} when `instanceUrl` or `artifact` is invalid.
+ */
+export const createSearxngSearchTool = async (
+  config: SearxngToolConfig<ArtifactResolver>
+): Promise<Tool> => {
+  const instanceUrl = validateInstanceUrl(config)
+  const artifactConstructor = await resolveArtifact(
+    config.artifact ?? (() => SpooledJsonArtifact),
+    fail
+  )
+  return assembleTool(config, instanceUrl, artifactConstructor)
+}
+
+/**
+ * Synchronous {@link createSearxngSearchTool} — the ergonomic common path.
+ *
+ * @remarks
+ * `artifact` is narrowed to the sync subset (a constructor or a sync resolver). Passing an async
+ * resolver is a compile-time type error and a runtime {@link E_INVALID_SEARXNG_CONFIG}; for
+ * dynamic-import resolvers use the async {@link createSearxngSearchTool}. See its docs for the
+ * `number_of_results` caveat and 403/JSON-disabled behaviour.
+ *
+ * @param config - Same as {@link SearxngToolConfig}, with `artifact` restricted to the sync subset.
+ * @returns A `Tool` ready to register in a `ToolRegistry`.
+ * @throws {@link E_INVALID_SEARXNG_CONFIG} when `instanceUrl` or `artifact` is invalid (incl. an async resolver).
+ */
+export const createSearxngSearchToolSync = (
+  config: SearxngToolConfig<SyncArtifactResolver>
+): Tool => {
+  const instanceUrl = validateInstanceUrl(config)
+  const artifactConstructor = resolveArtifactSync(
+    config.artifact ?? (() => SpooledJsonArtifact),
+    fail
+  )
+  return assembleTool(config, instanceUrl, artifactConstructor)
 }
 
 /** Assemble the trimmed normalised payload, dropping empty aggregate arrays. */
@@ -400,62 +452,4 @@ const buildNormalisedPayload = (ctx: SearxngResponseContext): Record<string, unk
     if (Array.isArray(value) && value.length > 0) payload[key] = value
   }
   return payload
-}
-
-/**
- * Run the input pipeline. Returns the short-circuit string when a stage short-circuited, or
- * `undefined` when the pipeline reached its terminal handler. A non-terminal pipeline (a stage
- * that neither called `next()` nor short-circuited) is surfaced as a thrown Error so the handler
- * converts it to an `Error:` string.
- */
-const runInputPipeline = async (
-  mw: Middleware<SearxngInputMiddlewareFn>,
-  ctx: SearxngRequestContext
-): Promise<string | undefined> => {
-  let reached = false
-  let shortResult: string | undefined
-  let caught: unknown
-  await mw
-    .runner()
-    .errorHandler(async (error: unknown) => {
-      caught = error
-    })
-    .finalHandler(async () => {
-      reached = true
-    })
-    .run((fn, next) => Promise.resolve(fn(ctx, next)))
-
-  if (caught !== undefined) {
-    if (isShortCircuit(caught)) {
-      shortResult = caught.result
-    } else {
-      throw caught
-    }
-  } else if (!reached) {
-    throw new Error('SearXNG input pipeline did not call next() and did not short-circuit.')
-  }
-  return shortResult
-}
-
-/** Run the output pipeline; rethrow any stage error to the handler's try/catch. */
-const runOutputPipeline = async (
-  mw: Middleware<SearxngOutputMiddlewareFn>,
-  ctx: SearxngResponseContext
-): Promise<void> => {
-  let reached = false
-  let caught: unknown
-  await mw
-    .runner()
-    .errorHandler(async (error: unknown) => {
-      caught = error
-    })
-    .finalHandler(async () => {
-      reached = true
-    })
-    .run((fn, next) => Promise.resolve(fn(ctx, next)))
-
-  if (caught !== undefined) throw caught
-  if (!reached) {
-    throw new Error('SearXNG output pipeline did not call next().')
-  }
 }
