@@ -48,6 +48,7 @@ export interface FixtureConfigOverrides {
   mutateRetrievableCallback?: TurnRunnerConfig['mutateRetrievableCallback']
   deleteRetrievableCallback?: TurnRunnerConfig['deleteRetrievableCallback']
   refreshStandingInstructionsCallback?: TurnRunnerConfig['refreshStandingInstructionsCallback']
+  storeMediaBytesCallback?: TurnRunnerConfig['storeMediaBytesCallback']
 }
 
 /**
@@ -119,7 +120,9 @@ export const makeFixtureConfig = (overrides: FixtureConfigOverrides): TurnRunner
     storeToolCallCallback: async (_ctx, _v) => {},
     mutateToolCallCallback: async (_ctx, _v) => {},
     deleteToolCallCallback: async (_ctx, _id) => {},
-    storeMediaBytesCallback: async (_ctx, _id, bytes) => inMemoryMediaReader(await toBytes(bytes)),
+    storeMediaBytesCallback: overrides.storeMediaBytesCallback
+      ? async (_ctx, id, bytes) => overrides.storeMediaBytesCallback!(_ctx, id, bytes)
+      : async (_ctx, _id, bytes) => inMemoryMediaReader(await toBytes(bytes)),
     storeRetrievableBytesCallback: (_ctx, id, bytes) => new InMemorySpoolStore().write(id, bytes),
 
     tools: overrides.tools ?? [],

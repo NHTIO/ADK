@@ -19,6 +19,8 @@ import {
   isShortCircuit,
   runInputPipeline,
   runOutputPipeline,
+  runToolGate,
+  type ToolGateFn,
   type ToolHeaders,
   type ToolHeadersResolver,
   type SpooledArtifactCtor,
@@ -187,6 +189,13 @@ export interface ScrapperBaseConfig<P, R, A> {
   defaults?: Partial<P>
   /** Raw, un-modeled wire params (kebab keys) — always sent, never model-visible. Keeps the battery generic. */
   fixedQuery?: Record<string, string>
+  /**
+   * Optional per-call gate run before the HTTP request — the seam for human-approval/RBAC
+   * flows built on `ctx.waitFor` (the ADK gates primitive). Throwing aborts the call through
+   * the standard tool-error path. Scraping reaches the network on the agent's behalf, which
+   * makes every call a candidate for gating.
+   */
+  gate?: ToolGateFn
   /** Stages run before the HTTP request. See {@link ScrapperRequestContext}. */
   inputPipeline?: ScrapperInputMiddlewareFn[]
   /** Stages run after the response is parsed. See {@link ScrapperResponseContext}. */
@@ -266,8 +275,9 @@ export const assembleScrapperTool = <P, R>(
     description: config.description ?? verb.defaultDescription,
     inputSchema,
     artifactConstructor,
-    handler: async (args) => {
+    handler: async (args, handlerCtx) => {
       const a = args as Record<string, unknown> & { url: string; format?: 'normalized' | 'raw' }
+      await runToolGate(config.gate, handlerCtx, toolName, args)
       try {
         const format: 'normalized' | 'raw' =
           resultFormat === 'either' ? (a.format ?? 'normalized') : resultFormat

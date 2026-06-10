@@ -62,6 +62,7 @@
     "@clickhouse/client": "^1.20.0",
     "@duckdb/node-api": "^1.5.3-r.3",
     "@elastic/elasticsearch": "^8.0.0 || ^9.0.0",
+    "@huggingface/transformers": "^4.2.0",
     "@lancedb/lancedb": "^0.30.0",
     "@mlc-ai/web-llm": "^0.2.83",
     "@opensearch-project/opensearch": "^3.6.0",
@@ -72,6 +73,7 @@
     "@zilliz/milvus2-sdk-node": "^3.0.3",
     "apache-arrow": "^18.1.0",
     "arangojs": "^10.3.1",
+    "audio-decode": "^3.10.1",
     "better-sqlite3": "^12.10.0",
     "case-anything": "^3.0.0",
     "chromadb": "^3.4.3",
@@ -80,21 +82,31 @@
     "diff": "^9.0.0",
     "eslint": "^9.0.0",
     "evaluatex": "^2.2.0",
+    "exceljs": "^4.4.0",
+    "execa": "^9.6.1",
     "fastest-levenshtein": "^1.0.0",
     "flydrive": "^2.0.0",
     "hnswlib-node": "^3.0.0",
+    "jimp": "^1.6.1",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.12.0",
     "mariadb": "^3.5.2",
     "mathjs": "^15.0.0",
     "meilisearch": "^0.58.0",
     "mongodb": "^7.2.0",
+    "moo": "^0.5.3",
     "neo4j-driver": "^6.0.1",
     "oracledb": "^6.0.0",
     "papaparse": "^5.0.0",
+    "pdf-lib": "^1.17.1",
+    "pdf-parse": "^2.4.5",
     "pg": "^8.21.0",
     "redis": "^6.0.0",
+    "sharp": "^0.34.5",
     "simple-statistics": "^7.0.0",
     "sqlite-vec": "^0.1.9",
     "surrealdb": "^2.0.3",
+    "tesseract.js": "^7.0.0",
     "typesense": "^3.0.6",
     "vitest": "^4.1.5",
     "weaviate-client": "^3.13.1"
@@ -106,16 +118,13 @@
     "@clickhouse/client": {
       "optional": true
     },
-    "@elastic/elasticsearch": {
-      "optional": true
-    },
     "@duckdb/node-api": {
       "optional": true
     },
-    "@typescript-eslint/utils": {
+    "@elastic/elasticsearch": {
       "optional": true
     },
-    "eslint": {
+    "@huggingface/transformers": {
       "optional": true
     },
     "@lancedb/lancedb": {
@@ -136,7 +145,19 @@
     "@qdrant/js-client-rest": {
       "optional": true
     },
+    "@typescript-eslint/utils": {
+      "optional": true
+    },
     "@zilliz/milvus2-sdk-node": {
+      "optional": true
+    },
+    "apache-arrow": {
+      "optional": true
+    },
+    "arangojs": {
+      "optional": true
+    },
+    "audio-decode": {
       "optional": true
     },
     "better-sqlite3": {
@@ -157,22 +178,34 @@
     "diff": {
       "optional": true
     },
+    "eslint": {
+      "optional": true
+    },
+    "evaluatex": {
+      "optional": true
+    },
+    "exceljs": {
+      "optional": true
+    },
+    "execa": {
+      "optional": true
+    },
     "fastest-levenshtein": {
       "optional": true
     },
     "flydrive": {
       "optional": true
     },
-    "evaluatex": {
-      "optional": true
-    },
-    "apache-arrow": {
-      "optional": true
-    },
-    "arangojs": {
-      "optional": true
-    },
     "hnswlib-node": {
+      "optional": true
+    },
+    "jimp": {
+      "optional": true
+    },
+    "jszip": {
+      "optional": true
+    },
+    "mammoth": {
       "optional": true
     },
     "mariadb": {
@@ -187,6 +220,9 @@
     "mongodb": {
       "optional": true
     },
+    "moo": {
+      "optional": true
+    },
     "neo4j-driver": {
       "optional": true
     },
@@ -196,10 +232,19 @@
     "papaparse": {
       "optional": true
     },
+    "pdf-lib": {
+      "optional": true
+    },
+    "pdf-parse": {
+      "optional": true
+    },
     "pg": {
       "optional": true
     },
     "redis": {
+      "optional": true
+    },
+    "sharp": {
       "optional": true
     },
     "simple-statistics": {
@@ -209,6 +254,9 @@
       "optional": true
     },
     "surrealdb": {
+      "optional": true
+    },
+    "tesseract.js": {
       "optional": true
     },
     "typesense": {
@@ -227,6 +275,7 @@
     "@clickhouse/client": "^1.20.0",
     "@duckdb/node-api": "1.5.3-r.3",
     "@elastic/elasticsearch": "^8.19.1",
+    "@huggingface/transformers": "^4.2.0",
     "@inquirer/prompts": "^8.4.2",
     "@lancedb/lancedb": "^0.30.0",
     "@mlc-ai/web-llm": "^0.2.83",
@@ -250,6 +299,7 @@
     "@types/luxon": "^3.7.1",
     "@types/markdown-it": "^14.1.2",
     "@types/mdast": "^4.0.4",
+    "@types/moo": "^0.5.10",
     "@types/node": "^25.6.0",
     "@types/papaparse": "^5.5.2",
     "@types/pg": "^8.20.0",
@@ -264,6 +314,7 @@
     "@zilliz/milvus2-sdk-node": "^3.0.3",
     "apache-arrow": "18.1.0",
     "arangojs": "^10.3.1",
+    "audio-decode": "^3.10.1",
     "baseline-browser-mapping": "^2.10.24",
     "better-sqlite3": "^12.10.0",
     "case-anything": "^3.1.2",
@@ -279,13 +330,17 @@
     "eslint-config-prettier": "^10.1.8",
     "eslint-formatter-gitlab": "^7.1.0",
     "eslint-plugin-prettier": "^5.5.5",
+    "exceljs": "^4.4.0",
     "execa": "^9.6.1",
     "fastest-levenshtein": "^1.0.16",
     "flydrive": "^2.1.0",
     "hnswlib-node": "^3.0.0",
+    "jimp": "^1.6.1",
     "jiti": "^2.6.1",
+    "jszip": "^3.10.1",
     "keyword-extractor": "^0.0.28",
     "madge": "^8.0.0",
+    "mammoth": "^1.12.0",
     "mariadb": "^3.5.2",
     "markdown-it": "^14.1.1",
     "mathjs": "^15.2.0",
@@ -298,15 +353,19 @@
     "neo4j-driver": "^6.0.1",
     "nodemon": "^3.1.14",
     "papaparse": "^5.5.3",
+    "pdf-lib": "^1.17.1",
+    "pdf-parse": "^2.4.5",
     "pg": "^8.21.0",
     "playwright": "^1.60.0",
     "prettier": "^3.8.3",
     "reading-time": "^1.5.0",
     "redis": "^6.0.0",
     "rimraf": "^6.1.3",
+    "sharp": "^0.34.5",
     "simple-statistics": "^7.8.9",
     "sqlite-vec": "^0.1.9",
     "surrealdb": "^2.0.3",
+    "tesseract.js": "^7.0.0",
     "typedoc": "^0.28.19",
     "typedoc-plugin-markdown": "^4.11.0",
     "typescript": "^5.9.3",

@@ -43,6 +43,20 @@ const renderDeps = {
   renderUntrustedContent,
 }
 
+/**
+ * Every rendered media is now preceded by an inline id-marker text block
+ * (`[media id: … | filename]` — the cross-battery referencing convention). These helpers
+ * separate the marker channel from the body blocks so body assertions stay focused.
+ */
+const isIdMarker = (b: { type?: string; text?: string }): boolean =>
+  b.type === 'text' && typeof b.text === 'string' && /^\[media id: /.test(b.text)
+
+const bodyBlocks = <T = any>(result: unknown): T[] =>
+  (result as Array<{ type?: string; text?: string }>).filter((b) => !isIdMarker(b)) as T[]
+
+const markerBlocks = (result: unknown): Array<{ type: string; text: string }> =>
+  (result as Array<any>).filter(isIdMarker)
+
 describe('OpenAI Chat Completions — Media tool-result rendering', () => {
   describe('image happy path', () => {
     it('returns an image_url content block with a base64 data URI', async () => {
@@ -63,7 +77,7 @@ describe('OpenAI Chat Completions — Media tool-result rendering', () => {
         ...renderDeps,
       })
       expect(Array.isArray(result)).toBe(true)
-      const blocks = result as Array<{ type: string; image_url?: { url: string } }>
+      const blocks = bodyBlocks(result)
       expect(blocks).toHaveLength(1)
       expect(blocks[0].type).toBe('image_url')
       expect(blocks[0].image_url?.url).toMatch(/^data:image\/png;base64,/)
@@ -87,10 +101,10 @@ describe('OpenAI Chat Completions — Media tool-result rendering', () => {
         unsupportedMediaPolicy: 'throw',
         ...renderDeps,
       })
-      const blocks = result as Array<{
+      const blocks = bodyBlocks<{
         type: string
         input_audio?: { format: string; data: string }
-      }>
+      }>(result)
       expect(blocks).toHaveLength(1)
       expect(blocks[0].type).toBe('input_audio')
       expect(typeof blocks[0].input_audio?.data).toBe('string')
@@ -114,10 +128,10 @@ describe('OpenAI Chat Completions — Media tool-result rendering', () => {
         unsupportedMediaPolicy: 'throw',
         ...renderDeps,
       })
-      const blocks = result as Array<{
+      const blocks = bodyBlocks<{
         type: string
         file?: { filename: string; file_data: string }
-      }>
+      }>(result)
       expect(blocks).toHaveLength(1)
       expect(blocks[0].type).toBe('file')
       expect(blocks[0].file?.filename).toBe('d.pdf')
@@ -150,7 +164,7 @@ describe('OpenAI Chat Completions — Media tool-result rendering', () => {
         unsupportedMediaPolicy: 'throw',
         ...renderDeps,
       })
-      const blocks = result as Array<{ type: string; image_url?: { url: string } }>
+      const blocks = bodyBlocks<{ type: string; image_url?: { url: string } }>(result)
       expect(blocks).toHaveLength(2)
       expect(blocks[0].image_url?.url).toMatch(/^data:image\/png;base64,/)
       expect(blocks[1].image_url?.url).toMatch(/^data:image\/jpeg;base64,/)
@@ -188,7 +202,7 @@ describe('OpenAI Chat Completions — Media tool-result rendering', () => {
         unsupportedMediaPolicy: 'synthetic-description',
         ...renderDeps,
       })
-      const blocks = result as Array<{ type: string; text?: string }>
+      const blocks = bodyBlocks<{ type: string; text?: string }>(result)
       expect(blocks).toHaveLength(1)
       expect(blocks[0].type).toBe('text')
       expect(blocks[0].text).toContain('v.mp4')
@@ -211,7 +225,7 @@ describe('OpenAI Chat Completions — Media tool-result rendering', () => {
         },
         ...renderDeps,
       })
-      const blocks = result as Array<{ type: string; text?: string }>
+      const blocks = bodyBlocks<{ type: string; text?: string }>(result)
       expect(blocks).toHaveLength(1)
       expect(blocks[0].type).toBe('text')
       expect(blocks[0].text).toContain('A transcript of the video.')
@@ -229,7 +243,7 @@ describe('OpenAI Chat Completions — Media tool-result rendering', () => {
         },
         ...renderDeps,
       })
-      const blocks = result as Array<{ type: string; text?: string }>
+      const blocks = bodyBlocks<{ type: string; text?: string }>(result)
       expect(blocks).toHaveLength(1)
       expect(blocks[0].type).toBe('text')
       expect(blocks[0].text).toContain('v.mp4')
@@ -257,7 +271,7 @@ describe('OpenAI Chat Completions — Media tool-result rendering', () => {
         unsupportedMediaPolicy: 'throw',
         ...renderDeps,
       })
-      const blocks = result as Array<{ type: string }>
+      const blocks = bodyBlocks<{ type: string }>(result)
       expect(blocks).toHaveLength(1)
       expect(blocks[0].type).toBe('image_url')
     })
@@ -287,9 +301,13 @@ describe('OpenAI Chat Completions — Media tool-result rendering', () => {
         unsupportedMediaPolicy: 'throw',
       })
       expect(Array.isArray(out.content)).toBe(true)
-      const blocks = out.content as Array<{ type: string }>
+      const blocks = bodyBlocks<{ type: string }>(out.content)
       expect(blocks[0].type).toBe('text')
       expect(blocks[1].type).toBe('image_url')
+      // The id-marker precedes the image block (the referencing convention).
+      const markers = markerBlocks(out.content)
+      expect(markers).toHaveLength(1)
+      expect(markers[0].text).toContain('p.png')
     })
 
     it('attachments-only user message renders without a leading text block', async () => {
@@ -313,7 +331,7 @@ describe('OpenAI Chat Completions — Media tool-result rendering', () => {
         selfIdentity: 'assistant',
         unsupportedMediaPolicy: 'throw',
       })
-      const blocks = out.content as Array<{ type: string }>
+      const blocks = bodyBlocks<{ type: string }>(out.content)
       expect(blocks).toHaveLength(1)
       expect(blocks[0].type).toBe('image_url')
     })
@@ -340,7 +358,7 @@ describe('OpenAI Chat Completions — Media tool-result rendering', () => {
         unsupportedMediaPolicy: 'throw',
       })
       expect(out.role).toBe('assistant')
-      const blocks = out.content as Array<{ type: string }>
+      const blocks = bodyBlocks<{ type: string }>(out.content)
       expect(blocks[0].type).toBe('input_audio')
     })
   })
@@ -373,5 +391,63 @@ describe('OpenAI Chat Completions — Media tool-result rendering', () => {
       expect(json.kind).toBe('image')
       expect(streamCalls).toBe(0)
     })
+  })
+})
+
+describe('inline media id-marker (cross-battery referencing convention)', () => {
+  const makeMedia = (id: string, filename: string): Media =>
+    new Media({
+      id,
+      kind: 'image',
+      mimeType: 'image/png',
+      filename,
+      reader: inMemoryMediaReader(tinyBuf),
+      trustTier: 'third-party-private',
+      modalityHazard: 'opaque-perceptual',
+    })
+
+  it('every media block is preceded by a marker carrying the harness-controlled Media.id', async () => {
+    const media = makeMedia('0190aaaa-bbbb-cccc-dddd-eeeeffff0001', 'chart.png')
+    const result = await renderChatCompletionsToolCallResult({
+      toolCall: makeToolCall(),
+      results: media,
+      tool: makeTool(),
+      unsupportedMediaPolicy: 'throw',
+      ...renderDeps,
+    })
+    const blocks = result as Array<{ type: string; text?: string }>
+    expect(blocks[0].type).toBe('text')
+    expect(blocks[0].text).toBe('[media id: 0190aaaa-bbbb-cccc-dddd-eeeeffff0001 | chart.png]')
+    expect(blocks[1].type).toBe('image_url')
+  })
+
+  it('the marker renders OUTSIDE the untrusted envelope (structural reference, no authority)', async () => {
+    const media = makeMedia('0190aaaa-bbbb-cccc-dddd-eeeeffff0002', 'doc.png')
+    const result = await renderChatCompletionsToolCallResult({
+      toolCall: makeToolCall(),
+      results: media,
+      tool: makeTool(),
+      unsupportedMediaPolicy: 'throw',
+      ...renderDeps,
+    })
+    const marker = (result as Array<{ text?: string }>)[0].text as string
+    expect(marker).not.toContain('<untrusted_content')
+    expect(marker).not.toContain('nonce')
+  })
+
+  it('multi-media results carry one marker per media, interleaved in order', async () => {
+    const a = makeMedia('0190aaaa-0000-0000-0000-00000000000a', 'a.png')
+    const b = makeMedia('0190aaaa-0000-0000-0000-00000000000b', 'b.png')
+    const result = await renderChatCompletionsToolCallResult({
+      toolCall: makeToolCall(),
+      results: [a, b],
+      tool: makeTool(),
+      unsupportedMediaPolicy: 'throw',
+      ...renderDeps,
+    })
+    const blocks = result as Array<{ type: string; text?: string }>
+    expect(blocks.map((x) => x.type)).toEqual(['text', 'image_url', 'text', 'image_url'])
+    expect(blocks[0].text).toContain('a.png')
+    expect(blocks[2].text).toContain('b.png')
   })
 })

@@ -31,6 +31,8 @@ import {
   isShortCircuit,
   runInputPipeline,
   runOutputPipeline,
+  runToolGate,
+  type ToolGateFn,
   type ArtifactResolver,
   type SyncArtifactResolver,
   type SpooledArtifactCtor,
@@ -164,6 +166,13 @@ export interface SearxngToolConfig<A = ArtifactResolver> {
    * renders markdown into `ctx.output`) or `() => SpooledArtifact` for plain text.
    */
   artifact?: A
+  /**
+   * Optional per-call gate run before the HTTP request — the seam for human-approval/RBAC
+   * flows built on `ctx.waitFor` (the ADK gates primitive). Throwing aborts the call through
+   * the standard tool-error path. Search queries reach the network on the agent's behalf,
+   * which makes every call a candidate for gating.
+   */
+  gate?: ToolGateFn
   /** Stages run before the HTTP request. See {@link SearxngRequestContext}. */
   inputPipeline?: SearxngInputMiddlewareFn[]
   /** Stages run after the response is parsed. See {@link SearxngResponseContext}. */
@@ -266,7 +275,8 @@ const assembleTool = (
     description: config.description ?? DEFAULT_DESCRIPTION,
     inputSchema,
     artifactConstructor,
-    handler: async (args) => {
+    handler: async (args, handlerCtx) => {
+      await runToolGate(config.gate, handlerCtx, toolName, args)
       const a = args as {
         query: string
         categories?: string

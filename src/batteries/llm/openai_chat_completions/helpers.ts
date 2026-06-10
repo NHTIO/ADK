@@ -209,7 +209,33 @@ const renderTextInEnvelope = (
 const renderSyntheticMediaDescription = (media: Media, byteLen: number | undefined): string =>
   `[media: ${media.filename}, ${media.mimeType}, ${formatBytesHumanReadable(byteLen)}]`
 
+/**
+ * The inline media id-marker: a harness-authored text block rendered immediately BEFORE each
+ * media content block, so the model can reference the media by id in subsequent tool calls
+ * (`media_id` args, `@id` pipe refs).
+ *
+ * Trust posture: the marker is structural reference data authored by the harness from the
+ * harness-controlled `Media.id` (a UUID, not derivable from the payload) — it is NOT payload
+ * content, carries no authority, and deliberately renders OUTSIDE the untrusted envelope with
+ * fixed, non-instruction phrasing. This is a documented cross-battery convention: every LLM
+ * battery that renders media emits the same marker shape.
+ */
+const renderMediaIdMarker = (media: Media): string => `[media id: ${media.id} | ${media.filename}]`
+
 const renderMediaToContentBlocks = async (input: {
+  media: Media
+  toolName: string | undefined
+  nonce: string
+  unsupportedMediaPolicy: UnsupportedMediaPolicy
+  renderTrustedContent: ChatHelpersCommon['renderTrustedContent']
+  renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
+  warn?: (msg: string) => void
+}): Promise<ChatCompletionsContentBlock[]> => {
+  const blocks = await renderMediaBodyBlocks(input)
+  return [{ type: 'text', text: renderMediaIdMarker(input.media) }, ...blocks]
+}
+
+const renderMediaBodyBlocks = async (input: {
   media: Media
   toolName: string | undefined
   nonce: string

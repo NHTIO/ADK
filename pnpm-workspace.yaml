@@ -5,9 +5,11 @@ allowBuilds:
   es5-ext: true
   esbuild: true
   hnswlib-node: true
+  onnxruntime-node: true
   oracledb: true
   protobufjs: true
   sharp: true
+  tesseract.js: true
 
 overrides:
   npm-run-path: 5.3.0

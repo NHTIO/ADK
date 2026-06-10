@@ -5,6 +5,84 @@ All notable changes to `@nhtio/adk` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2026-06-10
+
+### Added
+
+- **The Media Pipeline battery (`@nhtio/adk/batteries/media`)** — a knex-inspired local media
+  pipeline: one declarative `MediaPlan` with three front-ends (a chainable thenable builder, a
+  pipe-string DSL, and JSON ops) compiling identically, executed as an `@nhtio/middleware` onion
+  over in-memory bytes. Most stacks process media by shipping bytes to an external API or
+  flooding the context window; this is the third option — local processing, no external APIs by
+  default, your data stays in your infrastructure unless an engine you composed says otherwise.
+  Verbs cover documents (select/split/merge/reorder/redact/sanitize/normalize/update_text/diff/
+  apply_patch/convert/extract assets), unified text extraction (`extract text` routes PDF, DOCX,
+  XLSX, ODT/ODS/ODP, PPTX, plain text, and images through one verb, with OCR fallback for
+  scanned input), chunking and metadata, ten `sheet.*` mutations (ExcelJS), eight `slides.*`
+  mutations (JSZip OOXML surgery), fused `image.*` transforms (adjacent steps cost one
+  decode/encode), and `audio.transcribe` (decode → 16 kHz mono resample → ASR).
+- **The pipe DSL** — the LLM-facing surface: `select pages=2-5 | redact match=/…/ | convert
+  to=pdf`. Named args only, separator-insensitive verb folding, 1-based indices, bare-number-is-
+  index/quoted-string-is-name targeting, quoted-JSON structured payloads, inline `@id` media
+  refs, and two-layer model-actionable errors (position-bearing syntax errors plus semantic
+  did-you-mean narrowed to the deployment's configured engines, every message ending in a
+  corrective exemplar). Round-trip is fixed-point and pipe/ops forms produce identical plans.
+- **Engines as self-declaring capability providers** (`@nhtio/adk/batteries/media/contracts` +
+  one subpath per implementation): a `MediaEngine` is `{ id, converts?, mutates? }` — exactly
+  two capability shapes, because a media engine only ever changes the format or changes the
+  content. `ConvertCapability` declares uniform from×to blocks over MIME patterns and format
+  tokens (OCR is `image/*`→txt, transcription is `pcm`→txt/srt/vtt/json, audio decoding is
+  `audio/*`→pcm, PDF embedded-image extraction is `pdf`→images multi-output); a new capability
+  is a new edge in the data, never a new contract. Engines are supplied as a **flat ordered
+  array** (`engines: [resolver, …]`) resolved eagerly at construction — declarations drive
+  verb narrowing; heavy peers still lazy-load inside capability methods. Dispatch is one rule
+  everywhere: capability filter, then an optional `selection` middleware onion (stages may
+  exclude or reorder candidates, never add — the seam for content-dependent quality rules like
+  routing complex workbooks past a pure-JS converter to LibreOffice), then array order among
+  survivors. Convert computes shortest multi-hop paths (up to three hops) through the declared
+  format graph when no direct edge exists, with lossy/virtual tokens (txt, json, srt, `pcm`,
+  `images`) as endpoints, never intermediates. `ConvertRequest.options` is a typed,
+  consumer-augmentable `ConvertOptions` interface (declaration merging against the contracts
+  subpath). Bundled: `engines/jimp` (cross-env image mutate), `engines/sharp` (Node mutate
+  incl. webp/avif + `fromSharp` BYO adapter), `engines/tesseract_js` (cross-env OCR convert;
+  languages required), `engines/audio_decode` (cross-env audio→pcm, no ffmpeg),
+  `engines/transformers_asr` (cross-env Whisper pcm→text; model id required — no silent
+  multi-hundred-MB downloads), and `engines/soffice` (the LibreOffice convert matrix, which
+  now also covers ODS/legacy-xls→xlsx — sheet normalization is just a conversion edge, not a
+  separate engine). Binary-backed engines compose two further BYO contracts: `BinaryExecutor`
+  (bundled `engines/execa_executor`) and `ScratchWorkspace` (bundled `engines/fs_workspace`;
+  explicit root, no `os.tmpdir()` default) — process execution and filesystem access are
+  movable seams, not Node assumptions. The registry is exported (`buildEngineRegistry`) for
+  standalone dispatch.
+- **A battery-scoped ESLint plugin for the media pipeline**
+  (`@nhtio/adk/batteries/media/lint`, namespace `adk-media`) — battery-specific contracts ship
+  with the battery, not the core `@nhtio/adk/eslint` plugin. Three rules:
+  `adk-media/prefer-engine-resolver` (static value imports of bundled engine subpaths — the
+  canonical supply form is the dynamic-import resolver; type-only imports pass),
+  `adk-media/no-shadowed-engine` (an engine whose statically-known capabilities are fully
+  covered by an earlier engine in the array is dead code under first-capable-wins dispatch),
+  and `adk-media/augment-contracts-module` (`ConvertOptions` declaration merging that targets
+  any module other than `batteries/media/contracts` silently never merges).
+- **Forged agent tools** (`@nhtio/adk/batteries/media/forge`): `forgeMediaTools(mp, { surface })`
+  mints either the composite surface (one `media_query` tool taking `{ media_id, q | ops }`,
+  its description embedding the engine-narrowed grammar with toPipe-generated examples, plus
+  `list_media`) or the granular surface (one tool per available verb). Outputs persist via
+  `ctx.storeMediaBytes` and return first-party `Media`; processing and DSL failures render as
+  readable `Error (CODE): …` strings the model can repair from. An optional `gate?: ToolGateFn`
+  runs before every execution — the human-approval/RBAC seam built on `ctx.waitFor`.
+- **Inline media id-markers in every LLM battery.** Rendered media (attachments and tool
+  results) is now preceded by a harness-authored `[media id: <id> | <filename>]` text block so
+  models can reference media by id in tool calls without a discovery round-trip. The marker is
+  structural reference data from the harness-controlled `Media.id` — no authority, fixed
+  phrasing, outside the untrusted envelope. OpenAI is the reference implementation (WebLLM
+  inherits); Ollama emits the same shape on its text channel.
+- **Gate seam retrofit for SearXNG and Scrapper.** Both factory batteries now accept the same
+  optional `gate?: ToolGateFn`, run before the HTTP request — network side effects deserve the
+  approval seam too. Additive and backward-compatible.
+- New optional peer dependencies (pulled only by the engine/parser that needs them): `moo`,
+  `pdf-lib`, `pdf-parse`, `mammoth`, `exceljs`, `jszip`, `jimp`, `sharp`, `audio-decode`,
+  `@huggingface/transformers`, `tesseract.js`, `execa`.
+
 ## 2026-06-09
 
 ### Fixed

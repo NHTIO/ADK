@@ -1,0 +1,3 @@
+Hello from the AI Tools fixture server.
+This is line 2.
+Line 3 is here.

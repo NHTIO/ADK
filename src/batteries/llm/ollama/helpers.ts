@@ -176,6 +176,14 @@ const renderSyntheticMediaDescription = (media: Media, byteLen: number | undefin
  * the message's `images[]` array (returned via `image`); every other modality is unsupported and
  * routes through `unsupportedMediaPolicy` to a text envelope (returned via `text`) or throws.
  */
+/**
+ * The inline media id-marker (cross-battery convention; see the OpenAI battery's
+ * `renderMediaIdMarker`): structural reference text authored by the harness from the
+ * harness-controlled `Media.id`, rendered alongside each media so the model can reference it
+ * by id in tool calls. Carries no authority; renders outside the untrusted envelope.
+ */
+const renderMediaIdMarker = (media: Media): string => `[media id: ${media.id} | ${media.filename}]`
+
 const renderMediaForOllama = async (input: {
   media: Media
   toolName: string | undefined
@@ -306,6 +314,7 @@ export const renderOllamaTimelineMessage = async (input: {
       renderUntrustedContent,
       warn,
     })
+    extraTexts.push(renderMediaIdMarker(media))
     if (rendered.image !== undefined) images.push(rendered.image)
     if (rendered.text !== undefined) extraTexts.push(rendered.text)
   }
@@ -414,6 +423,7 @@ export const renderOllamaToolCallResult = async (input: {
         renderUntrustedContent: input.renderUntrustedContent,
         warn,
       })
+      parts.push(renderMediaIdMarker(media))
       if (rendered.text !== undefined) {
         parts.push(rendered.text)
       } else {

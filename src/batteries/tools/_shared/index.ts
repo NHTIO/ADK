@@ -263,3 +263,33 @@ export const runOutputPipeline = async <C>(
   if (caught !== undefined) throw caught
   if (!reached) throw new Error(`${label} output pipeline did not call next().`)
 }
+
+/**
+ * Optional per-call gate run before a side-effecting tool executes. Throwing aborts the call
+ * and surfaces through the standard tool-error path (`E_TOOL_DOWNSTREAM_ERROR` with the denial
+ * as `cause`). The canonical implementation awaits `ctx.waitFor({ reason: 'tool_approval',
+ * payload: call })` — the ADK gates primitive — and throws on denial; WHO approves and HOW is
+ * the consumer's contract, this type is the seam.
+ */
+export type ToolGateFn = (
+  ctx: unknown,
+  call: { tool: string; args: unknown }
+) => void | Promise<void>
+
+/**
+ * Await a configured {@link ToolGateFn} (no-op when absent). Factory batteries call this at
+ * the top of their handlers so the gate runs before any side effect.
+ *
+ * @param gate - The configured gate, if any.
+ * @param ctx - The dispatch context the handler received.
+ * @param tool - The tool name (post-override).
+ * @param args - The validated tool args.
+ */
+export const runToolGate = async (
+  gate: ToolGateFn | undefined,
+  ctx: unknown,
+  tool: string,
+  args: unknown
+): Promise<void> => {
+  if (gate) await gate(ctx, { tool, args })
+}

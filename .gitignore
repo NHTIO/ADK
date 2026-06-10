@@ -21,6 +21,7 @@ tmp/
 .playwright-mcp/
 junit.xml
 *.png
+!tests/_fixtures/media/*.png
 TODO.md
 docs/.vitepress/sidebar.json
 docs/.vitepress/config.mts.timestamp-*
