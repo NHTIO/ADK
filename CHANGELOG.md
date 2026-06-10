@@ -83,6 +83,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pdf-lib`, `pdf-parse`, `mammoth`, `exceljs`, `jszip`, `jimp`, `sharp`, `audio-decode`,
   `@huggingface/transformers`, `tesseract.js`, `execa`.
 
+### Fixed
+
+- **API documentation gaps closed.** Several types referenced by public API surfaces were not
+  themselves exported, so their doc pages didn't exist and links to them dangled:
+  `EngineSummary` (referenced by the media lint plugin's `BUNDLED_SUMMARIES`), `ChainExecutor`
+  (the media chain's executor seam), and `AudioDecodeFn`/`AudioBufferLike` (the audio-decode
+  engine's override surface) are now exported and documented. The web-retrieval docs' links to
+  `RawRetrievable` now point at `@nhtio/adk/common`, where the type actually lives, and
+  `ScrapperBaseConfig` is re-exported from the scrapper barrel. Cosmetic prose fixes in the
+  media docs ride along. No runtime behavior changes.
+
 ## 2026-06-09
 
 ### Fixed
