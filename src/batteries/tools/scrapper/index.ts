@@ -313,6 +313,8 @@ const linksVerb: ScrapperVerb<ScrapperLinks> = {
 
 // ── Config aliases ────────────────────────────────────────────────────────────
 
+export type { ScrapperBaseConfig } from './shared'
+
 /** Async-factory config for `/api/article` (full `artifact` resolver, incl. dynamic import). */
 export type ScrapperArticleConfig = ScrapperBaseConfig<
   ScrapperArticleParams,

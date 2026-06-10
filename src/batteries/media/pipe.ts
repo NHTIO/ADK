@@ -334,7 +334,7 @@ const asScalarList = (raw: RawArgValue, verbText: string, argName: string): Medi
  * @remarks
  * Purely syntactic — verbs are fold-matched against the full verb table for canonicalization
  * but unknown verbs are NOT an error here (the validator reports them with did-you-mean and the
- * deployment's narrowed verb list). Use {@link parsePipe} for the validated path.
+ * deployment's narrowed verb list). Pair with `validateSegments` for the validated path.
  *
  * @param input - The pipe expression.
  * @returns The raw segments.

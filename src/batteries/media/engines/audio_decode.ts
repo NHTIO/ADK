@@ -25,14 +25,19 @@ import type { MediaEngine, ConvertRequest, ConvertResult } from '../contracts'
  * object (`numberOfChannels` + `getChannelData`); others (e.g. the wav path in Node) return a
  * plain `{ channelData: Float32Array[], sampleRate }` record. The engine normalizes both.
  */
-interface AudioBufferLike {
+export interface AudioBufferLike {
+  /** Channel count when the AudioBuffer-compatible shape is returned. */
   numberOfChannels?: number
+  /** Sample rate of the decoded audio, in Hz. Present on both shapes. */
   sampleRate: number
+  /** Per-channel sample accessor on the AudioBuffer-compatible shape. */
   getChannelData?(channel: number): Float32Array
+  /** Raw per-channel sample arrays on the plain-record shape. */
   channelData?: Float32Array[]
 }
 
-type AudioDecodeFn = (bytes: Uint8Array | ArrayBuffer) => Promise<AudioBufferLike>
+/** The decode function shape the `audio-decode` package exports. */
+export type AudioDecodeFn = (bytes: Uint8Array | ArrayBuffer) => Promise<AudioBufferLike>
 
 const channelsOf = (buffer: AudioBufferLike): Float32Array[] => {
   if (Array.isArray(buffer.channelData)) return buffer.channelData

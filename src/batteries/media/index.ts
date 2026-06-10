@@ -72,6 +72,7 @@ import type { StepImpl, StepPayload, PlanResult, MediaStepMiddlewareFn } from '.
 
 export { MediaChain } from './builder'
 export type {
+  ChainExecutor,
   ChainInput,
   MediaChainRef,
   CellUpdate,
@@ -164,7 +165,7 @@ export type MediaRefResolver = (id: string) => StepPayload | Promise<StepPayload
 export interface RunOptions {
   /** Abort signal threaded into steps and engines. */
   signal?: AbortSignal
-  /** Per-run media-ref resolution, overriding the construction-time resolver (the agent forge uses this to resolve @id refs against the current turn). */
+  /** Per-run media-ref resolution, overriding the construction-time resolver (the agent forge uses this to resolve `@id` refs against the current turn). */
   resolveRef?: MediaRefResolver
 }
 

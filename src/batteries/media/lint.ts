@@ -84,7 +84,7 @@ const preferEngineResolver = createRule({
 // ── no-shadowed-engine ───────────────────────────────────────────────────────
 
 /** A statically-derived capability summary for one engines-array element. */
-interface EngineSummary {
+export interface EngineSummary {
   /** Display label for the diagnostic. */
   label: string
   /** Mutate groups: input patterns, ops, encodes. */

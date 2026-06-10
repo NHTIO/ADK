@@ -29,7 +29,7 @@ import type { SpooledArtifact } from '@nhtio/adk/spooled_artifact'
 import type { ArtifactConstructorResolver } from '@nhtio/adk/forge'
 import type { RawRetrievable, Retrievable, RetrievableTrustTier } from '@nhtio/adk/common'
 
-/** A constructor that builds a {@link @nhtio/adk!Retrievable} from a {@link @nhtio/adk!RawRetrievable}. */
+/** A constructor that builds a {@link @nhtio/adk!Retrievable} from a {@link @nhtio/adk/common!RawRetrievable}. */
 export type RetrievableCtor = new (raw: RawRetrievable) => Retrievable
 
 /** A resolver of `T`: the value itself, or a (sync/async) thunk, optionally a module `{ default }`. */
@@ -131,7 +131,7 @@ export interface SearxngPayloadLike {
 }
 
 /**
- * Convert a SearXNG normalised payload into one {@link @nhtio/adk!RawRetrievable} per result.
+ * Convert a SearXNG normalised payload into one {@link @nhtio/adk/common!RawRetrievable} per result.
  *
  * @remarks
  * Snippets are short, so `content` stays an inline string (the `spool` hook, if any, is still
@@ -201,7 +201,7 @@ export interface ArticleToRetrievableOptions extends ToRetrievableOptions {
 }
 
 /**
- * Convert a Scrapper normalised article into a single {@link @nhtio/adk!RawRetrievable}.
+ * Convert a Scrapper normalised article into a single {@link @nhtio/adk/common!RawRetrievable}.
  *
  * @remarks
  * Long article text is exactly what a reader-backed {@link @nhtio/adk!SpooledArtifact} is for: pass a
@@ -258,7 +258,7 @@ export interface ScrapperLinksLike {
 }
 
 /**
- * Convert a Scrapper normalised links payload into one {@link @nhtio/adk!RawRetrievable} per link.
+ * Convert a Scrapper normalised links payload into one {@link @nhtio/adk/common!RawRetrievable} per link.
  *
  * @remarks
  * Each link's `text` becomes the (inline) content and its `url` the `source`. Link text is short,
