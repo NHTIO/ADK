@@ -2,8 +2,76 @@
 
 All notable changes to `@nhtio/adk` are documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+This project does **not** use strict Semantic Versioning. Versions are
+`<major>.<YYYYMMDD>.<n>` — a hybrid of one SemVer-like signal and
+[CalVer](https://calver.org/): the major version increases only when the **core contract**
+breaks (the primitives every assembly depends on — the runners, the callback contracts, the
+artifact/retrievable model); the date is the release day; `<n>` counts same-day releases from
+zero. Everything else — including breaking changes to individual batteries — ships under the
+same major, called out explicitly in the entries below. So within a major, the version tells
+you *when* you got it, not *what changed*: a `^` range will float across battery-level
+breaking changes, so pin an exact version if you need stability and read the entry before
+upgrading.
+
+## 2026-06-11
+
+### Security
+
+- **Supply-chain hardening across the build and dependency pipeline** (prompted by the recent
+  npm worm campaigns; none of these change the published API):
+  - **Release cooldown**: pnpm now refuses to resolve any dependency version published less
+    than 3 days ago (`minimumReleaseAge` in `pnpm-workspace.yaml`). Compromised releases in
+    recent supply-chain attacks were typically yanked within hours-to-days; the cooldown means
+    a poisoned version ages out of the registry before it can enter our lockfile.
+  - **Frozen lockfile in CI**: every pipeline job now installs with
+    `pnpm install --frozen-lockfile`, so CI can never silently resolve packages that aren't in
+    the committed, cooldown-vetted lockfile.
+  - **Dependency floors** for transitive advisories in the dev tree: `dompurify >=3.4.0`
+    (XSS bypasses; pinned older by monaco-editor), `lodash-es >=4.18.1` (`_.template` code
+    injection; via chevrotain), and `uuid ^11.1.1` under exceljs (buffer-bounds advisory).
+  - **Dropped `@xenova/transformers`** (dev) in favor of the already-present
+    `@huggingface/transformers` for the Ask ADK embedder, reranker, and index builder. The
+    abandoned v2 line dragged in `protobufjs ≤7.5.5` via `onnxruntime-web`, which carries a
+    critical arbitrary-code-execution advisory plus seven others — all gone. Both the
+    build-time index embedder and the browser query embedder migrated together (same runtime,
+    same `q8` weights), so index and query vectors stay comparable.
+  - **Trusted-publishing groundwork**: the npm deploy job now requests a GitLab OIDC
+    `id_token` with the npm registry audience. Once the package's Trusted Publisher is
+    configured on npmjs.com, the long-lived `NPM_TOKEN` CI secret — the artifact stolen in
+    most registry-compromise incidents — can be deleted outright.
+  - Net effect: consumer-facing prod tree remains at zero known vulnerabilities; the dev-tree
+    audit drops from 27 advisories to 7 (all in the docs-site toolchain: vitepress's vite 5
+    line and markdown-it, not reachable from any published code path).
+  - Housekeeping from the lockfile rebuild: `@nhtio/eslint-config` is pinned to exactly
+    `1.20260518.0` — its `1.20260609.0` successor ships stricter jsdoc rules that fail the
+    current tree (~1,300 errors in `bin/` and the docs theme). Dev-only; upgrading the config
+    is a separate chore with that cleanup attached.
+
+### Changed
+
+- **The Cloudflare Vectorize conformance suite is now opt-in and out of CI.** Vectorize's public
+  endpoint is aggressively eventually-consistent — its query index flaps for seconds after a
+  write or delete — and even with the conformance harness's retries the read-after-write race
+  lost often enough to red-flag otherwise-green releases (it had been carried as an
+  `allow_failure` job, which is just noise that trains you to ignore red). It now requires an
+  explicit `TEST_VECTOR_CLOUDFLARE_ENABLED=1` opt-in on top of its credentials and skips
+  otherwise. Run it by hand when you want to exercise the adapter against live Vectorize. The
+  `cloudflare` adapter itself is unchanged and still shipped.
+
+### Fixed
+
+- **Vector adapter query-construction hardening** (from an internal security review; neither
+  issue crossed a privilege or data boundary, both are belt-and-braces):
+  - The Milvus adapter's `nearId` seed-vector lookup now serializes the id with
+    `JSON.stringify` instead of raw template interpolation, matching the adapter's own
+    delete path — an id containing a double quote can no longer alter the filter expression.
+  - The Redis adapter's numeric range filters (`gt`/`gte`/`lt`/`lte`, and numeric `eq`/`ne`)
+    now coerce the bound through `Number()` and throw
+    `E_VECTOR_STORE_UNSUPPORTED_FILTER_OPERATOR` on non-finite results, so a non-numeric
+    string can no longer break out of the RediSearch `[lo hi]` bracket and append query
+    clauses. Numeric strings (`'2024'`) still work.
 
 ## 2026-06-10
 

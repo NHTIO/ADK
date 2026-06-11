@@ -11,5 +11,24 @@ allowBuilds:
   sharp: true
   tesseract.js: true
 
+# Supply-chain cooldown: refuse to resolve package versions published less than
+# 3 days ago. Compromised releases in the recent npm worm campaigns were pulled
+# within hours to ~2 days of publication; the cooldown means a poisoned version
+# ages out of the registry before we can install it. 3 days (not more) because
+# several of our dependency floors track fast-publishing upstreams (the AWS SDK
+# releases daily) and a longer window fights every fresh floor bump. Override
+# per-install when needed: pnpm install --config.minimum-release-age=0
+minimumReleaseAge: 4320
+minimumReleaseAgeExclude:
+  - '@nhtio/*'
+
 overrides:
   npm-run-path: 5.3.0
+  # Security floors for transitive deps (dev tree; see CHANGELOG):
+  # monaco-editor pins an older dompurify with multiple published XSS bypasses.
+  dompurify: '>=3.4.0'
+  # chevrotain (via prettier-plugin-edgejs) pins lodash-es with a code-injection
+  # advisory in _.template.
+  lodash-es: '>=4.18.1'
+  # exceljs pins uuid@^8, which has a buffer-bounds advisory in v3/v5/v6.
+  'exceljs>uuid': '^11.1.1'

@@ -92,4 +92,23 @@ describe('translateRedisFilter', () => {
   it('unsupported operator (contains) throws', () => {
     expect(() => translateRedisFilter({ field: 'f', op: 'contains', value: 'x' })).toThrow()
   })
+
+  it('range operators coerce numeric strings', () => {
+    expect(translateRedisFilter({ field: 'year', op: 'gt', value: '2024' })).toBe(
+      '@year:[(2024 +inf]'
+    )
+  })
+
+  it('range operators reject non-numeric values (query-fragment injection guard)', () => {
+    // A raw string here would break out of the `[lo hi]` bracket and append clauses.
+    expect(() =>
+      translateRedisFilter({ field: 'year', op: 'gt', value: '0] | @secret:{x}' })
+    ).toThrow(/non-numeric/)
+    expect(() => translateRedisFilter({ field: 'year', op: 'lte', value: 'abc' })).toThrow(
+      /non-numeric/
+    )
+    expect(() => translateRedisFilter({ field: 'year', op: 'gte', value: Infinity })).toThrow(
+      /non-numeric/
+    )
+  })
 })

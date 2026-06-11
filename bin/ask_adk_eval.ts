@@ -224,16 +224,23 @@ const main = async (): Promise<void> => {
 
   const server = await startPreview()
   let browser: Browser | undefined
+  let context: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined
   const allFailures: string[] = []
   const results: Array<{ label: string; ok: boolean; detail?: string }> = []
 
   try {
-    browser = await chromium.launch({
+    // Persistent profile, NOT an ephemeral context: ephemeral profiles get a
+    // constrained storage quota, and Cache.add can abort mid-download on
+    // multi-GB model weights ("UnknownError: Failed to execute 'add' on
+    // 'Cache'"). A persistent profile gets normal quota AND keeps the weights
+    // cached across runs (the header's "cached afterwards" promise).
+    const profileDir = resolve(BASE_DIR, '.cache/ask-adk-eval-profile')
+    context = await chromium.launchPersistentContext(profileDir, {
       headless: false,
       args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan'],
     })
-    const context = await browser.newContext()
-    const page = await context.newPage()
+    browser = context.browser() ?? undefined
+    const page = context.pages()[0] ?? (await context.newPage())
     page.on('console', (m) => {
       const t = m.text()
       if (/error|fail|webgpu|exception/i.test(t)) console.log(`  [page] ${t}`)
@@ -291,6 +298,7 @@ const main = async (): Promise<void> => {
       }
     }
   } finally {
+    await context?.close().catch(() => {})
     await browser?.close().catch(() => {})
     server.kill('SIGTERM')
   }

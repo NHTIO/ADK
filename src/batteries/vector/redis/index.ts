@@ -94,21 +94,31 @@ export const translateRedisFilter = (filter?: VectorFilter): string => {
     const { field, op, value } = filter
     const tag = (v: unknown): string => `@${field}:{${escapeTag(String(v))}}`
     const num = (lo: string, hi: string): string => `@${field}:[${lo} ${hi}]`
+    // Range bounds must be finite numbers — a non-numeric value would be concatenated
+    // raw into the query fragment, letting it break out of the `[lo hi]` bracket.
+    const bound = (v: unknown): string => {
+      const n = Number(v)
+      if (!Number.isFinite(n)) {
+        throw new E_VECTOR_STORE_UNSUPPORTED_FILTER_OPERATOR([
+          'redis',
+          `${op} with non-numeric value`,
+        ])
+      }
+      return String(n)
+    }
     switch (op) {
       case 'eq':
-        return typeof value === 'number' ? num(String(value), String(value)) : tag(value)
+        return typeof value === 'number' ? num(bound(value), bound(value)) : tag(value)
       case 'ne':
-        return typeof value === 'number'
-          ? `-${num(String(value), String(value))}`
-          : `-${tag(value)}`
+        return typeof value === 'number' ? `-${num(bound(value), bound(value))}` : `-${tag(value)}`
       case 'gt':
-        return num(`(${String(value)}`, '+inf')
+        return num(`(${bound(value)}`, '+inf')
       case 'gte':
-        return num(String(value), '+inf')
+        return num(bound(value), '+inf')
       case 'lt':
-        return num('-inf', `(${String(value)}`)
+        return num('-inf', `(${bound(value)}`)
       case 'lte':
-        return num('-inf', String(value))
+        return num('-inf', bound(value))
       case 'in': {
         if (!Array.isArray(value) || value.length === 0) return '@__never:{__never}'
         return `@${field}:{${value.map((v) => escapeTag(String(v))).join('|')}}`

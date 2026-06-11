@@ -232,7 +232,7 @@ export class MilvusVectorStore extends BaseVectorStore {
       } else if ('id' in plan.near) {
         const res = await client.query({
           collection_name: plan.collection,
-          filter: `id == "${plan.near.id}"`,
+          filter: `id == ${JSON.stringify(plan.near.id)}`,
           output_fields: ['vector'],
         })
         if (res.data.length === 0) {

@@ -144,9 +144,13 @@ async function buildChunks(file: string, raw: string): Promise<ChunkRecord[]> {
 }
 
 async function embed(contents: string[]): Promise<Float32Array> {
-  console.log(`loading @xenova/transformers (Xenova/all-MiniLM-L6-v2)...`)
-  const transformers = await import('@xenova/transformers')
-  const extractor = await transformers.pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2')
+  console.log(`loading @huggingface/transformers (Xenova/all-MiniLM-L6-v2)...`)
+  const transformers = await import('@huggingface/transformers')
+  // dtype q8 matches the browser-side embedder (ask_adk_embedder.ts) — index and
+  // query vectors must come from the same weights or cosine drifts.
+  const extractor = await transformers.pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
+    dtype: 'q8',
+  })
   console.log(`extractor loaded; embedding ${contents.length} chunks at batch 32...`)
   const vectors = new Float32Array(contents.length * 384)
   for (let i = 0; i < contents.length; i += 32) {

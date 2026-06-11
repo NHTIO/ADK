@@ -20,7 +20,14 @@ import type { CallableVectorStore } from '@nhtio/adk/batteries/vector'
 // deterministic. The index is dropped in afterAll.
 const accountId = process.env.TEST_VECTOR_CLOUDFLARE_ACCOUNT_ID
 const apiKey = process.env.TEST_VECTOR_CLOUDFLARE_API_KEY
-const d = accountId && apiKey ? describe : describe.skip
+// Explicit opt-in. Cloudflare Vectorize's public endpoint is aggressively
+// eventually-consistent: its query index flaps for seconds after a write/delete,
+// so even with the conformance harness's retries the read-after-write race fails
+// often enough to red-flag otherwise-green runs. Creds alone no longer arm this
+// suite — you must also set TEST_VECTOR_CLOUDFLARE_ENABLED=1 to say "yes, I want
+// to ride the flap right now." Unset (the default, including CI), it skips.
+const enabled = /^(1|true|yes)$/i.test(process.env.TEST_VECTOR_CLOUDFLARE_ENABLED ?? '')
+const d = enabled && accountId && apiKey ? describe : describe.skip
 
 const DIM = 32
 

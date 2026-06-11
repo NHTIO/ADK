@@ -9,6 +9,7 @@ node_modules/
 docs/.vitepress/dist
 docs/.vitepress/cache
 .cache/transformers
+.cache/ask-adk-eval-profile
 docs/changelog.md
 docs/api/*
 !docs/api/.gitkeep
