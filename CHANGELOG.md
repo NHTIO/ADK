@@ -19,6 +19,16 @@ upgrading.
 
 ### Security
 
+- **npm trusted publishing is live — releases no longer use a long-lived token.** Completing
+  the groundwork below: the package's Trusted Publisher is configured on npmjs.com (GitLab
+  CI/CD → this project's `.gitlab-ci.yml`, `npm publish` only), and both npm deploy jobs now
+  authenticate exclusively with the short-lived OIDC `id_token` — every `NPM_TOKEN` reference
+  is gone from this repository's CI. Verified live twice before removal: npm preferred the
+  OIDC exchange even with the token fallback still present (publisher identity
+  `GitLab CI/CD <npm-oidc-no-reply@github.com>`), and the first fully tokenless publish
+  succeeded with the same identity. A stolen CI token — the credential class behind most of
+  the recent registry-compromise worms — can no longer publish this package; publish rights
+  are bound to this repository's pipeline identity instead of a bearer secret.
 - **Supply-chain hardening across the build and dependency pipeline** (prompted by the recent
   npm worm campaigns; none of these change the published API):
   - **Release cooldown**: pnpm now refuses to resolve any dependency version published less
