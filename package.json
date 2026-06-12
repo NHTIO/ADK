@@ -1,6 +1,6 @@
 {
   "name": "@nhtio/adk",
-  "version": "1.20260612.0",
+  "version": "0.0.1",
   "description": "An opinionated Agent Development Kit for building custom AI agents with bring-your-own infrastructure and opt-in batteries.",
   "scripts": {
     "build": "npx rimraf dist && vite build && npx jiti bin/type.ts && npx jiti bin/stubs.ts",
@@ -377,6 +377,7 @@
     "vitest": "^4.1.5",
     "vue": "^3.5.33",
     "weaviate-client": "^3.13.1",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "^4.4.3"
   },
   "module": "./dist/index.mjs",

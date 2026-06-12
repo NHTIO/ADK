@@ -51,7 +51,6 @@
  * - The runner emits TWO `toolCall` events per call (request + settlement, same id), so
  *   `toolCallsOf` dedupes by id; "N attempts" assertions count distinct calls.
  */
-import { default as ExcelJS } from 'exceljs'
 import { describe, expect, it } from 'vitest'
 import { isInstanceOf } from '@nhtio/adk/guards'
 import { Message, Media } from '@nhtio/adk/common'
@@ -267,7 +266,8 @@ const makeScenario = (config: ScenarioConfig) => {
   return { make, storedBytes }
 }
 
-const openXlsx = async (bytes: Uint8Array): Promise<ExcelJS.Workbook> => {
+const openXlsx = async (bytes: Uint8Array) => {
+  const { default: ExcelJS } = await import('exceljs')
   const wb = new ExcelJS.Workbook()
   await wb.xlsx.load(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
@@ -551,6 +551,7 @@ describe.skipIf(SKIP)('media forge — real LLM drives generation + text/data + 
     'sheet edits on an attached workbook flow through the edit-capability dispatch',
     { timeout: 180_000 },
     async () => {
+      const { default: ExcelJS } = await import('exceljs')
       const wb = new ExcelJS.Workbook()
       const ws = wb.addWorksheet('Data')
       ws.addRow(['Name', 'Score'])

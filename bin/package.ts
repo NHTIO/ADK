@@ -13,7 +13,8 @@ const destServerJsonPath = resolve(BASE_DIR, 'dist/server.json')
 const destMcpCorpusPath = resolve(BASE_DIR, 'dist/mcp/adk-docs-corpus.json')
 
 const MCP_SERVER_NAME = 'io.nht/adk-assembly'
-const MCP_SERVER_DESCRIPTION = 'Opinionated Agent Development Kit — bring-your-own infrastructure, opt-in batteries.'
+const MCP_SERVER_DESCRIPTION =
+  'Opinionated Agent Development Kit — bring-your-own infrastructure, opt-in batteries.'
 
 const srcReadmePath = resolve(BASE_DIR, 'README.md')
 const destReadmePath = resolve(BASE_DIR, 'dist/README.md')
