@@ -44,6 +44,7 @@ import { parsePipeRaw } from './pipe'
 import { MediaChain } from './builder'
 import { executePlan } from './runtime'
 import { DOC_STEPS } from './steps/doc'
+import { DATA_STEPS } from './steps/data'
 import { SHEET_STEPS } from './steps/sheet'
 import { validator } from '@nhtio/validation'
 import { SLIDES_STEPS } from './steps/slides'
@@ -65,9 +66,8 @@ import {
   applyPatchStep,
 } from './steps/text'
 import type { MediaOp, MediaPlan } from './plan'
-import type { CapabilityProbe } from './validate'
-import type { EngineSelectionMiddlewareFn } from './registry'
 import type { MediaEngine, EngineResolver } from './contracts'
+import type { EngineRegistry, EngineSelectionMiddlewareFn } from './registry'
 import type { StepImpl, StepPayload, PlanResult, MediaStepMiddlewareFn } from './runtime'
 
 export { MediaChain } from './builder'
@@ -107,7 +107,7 @@ export type {
   VerbRequirement,
   FormatFamily,
 } from './verbs'
-export { PCM_MIME, pcmToBytes, bytesToPcm, implementsMediaEngine } from './contracts'
+export { PCM_MIME, EMPTY_MIME, pcmToBytes, bytesToPcm, implementsMediaEngine } from './contracts'
 export type {
   MediaEngine,
   EngineResolver,
@@ -121,6 +121,10 @@ export type {
   ImagesConvertOptions,
   MutateCapability,
   MutateRequest,
+  EditCapability,
+  EditRequest,
+  EditResult,
+  EditSummary,
   MimePattern,
 } from './contracts'
 export { buildEngineRegistry } from './registry'
@@ -213,8 +217,11 @@ export interface MediaPipeline {
   ops(input: StepPayload, ops: MediaOp[], options?: RunOptions): Promise<PlanResult>
   /** Validate a pipe string or ops array to a plan WITHOUT executing (dry-run/compile). */
   compile(statement: string | MediaOp[]): MediaPlan
-  /** The deployment's capabilities (drives verb narrowing). */
-  readonly capabilities: CapabilityProbe
+  /**
+   * The deployment's engine registry (drives verb narrowing AND generation/edit dispatch —
+   * the runtime value has always been the registry; the declared type now says so).
+   */
+  readonly capabilities: EngineRegistry
   /** The resolved engines, in supply order — inspect ids and declared capabilities. */
   readonly engines: readonly MediaEngine[]
 }
@@ -244,6 +251,7 @@ const PURE_STEPS: ReadonlyArray<[string, StepImpl]> = [
   ['extract.text', extractTextStep],
   ['extract.metadata', extractMetadataStep],
   ['chunk', chunkStep],
+  ...DATA_STEPS,
   ...SHEET_STEPS,
   ...SLIDES_STEPS,
   // DOC_STEPS + INGEST_STEPS override the Phase 0 text-only implementations with format dispatch.

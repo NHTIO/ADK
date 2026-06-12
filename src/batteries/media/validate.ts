@@ -34,6 +34,11 @@ export interface CapabilityProbe {
   hasConvert(from?: string, to?: string): boolean
   /** `true` when some engine declares a mutate capability. */
   hasMutate(): boolean
+  /**
+   * `true` when some engine declares a matching edit capability (omit both for "any").
+   * Optional so existing probe stubs stay valid; absent means "no edit engines".
+   */
+  hasEdit?(mime?: string, op?: string): boolean
 }
 
 /** Options for {@link validateSegments} / {@link validateOps}. */
@@ -43,14 +48,18 @@ export interface ValidateOptions {
 }
 
 /** `true` when the deployment satisfies a verb's capability requirement. */
-const satisfies = (capabilities: CapabilityProbe, requires: VerbRequirement): boolean =>
-  requires.capability === 'mutate'
-    ? capabilities.hasMutate()
-    : capabilities.hasConvert(requires.from, requires.to)
+const satisfies = (capabilities: CapabilityProbe, requires: VerbRequirement): boolean => {
+  if (requires.capability === 'mutate') return capabilities.hasMutate()
+  if (requires.capability === 'edit') return capabilities.hasEdit?.(undefined, requires.op) ?? false
+  return capabilities.hasConvert(requires.from, requires.to)
+}
 
 /** A human phrase for an unmet requirement, for the do-not-retry error. */
 const requirementText = (requires: VerbRequirement): string => {
   if (requires.capability === 'mutate') return 'an engine that can mutate this media'
+  if (requires.capability === 'edit') {
+    return `an engine that can edit this media${requires.op ? ` (op "${requires.op}")` : ''}`
+  }
   const from = requires.from ? ` from ${requires.from}` : ''
   const to = requires.to ? ` to ${requires.to}` : ''
   return `an engine that can convert${from}${to}`

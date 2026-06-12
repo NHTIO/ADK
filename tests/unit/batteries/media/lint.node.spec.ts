@@ -1,6 +1,6 @@
-import { describe, test, afterAll } from 'vitest'
 import { RuleTester } from '@typescript-eslint/rule-tester'
-import { rules } from '../../../../src/batteries/media/lint'
+import { describe, test, afterAll, beforeAll } from 'vitest'
+import { rules, setPeerResolverForTesting } from '../../../../src/batteries/media/lint'
 
 // Bind RuleTester's lifecycle hooks to vitest (RuleTester defaults to mocha-style globals).
 RuleTester.afterAll = afterAll
@@ -84,6 +84,55 @@ ruleTester.run('no-shadowed-engine', rules['no-shadowed-engine'], {
         { id: 'narrow', converts: [{ from: ['application/pdf'], to: ['txt'], convert: async () => ({ outputs: [] }) }] },
       ] })`,
       errors: [{ messageId: 'shadowed' }],
+    },
+  ],
+})
+
+// require-engine-peers asks Node whether a peer resolves. The spec injects a deterministic
+// resolver instead — `jimp`/`xlsx` "installed", `@huggingface/transformers` "missing" — so the
+// rule is tested independent of the test runner's real node_modules layout.
+const INSTALLED = new Set(['jimp', 'xlsx', 'exceljs', 'js-yaml', 'papaparse', 'execa'])
+beforeAll(() => {
+  setPeerResolverForTesting((peer) => INSTALLED.has(peer))
+})
+afterAll(() => {
+  setPeerResolverForTesting()
+})
+
+ruleTester.run('require-engine-peers', rules['require-engine-peers'], {
+  valid: [
+    // jimp engine referenced, `jimp` "installed" → fine.
+    {
+      code: `const mp = createMediaPipeline({ engines: [() => import('@nhtio/adk/batteries/media/engines/jimp').then((m) => m.jimpEngine())] })`,
+    },
+    // sheetjs referenced, `xlsx` "installed" → fine.
+    {
+      code: `import { sheetjsEngine } from '@nhtio/adk/batteries/media/engines/sheetjs'`,
+    },
+    // soffice has no external peer — nothing to resolve, nothing to report.
+    {
+      code: `const mp = createMediaPipeline({ engines: [() => import('@nhtio/adk/batteries/media/engines/soffice').then((m) => m.sofficeEngine(opts))] })`,
+    },
+    // Non-engine subpaths are out of scope.
+    {
+      code: `import { createMediaPipeline } from '@nhtio/adk/batteries/media'`,
+    },
+    // The missing peer, explicitly ignored, is silent.
+    {
+      code: `const mp = createMediaPipeline({ engines: [() => import('@nhtio/adk/batteries/media/engines/transformers_asr').then((m) => m.transformersAsrEngine({ model }))] })`,
+      options: [{ ignore: ['@huggingface/transformers'] }],
+    },
+  ],
+  invalid: [
+    // transformers_asr referenced, but its peer is "not installed".
+    {
+      code: `const mp = createMediaPipeline({ engines: [() => import('@nhtio/adk/batteries/media/engines/transformers_asr').then((m) => m.transformersAsrEngine({ model }))] })`,
+      errors: [{ messageId: 'missingPeer' }],
+    },
+    // Same engine via a static import — still caught.
+    {
+      code: `import { transformersAsrEngine } from '@nhtio/adk/batteries/media/engines/transformers_asr'`,
+      errors: [{ messageId: 'missingPeer' }],
     },
   ],
 })

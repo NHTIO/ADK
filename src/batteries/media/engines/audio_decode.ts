@@ -6,17 +6,21 @@
  * @module @nhtio/adk/batteries/media/engines/audio_decode
  *
  * @remarks
- * Declares one convert capability: audio containers to the virtual `pcm` token (mp3 /
- * m4a-aac / ogg-vorbis / opus / flac / wav), downmixed to mono. The PCM output reports the
- * SOURCE sample rate in `meta.sampleRate` — the pipeline's transcribe step resamples to the
- * 16 kHz transcription engines expect. For exotic containers, compose an ffmpeg-backed
- * engine instead; the capability declaration is the seam.
+ * Declares two convert capabilities: audio containers to the virtual `pcm` token (mp3 /
+ * m4a-aac / ogg-vorbis / opus / flac / wav), downmixed to mono; and a generation edge —
+ * `EMPTY_MIME` → wav. Audio bytes are just bytes in a documented envelope: the generated
+ * seed is a canonical 44-byte RIFF/WAVE header plus one second of 16-bit mono silence at
+ * 44100 Hz, written by a dependency-free helper (generation never loads the decode peer).
+ * The PCM output reports the SOURCE sample rate in `meta.sampleRate` — the pipeline's
+ * transcribe step resamples to the 16 kHz transcription engines expect. For exotic
+ * containers, compose an ffmpeg-backed engine instead; the capability declaration is the
+ * seam.
  *
  * `audio-decode` is an optional peer dependency, lazily imported on first actual use.
  */
 
 import { isError } from '@nhtio/adk/guards'
-import { pcmToBytes, PCM_MIME } from '../contracts'
+import { pcmToBytes, PCM_MIME, EMPTY_MIME } from '../contracts'
 import { E_INVALID_MEDIA_PIPELINE_CONFIG } from '../exceptions'
 import type { MediaEngine, ConvertRequest, ConvertResult } from '../contracts'
 
@@ -46,6 +50,36 @@ const channelsOf = (buffer: AudioBufferLike): Float32Array[] => {
     return Array.from({ length: count }, (_, c) => buffer.getChannelData!(c))
   }
   throw new Error('audio-decode returned an unrecognized buffer shape')
+}
+
+/**
+ * Mint one second of 16-bit mono silence at 44100 Hz as a canonical RIFF/WAVE file — the
+ * 44-byte header plus zeroed sample data. Pure bytes, zero dependencies.
+ */
+const makeSilentWav = (): Uint8Array => {
+  const sampleRate = 44_100
+  const numSamples = sampleRate // 1 second
+  const bytesPerSample = 2 // 16-bit
+  const dataSize = numSamples * bytesPerSample
+  const bytes = new Uint8Array(44 + dataSize) // sample data stays zeroed = silence
+  const view = new DataView(bytes.buffer)
+  const writeAscii = (offset: number, text: string): void => {
+    for (let i = 0; i < text.length; i++) bytes[offset + i] = text.charCodeAt(i)
+  }
+  writeAscii(0, 'RIFF')
+  view.setUint32(4, 36 + dataSize, true)
+  writeAscii(8, 'WAVE')
+  writeAscii(12, 'fmt ')
+  view.setUint32(16, 16, true) // fmt chunk size
+  view.setUint16(20, 1, true) // PCM format
+  view.setUint16(22, 1, true) // mono
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * bytesPerSample, true) // byte rate
+  view.setUint16(32, bytesPerSample, true) // block align
+  view.setUint16(34, 16, true) // bits per sample
+  writeAscii(36, 'data')
+  view.setUint32(40, dataSize, true)
+  return bytes
 }
 
 /** Options for {@link audioDecodeEngine}. */
@@ -128,6 +162,14 @@ export const audioDecodeEngine = (options: AudioDecodeEngineOptions = {}): Media
         ],
         to: ['pcm'],
         convert,
+      },
+      {
+        // Generation: silence in the engine's own input envelope (never loads the peer).
+        from: [EMPTY_MIME],
+        to: ['wav'],
+        convert: async (): Promise<ConvertResult> => ({
+          outputs: [{ bytes: makeSilentWav(), mimeType: 'audio/wav' }],
+        }),
       },
     ],
   }

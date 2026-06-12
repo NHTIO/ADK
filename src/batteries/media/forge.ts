@@ -29,6 +29,7 @@
  */
 
 import { toPipe } from './plan'
+import { EMPTY_MIME } from './contracts'
 import { isError } from '@nhtio/adk/guards'
 import { availableVerbs } from './validate'
 import { validator } from '@nhtio/validation'
@@ -36,6 +37,7 @@ import { VERB_INDEX, foldVerb } from './verbs'
 import { E_INVALID_MEDIA_PIPELINE_CONFIG } from './exceptions'
 import { Tool, Media, SpooledJsonArtifact } from '@nhtio/adk/common'
 import type { MediaPipeline } from './index'
+import type { EngineRegistry } from './registry'
 import type { MediaOp, MediaArgValue } from './plan'
 import type { VerbSpec, VerbArgSpec } from './verbs'
 import type { DispatchContext } from '@nhtio/adk/types'
@@ -152,6 +154,62 @@ const enumerateMedia = (
 
 const failure = (code: string, message: string): string => `Error (${code}): ${message}`
 
+// ── media generation (the empty:<format> sentinel) ───────────────────────────
+
+/**
+ * Extract the format token from an `empty:<format>` sentinel id, or undefined for normal ids.
+ * Harness-minted ids are UUIDs, which can never start with `empty:` — the sentinel occupies
+ * input space that was previously a guaranteed MEDIA_NOT_FOUND.
+ */
+const emptyFormatOf = (mediaId: string): string | undefined => {
+  if (!mediaId.toLowerCase().startsWith('empty:')) return undefined
+  return mediaId.slice('empty:'.length).trim().toLowerCase()
+}
+
+/** The format tokens creatable in this deployment (reachable from {@link EMPTY_MIME}). */
+const creatableFormats = (registry: EngineRegistry): readonly string[] =>
+  registry.convertTargets(EMPTY_MIME)
+
+/** Materialize a new blank media payload for the sentinel, or a model-actionable failure. */
+const materializeEmpty = async (
+  registry: EngineRegistry,
+  format: string,
+  signal?: AbortSignal
+): Promise<{ ok: true; payload: StepPayload } | { ok: false; failure: string }> => {
+  const creatable = creatableFormats(registry)
+  if (!creatable.includes(format)) {
+    return {
+      ok: false,
+      failure: failure(
+        'EMPTY_FORMAT_UNAVAILABLE',
+        `cannot create "${format}" media in this deployment. Creatable formats: ${creatable.join(', ') || '(none)'}. Do not retry this format here.`
+      ),
+    }
+  }
+  const result = await registry.convert({
+    bytes: new Uint8Array(0),
+    mimeType: EMPTY_MIME,
+    filename: 'untitled',
+    to: format,
+    signal,
+  })
+  const output = result.outputs[0]
+  if (!output) {
+    return {
+      ok: false,
+      failure: failure('EMPTY_GENERATION_FAILED', `generating "${format}" produced no output`),
+    }
+  }
+  return {
+    ok: true,
+    payload: {
+      bytes: output.bytes,
+      mimeType: output.mimeType,
+      filename: `untitled.${format}`,
+    },
+  }
+}
+
 const mediaKindOf = (mimeType: string): 'image' | 'audio' | 'video' | 'document' => {
   const mime = mimeType.toLowerCase()
   if (mime.startsWith('image/')) return 'image'
@@ -201,19 +259,28 @@ const renderResult = async (
 /** Resolve + acquire the input media or produce a model-actionable failure string. */
 const acquire = async (
   ctx: DispatchContext,
+  registry: EngineRegistry,
   resolveMedia: MediaResolverFn,
   mediaId: string
 ): Promise<{ ok: true; payload: StepPayload } | { ok: false; failure: string }> => {
+  // The empty:<format> sentinel creates NEW media instead of resolving existing bytes.
+  const format = emptyFormatOf(mediaId)
+  if (format !== undefined) return materializeEmpty(registry, format, ctx.abortSignal)
   const media = await resolveMedia(ctx, mediaId)
   if (!media) {
     const visible = enumerateMedia(ctx)
+    const creatable = creatableFormats(registry)
+    const createHint =
+      creatable.length > 0
+        ? ` To create NEW media instead, pass media_id "empty:<format>" (available: ${creatable.join(', ')}).`
+        : ''
     const hint =
       visible.length > 0
         ? `Visible media ids: ${visible.map((m) => `${m.id} (${m.filename})`).join(', ')}`
         : 'No media is visible in this turn — ask the user to attach a file, or call list_media to check.'
     return {
       ok: false,
-      failure: failure('MEDIA_NOT_FOUND', `no media with id "${mediaId}". ${hint}`),
+      failure: failure('MEDIA_NOT_FOUND', `no media with id "${mediaId}". ${hint}${createHint}`),
     }
   }
   return { ok: true, payload: await toPayload(media) }
@@ -221,8 +288,15 @@ const acquire = async (
 
 /** Build a per-run @id ref resolver bound to this dispatch's visible media. */
 const refResolverFor =
-  (ctx: DispatchContext, resolveMedia: MediaResolverFn) =>
+  (ctx: DispatchContext, registry: EngineRegistry, resolveMedia: MediaResolverFn) =>
   async (id: string): Promise<StepPayload> => {
+    // @empty:<format> refs mint a blank file inline (merge with=@empty:xlsx, …).
+    const format = emptyFormatOf(id)
+    if (format !== undefined) {
+      const made = await materializeEmpty(registry, format, ctx.abortSignal)
+      if (!made.ok) throw new Error(made.failure)
+      return made.payload
+    }
     const media = await resolveMedia(ctx, id)
     if (!media) {
       const visible = enumerateMedia(ctx)
@@ -308,6 +382,25 @@ const grammarText = (pipeline: MediaPipeline): string => {
       })
     )
   }
+  const creatable = creatableFormats(pipeline.capabilities)
+  const creating: string[] =
+    creatable.length > 0
+      ? [
+          '',
+          'Creating new media:',
+          `Pass media_id "empty:<format>" to create a NEW blank file instead of processing an existing one (available: ${creatable.join(', ')}).`,
+          `Example: media_id "empty:xlsx" with q "${toPipe({
+            steps: [
+              {
+                verb: 'sheet.update_cells',
+                args: { updates: [{ address: 'A1', value: 'Title' }] },
+              },
+            ],
+          })}"`,
+          'Blank images are 1024×1024 white — resize in the same statement (empty:png + "image resize width=64").',
+          'The same sentinel works as a ref: merge with=@empty:xlsx.',
+        ]
+      : []
   return [
     'Statements are pipe expressions: verb name=value ... | verb name=value ...',
     'Named args only. Indices are 1-based. Quote values containing spaces or dashes.',
@@ -316,6 +409,7 @@ const grammarText = (pipeline: MediaPipeline): string => {
     '',
     'Available verbs:',
     ...lines,
+    ...creating,
     '',
     'Examples (remember: inside JSON tool args, backslashes must be doubled — \\\\d):',
     ...examples.map((e) => `  ${e}`),
@@ -352,14 +446,16 @@ const buildCompositeTool = (
     `Runs a media-processing statement against a file from this conversation, locally (no external services). Provide media_id (from list_media) and either q (a pipe statement) or ops (structured steps).
 
 ${grammarText(pipeline)}`
+  const creatable = creatableFormats(pipeline.capabilities)
+  const mediaIdDescription =
+    creatable.length > 0
+      ? `The id of the media to process (call list_media to discover ids), or "empty:<format>" to create a new blank file (available: ${creatable.join(', ')}).`
+      : 'The id of the media to process (call list_media to discover ids).'
   return new Tool({
     name,
     description,
     inputSchema: validator.object({
-      media_id: validator
-        .string()
-        .required()
-        .description('The id of the media to process (call list_media to discover ids).'),
+      media_id: validator.string().required().description(mediaIdDescription),
       q: validator
         .string()
         .description('A pipe statement, e.g. "select pages=2-5 | extract text".'),
@@ -387,12 +483,12 @@ ${grammarText(pipeline)}`
       }
       const dispatch = ctx as DispatchContext
       await runGate(gate, dispatch, name, args)
-      const acquired = await acquire(dispatch, resolveMedia, mediaId)
+      const acquired = await acquire(dispatch, pipeline.capabilities, resolveMedia, mediaId)
       if (!acquired.ok) return acquired.failure
       try {
         const runOptions = {
           signal: dispatch.abortSignal,
-          resolveRef: refResolverFor(dispatch, resolveMedia),
+          resolveRef: refResolverFor(dispatch, pipeline.capabilities, resolveMedia),
         }
         const result =
           q !== undefined
@@ -416,12 +512,16 @@ const opArgsFrom = (args: Record<string, unknown>): Record<string, MediaArgValue
   return out
 }
 
-const granularSchemaFor = (spec: VerbSpec): ReturnType<typeof validator.object> => {
+const granularSchemaFor = (
+  spec: VerbSpec,
+  creatable: readonly string[]
+): ReturnType<typeof validator.object> => {
+  const mediaIdDescription =
+    creatable.length > 0
+      ? `The id of the media to process (call list_media to discover ids), or "empty:<format>" to create a new blank file (available: ${creatable.join(', ')}).`
+      : 'The id of the media to process (call list_media to discover ids).'
   const shape: Record<string, ReturnType<typeof validator.any>> = {
-    media_id: validator
-      .string()
-      .required()
-      .description('The id of the media to process (call list_media to discover ids).'),
+    media_id: validator.string().required().description(mediaIdDescription),
   }
   for (const [argName, arg] of Object.entries(spec.args)) {
     let schema
@@ -506,19 +606,19 @@ const buildGranularTool = (
     description:
       overrides?.[defaultName]?.description ??
       `${spec.description} Processes a media file from this conversation locally. Indices are 1-based.`,
-    inputSchema: granularSchemaFor(spec),
+    inputSchema: granularSchemaFor(spec, creatableFormats(pipeline.capabilities)),
     handler: async (args, ctx) => {
       const dispatch = ctx as DispatchContext
       const { media_id: mediaId } = args as { media_id: string }
       await runGate(gate, dispatch, name, args)
-      const acquired = await acquire(dispatch, resolveMedia, mediaId)
+      const acquired = await acquire(dispatch, pipeline.capabilities, resolveMedia, mediaId)
       if (!acquired.ok) return acquired.failure
       const opArgs = opArgsFrom(args as Record<string, unknown>)
       normalizeRefArgs(spec, opArgs)
       try {
         const result = await pipeline.ops(acquired.payload, [{ verb: spec.id, args: opArgs }], {
           signal: dispatch.abortSignal,
-          resolveRef: refResolverFor(dispatch, resolveMedia),
+          resolveRef: refResolverFor(dispatch, pipeline.capabilities, resolveMedia),
         })
         return await renderResult(dispatch, result, name)
       } catch (err) {

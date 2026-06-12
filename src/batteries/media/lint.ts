@@ -24,6 +24,7 @@
  * ```
  */
 
+import { createRequire } from 'node:module'
 import { ESLintUtils } from '@typescript-eslint/utils'
 import type { TSESTree } from '@typescript-eslint/utils'
 import type { FlatConfig } from '@typescript-eslint/utils/ts-eslint'
@@ -91,7 +92,54 @@ export interface EngineSummary {
   mutates: Array<{ over: string[]; ops: string[]; encodes: string[] }>
   /** Convert groups: input patterns, target tokens. */
   converts: Array<{ from: string[]; to: string[] }>
+  /** Edit groups: input patterns, ops. */
+  edits: Array<{ over: string[]; ops: string[] }>
 }
+
+const SHEET_OPS = [
+  'sheet.add_rows',
+  'sheet.add_columns',
+  'sheet.update_cells',
+  'sheet.delete_rows',
+  'sheet.delete_columns',
+  'sheet.rename_sheet',
+  'sheet.add_sheet',
+  'sheet.remove_sheet',
+  'sheet.reorder_sheets',
+  'sheet.transform_table',
+]
+
+const SHEET_WRITE_TARGETS = [
+  'xlsx',
+  'xlsm',
+  'xlsb',
+  'xls',
+  'ods',
+  'fods',
+  'csv',
+  'txt',
+  'html',
+  'rtf',
+  'sylk',
+  'dif',
+  'dbf',
+  'numbers',
+  'json',
+]
+
+const SHEET_READ_MIMES = [
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-excel.sheet.macroEnabled.12',
+  'application/vnd.ms-excel.sheet.binary.macroEnabled.12',
+  'application/vnd.ms-excel',
+  'application/vnd.oasis.opendocument.spreadsheet',
+  'application/vnd.oasis.opendocument.spreadsheet-flat-xml',
+  'text/csv',
+  'application/x-iwork-numbers-sffnumbers',
+  'application/x-sylk',
+  'application/x-dif',
+  'application/x-dbf',
+]
 
 /**
  * Known declarations of the bundled engine factories, for shadow analysis. An ESLint rule
@@ -100,6 +148,28 @@ export interface EngineSummary {
  * Exported for that test only.
  */
 export const BUNDLED_SUMMARIES: Record<string, EngineSummary> = {
+  dataEngine: {
+    label: 'dataEngine',
+    mutates: [],
+    converts: [
+      { from: ['application/x-adk-empty'], to: ['txt', 'md', 'json', 'yaml', 'csv', 'html'] },
+      { from: ['application/json'], to: ['yaml', 'txt', 'csv'] },
+      { from: ['application/yaml'], to: ['json'] },
+      { from: ['text/csv'], to: ['json'] },
+    ],
+    edits: [],
+  },
+  exceljsEngine: {
+    label: 'exceljsEngine',
+    mutates: [],
+    converts: [{ from: ['application/x-adk-empty'], to: ['xlsx'] }],
+    edits: [
+      {
+        over: ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+        ops: SHEET_OPS,
+      },
+    ],
+  },
   jimpEngine: {
     label: 'jimpEngine',
     mutates: [
@@ -109,7 +179,10 @@ export const BUNDLED_SUMMARIES: Record<string, EngineSummary> = {
         encodes: ['png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff'],
       },
     ],
-    converts: [],
+    converts: [
+      { from: ['application/x-adk-empty'], to: ['png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff'] },
+    ],
+    edits: [],
   },
   sharpEngine: {
     label: 'sharpEngine',
@@ -120,7 +193,22 @@ export const BUNDLED_SUMMARIES: Record<string, EngineSummary> = {
         encodes: ['png', 'jpg', 'jpeg', 'webp', 'tiff', 'avif', 'gif'],
       },
     ],
-    converts: [],
+    converts: [
+      {
+        from: ['application/x-adk-empty'],
+        to: ['png', 'jpg', 'jpeg', 'webp', 'tiff', 'avif', 'gif'],
+      },
+    ],
+    edits: [],
+  },
+  sheetjsEngine: {
+    label: 'sheetjsEngine',
+    mutates: [],
+    converts: [
+      { from: ['application/x-adk-empty'], to: SHEET_WRITE_TARGETS },
+      { from: SHEET_READ_MIMES, to: SHEET_WRITE_TARGETS },
+    ],
+    edits: [{ over: SHEET_READ_MIMES, ops: SHEET_OPS }],
   },
 }
 
@@ -191,7 +279,7 @@ const summarize = (node: TSESTree.Node): EngineSummary | undefined => {
   const idNode = propOf(node, 'id')
   const label =
     idNode?.type === 'Literal' && typeof idNode.value === 'string' ? idNode.value : 'engine'
-  const summary: EngineSummary = { label, mutates: [], converts: [] }
+  const summary: EngineSummary = { label, mutates: [], converts: [], edits: [] }
   const mutates = propOf(node, 'mutates')
   if (mutates) {
     if (mutates.type !== 'ArrayExpression') return undefined
@@ -215,7 +303,20 @@ const summarize = (node: TSESTree.Node): EngineSummary | undefined => {
       summary.converts.push({ from, to })
     }
   }
-  if (summary.mutates.length + summary.converts.length === 0) return undefined
+  const edits = propOf(node, 'edits')
+  if (edits) {
+    if (edits.type !== 'ArrayExpression') return undefined
+    for (const el of edits.elements) {
+      if (!el || el.type !== 'ObjectExpression') return undefined
+      const over = literalStrings(propOf(el, 'over'))
+      const ops = literalStrings(propOf(el, 'ops'))
+      if (!over || !ops) return undefined
+      summary.edits.push({ over, ops })
+    }
+  }
+  if (summary.mutates.length + summary.converts.length + summary.edits.length === 0) {
+    return undefined
+  }
   return summary
 }
 
@@ -232,7 +333,7 @@ const subset = (sup: string[], sub: string[]): boolean => sub.every((s) => sup.i
 
 /** `true` when EVERY capability of `later` is subsumed by some capability of `earlier`. */
 const shadows = (earlier: EngineSummary, later: EngineSummary): boolean => {
-  if (later.mutates.length + later.converts.length === 0) return false
+  if (later.mutates.length + later.converts.length + later.edits.length === 0) return false
   const mutatesCovered = later.mutates.every((lm) =>
     earlier.mutates.some(
       (em) =>
@@ -242,7 +343,10 @@ const shadows = (earlier: EngineSummary, later: EngineSummary): boolean => {
   const convertsCovered = later.converts.every((lc) =>
     earlier.converts.some((ec) => patternsCover(ec.from, lc.from) && subset(ec.to, lc.to))
   )
-  return mutatesCovered && convertsCovered
+  const editsCovered = later.edits.every((le) =>
+    earlier.edits.some((ee) => patternsCover(ee.over, le.over) && subset(ee.ops, le.ops))
+  )
+  return mutatesCovered && convertsCovered && editsCovered
 }
 
 /**
@@ -345,6 +449,135 @@ const augmentContractsModule = createRule({
   },
 })
 
+// ── require-engine-peers ─────────────────────────────────────────────────────
+
+/**
+ * The optional peer dependencies each bundled engine subpath lazily imports at runtime.
+ * Keyed by the engine's subpath suffix (after `engines/`). An engine with no external peer
+ * (soffice, fs_workspace) is absent — there's nothing to install. Kept in lockstep with the
+ * engines' actual `import(...)` calls by `engine_peers_drift.node.spec.ts`.
+ */
+export const ENGINE_PEERS: Record<string, readonly string[]> = {
+  jimp: ['jimp'],
+  sharp: ['sharp'],
+  sheetjs: ['xlsx'],
+  exceljs: ['exceljs'],
+  data: ['js-yaml', 'papaparse'],
+  tesseract_js: ['tesseract.js'],
+  audio_decode: ['audio-decode'],
+  transformers_asr: ['@huggingface/transformers'],
+  execa_executor: ['execa'],
+}
+
+/** Map a bundled engine subpath to its peer list, or undefined when it isn't a known engine. */
+const peersForSubpath = (source: string): readonly string[] | undefined => {
+  const m = /^@nhtio\/adk\/batteries\/media\/engines\/([a-z_]+)$/.exec(source)
+  if (!m) return undefined
+  return ENGINE_PEERS[m[1]]
+}
+
+/**
+ * Flags an import of a bundled engine subpath whose optional peer dependency cannot be
+ * resolved from the linting file — the "I composed `sheetjsEngine()` but never installed
+ * `xlsx`, and now my pipeline throws `E_INVALID_MEDIA_PIPELINE_CONFIG` at the first sheet
+ * op" footgun, caught at lint time instead of runtime. Resolution uses Node's resolver from
+ * the file's own directory, so it honors the consumer's real `node_modules` layout.
+ *
+ * Reports once per missing peer per engine import (whether the import is a static value
+ * import or a dynamic-import resolver — both reference the engine and both need the peer).
+ */
+/**
+ * The peer-resolution probe: returns `true` when `peer` resolves from `fromFile`. Defaults to
+ * Node's resolver anchored at the linted file (so it sees the consumer's `node_modules`).
+ * Exposed as a settable seam so the rule's spec can simulate installed/missing peers without
+ * depending on the test runner's own `node_modules` layout — production never sets it.
+ */
+export type PeerResolver = (peer: string, fromFile: string) => boolean
+
+const defaultPeerResolver: PeerResolver = (peer, fromFile) => {
+  try {
+    createRequire(fromFile).resolve(peer)
+    return true
+  } catch {
+    return false
+  }
+}
+
+let activePeerResolver: PeerResolver = defaultPeerResolver
+
+/** Override the peer resolver (spec-only seam). Pass nothing to restore the Node default. */
+export const setPeerResolverForTesting = (resolver?: PeerResolver): void => {
+  activePeerResolver = resolver ?? defaultPeerResolver
+}
+
+const requireEnginePeers = createRule<[{ ignore?: readonly string[] }], 'missingPeer'>({
+  name: 'require-engine-peers',
+  meta: {
+    type: 'problem',
+    docs: {
+      description:
+        "A bundled media engine's optional peer dependency must be installed where it's composed — otherwise the pipeline throws at first use, not at construction.",
+    },
+    schema: [
+      {
+        type: 'object',
+        properties: {
+          ignore: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Peer package names to skip (e.g. one resolved via a custom loader the linter cannot see).',
+          },
+        },
+        additionalProperties: false,
+      },
+    ],
+    messages: {
+      missingPeer:
+        'The "{{engine}}" media engine requires the optional peer "{{peer}}", which cannot be resolved from this file. Install it ({{install}}) or the pipeline will throw E_INVALID_MEDIA_PIPELINE_CONFIG the first time this engine runs. Opt out with an eslint-disable-next-line adk-media/require-engine-peers comment + reason.',
+    },
+  },
+  defaultOptions: [{ ignore: [] }],
+  create(context, [options]) {
+    const ignore = new Set(options?.ignore ?? [])
+
+    /** SheetJS ships only from its CDN tarball, so the install hint must not say the registry. */
+    const installHint = (peer: string): string =>
+      peer === 'xlsx'
+        ? 'pnpm add xlsx@https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz'
+        : `pnpm add ${peer}`
+
+    const checkSource = (source: string, reportNode: TSESTree.Node): void => {
+      const peers = peersForSubpath(source)
+      if (!peers) return
+      const engine = source.slice(source.lastIndexOf('/') + 1)
+      for (const peer of peers) {
+        if (ignore.has(peer)) continue
+        if (!activePeerResolver(peer, context.filename)) {
+          context.report({
+            node: reportNode,
+            messageId: 'missingPeer',
+            data: { engine, peer, install: installHint(peer) },
+          })
+        }
+      }
+    }
+
+    return {
+      // Static value/type import of an engine subpath.
+      ImportDeclaration(node: TSESTree.ImportDeclaration) {
+        if (typeof node.source.value === 'string') checkSource(node.source.value, node.source)
+      },
+      // The canonical resolver form: import('@nhtio/adk/batteries/media/engines/…').
+      ImportExpression(node: TSESTree.ImportExpression) {
+        if (node.source.type === 'Literal' && typeof node.source.value === 'string') {
+          checkSource(node.source.value, node.source)
+        }
+      },
+    }
+  },
+})
+
 // ── plugin assembly ──────────────────────────────────────────────────────────
 
 /**
@@ -355,6 +588,7 @@ export const rules = {
   'prefer-engine-resolver': preferEngineResolver,
   'no-shadowed-engine': noShadowedEngine,
   'augment-contracts-module': augmentContractsModule,
+  'require-engine-peers': requireEnginePeers,
 } satisfies FlatConfig.Plugin['rules']
 
 /**

@@ -196,6 +196,13 @@ export default defineConfig(async ({ mode }) => {
         },
         {
           extends: true,
+          resolve: {
+            alias: {
+              // The root mainFields override skips package `browser` fields; exceljs needs
+              // its browser bundle in this project (the Node entry touches `process`).
+              exceljs: resolve(BASE_DIR, 'node_modules/exceljs/dist/exceljs.min.js'),
+            },
+          },
           test: {
             name: { label: 'browser', color: 'green' },
             include: ['tests/**/*.cross.spec.ts', 'tests/**/*.browser.spec.ts'],

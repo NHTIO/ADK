@@ -131,7 +131,8 @@ describe('forgeMediaTools — granular surface', () => {
     expect(tools.list_media).toBeDefined()
     expect(tools.select).toBeDefined()
     expect(tools.extract_text).toBeDefined()
-    expect(tools.sheet_update_cells).toBeDefined()
+    // sheet.* verbs now require an edit-capable engine (exceljs/sheetjs) — none configured.
+    expect(tools.sheet_update_cells).toBeUndefined()
     expect(tools.convert).toBeUndefined()
     expect(tools.image_resize).toBeUndefined()
     expect(tools.audio_transcribe).toBeUndefined()
@@ -223,5 +224,128 @@ describe('forge config validation', () => {
     })
     expect(tools.process_file).toBeDefined()
     expect(tools.media_query).toBeUndefined()
+  })
+})
+
+// ── media generation: the empty:<format> sentinel ───────────────────────────
+
+/** A stub generator engine — keeps the browser project peer-free. */
+const stubGeneratorEngine = () => ({
+  id: 'stub-gen',
+  converts: [
+    {
+      from: ['application/x-adk-empty'],
+      to: ['xlsx', 'txt'],
+      convert: async (request: { to: string }) => ({
+        outputs: [
+          request.to === 'xlsx'
+            ? {
+                bytes: new TextEncoder().encode('stub-xlsx-bytes'),
+                mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+              }
+            : { bytes: new TextEncoder().encode(''), mimeType: 'text/plain' },
+        ],
+      }),
+    },
+  ],
+})
+
+const makeGenPipeline = (): Promise<MediaPipeline> =>
+  createMediaPipeline({ engines: [stubGeneratorEngine()] })
+
+describe('media generation — the empty:<format> sentinel', () => {
+  it('empty:txt + q creates new media without touching resolveMedia', async () => {
+    const tools = forgeMediaTools(await makeGenPipeline(), { surface: 'composite' })
+    const { ctx } = makeMediaCtxStub({ attachments: [] })
+    const outcome = await callMediaTool(tools.media_query, ctx, {
+      media_id: 'empty:txt',
+      q: 'append text="created from nothing"',
+    })
+    expect(outcome.kind).toBe('media')
+    const media = (outcome as { media: Media }).media
+    expect(media.filename).toBe('untitled.txt')
+    expect(new TextDecoder().decode(await media.asBytes())).toBe('created from nothing\n')
+  })
+
+  it('empty:nope fails with EMPTY_FORMAT_UNAVAILABLE listing creatable formats', async () => {
+    const tools = forgeMediaTools(await makeGenPipeline(), { surface: 'composite' })
+    const { ctx } = makeMediaCtxStub({ attachments: [] })
+    const outcome = await callMediaTool(tools.media_query, ctx, {
+      media_id: 'empty:nope',
+      q: 'append text=x',
+    })
+    expect(outcome.kind).toBe('string')
+    const out = (outcome as { out: string }).out
+    expect(out).toContain('Error (EMPTY_FORMAT_UNAVAILABLE)')
+    expect(out).toContain('xlsx')
+    expect(out).toContain('txt')
+    expect(out).toContain('Do not retry')
+  })
+
+  it('with no generator engine the sentinel is unavailable and never advertised', async () => {
+    const tools = forgeMediaTools(await makePipeline(), { surface: 'composite' })
+    expect(tools.media_query.description).not.toContain('Creating new media')
+    const { ctx } = makeMediaCtxStub({ attachments: [] })
+    const outcome = await callMediaTool(tools.media_query, ctx, {
+      media_id: 'empty:txt',
+      q: 'chunk',
+    })
+    expect((outcome as { out: string }).out).toContain('Error (EMPTY_FORMAT_UNAVAILABLE)')
+  })
+
+  it('with a generator engine the descriptions advertise creation', async () => {
+    const tools = forgeMediaTools(await makeGenPipeline(), { surface: 'composite' })
+    expect(tools.media_query.description).toContain('Creating new media')
+    expect(tools.media_query.description).toContain('empty:<format>')
+    const granular = forgeMediaTools(await makeGenPipeline(), { surface: 'granular' })
+    const appendTool = granular.append
+    expect(appendTool).toBeDefined()
+  })
+
+  it('MEDIA_NOT_FOUND gains the create exemplar when creation is possible', async () => {
+    const tools = forgeMediaTools(await makeGenPipeline(), { surface: 'composite' })
+    const { ctx } = makeMediaCtxStub({ attachments: [] })
+    const outcome = await callMediaTool(tools.media_query, ctx, {
+      media_id: 'no-such-id',
+      q: 'chunk',
+    })
+    const out = (outcome as { out: string }).out
+    expect(out).toContain('Error (MEDIA_NOT_FOUND)')
+    expect(out).toContain('To create NEW media instead')
+  })
+
+  it('MEDIA_NOT_FOUND stays unchanged when nothing is creatable', async () => {
+    const tools = forgeMediaTools(await makePipeline(), { surface: 'composite' })
+    const { ctx } = makeMediaCtxStub({ attachments: [] })
+    const outcome = await callMediaTool(tools.media_query, ctx, {
+      media_id: 'no-such-id',
+      q: 'chunk',
+    })
+    const out = (outcome as { out: string }).out
+    expect(out).toContain('Error (MEDIA_NOT_FOUND)')
+    expect(out).not.toContain('To create NEW media instead')
+  })
+
+  it('@empty:<format> works as a ref in pipe statements (lexes and resolves)', async () => {
+    const tools = forgeMediaTools(await makeGenPipeline(), { surface: 'composite' })
+    const { ctx } = makeMediaCtxStub({
+      attachments: [textMedia('original\n', 'doc-a', 'a.txt')],
+    })
+    const outcome = await callMediaTool(tools.media_query, ctx, {
+      media_id: 'doc-a',
+      q: 'diff with=@empty:txt',
+    })
+    expect(outcome.kind).toBe('string')
+    expect((outcome as { out: string }).out).toContain('-original')
+  })
+
+  it('normal ids resolve exactly as before (the sentinel path is additive)', async () => {
+    const tools = forgeMediaTools(await makeGenPipeline(), { surface: 'composite' })
+    const { ctx } = makeMediaCtxStub({ attachments: [textMedia('hello', 'doc-1')] })
+    const outcome = await callMediaTool(tools.media_query, ctx, {
+      media_id: 'doc-1',
+      q: 'append text=world',
+    })
+    expect(outcome.kind).toBe('media')
   })
 })

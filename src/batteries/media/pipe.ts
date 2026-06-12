@@ -43,7 +43,8 @@ const lexer = moo.compile({
   pipe: '|',
   eq: '=',
   comma: ',',
-  ref: /@[A-Za-z0-9_-]+/,
+  // `:` admits the empty:<format> sentinel (UUIDs never contain it; was a guaranteed lex error).
+  ref: /@[A-Za-z0-9:_-]+/,
   regex: /\/(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\[\n])+\/[a-z]*/,
   dstring: /"(?:\\.|[^"\\\n])*"/,
   sstring: /'(?:\\.|[^'\\\n])*'/,

@@ -26,6 +26,9 @@ import type {
   ConvertCapability,
   MutateRequest,
   MutateCapability,
+  EditRequest,
+  EditResult,
+  EditCapability,
   EngineBytesResult,
 } from './contracts'
 
@@ -33,10 +36,16 @@ import type {
 const MAX_HOPS = 3
 
 /**
- * Format tokens that are valid conversion endpoints but never intermediate path nodes.
- * Without this rule the pathfinder would happily route `docx → txt → …` (lossy garbage in,
- * garbage out) or auto-chain `audio → pcm → txt` (skipping the resample the transcription
- * step performs between those legs).
+ * The no-lossy-intermediates ROUTING rule — and nothing else. These format tokens are valid
+ * conversion endpoints but never intermediate path nodes: without this rule the pathfinder
+ * would happily route `docx → txt → …` (lossy garbage in, garbage out) or auto-chain
+ * `audio → pcm → txt` (skipping the resample the transcription step performs between those
+ * legs).
+ *
+ * This set does NOT gate mutation, creation, or advertising. A lossy format as the *desired
+ * output* is still valid media: `txt` can be created (`empty:txt`), appended to, patched,
+ * diffed, and targeted by `convert to=txt` — terminality only forbids silently routing
+ * *through* it on the way to somewhere else.
  */
 const TERMINAL_TOKENS: ReadonlySet<string> = new Set([
   'txt',
@@ -70,7 +79,7 @@ const matchesAny = (patterns: readonly string[], mime: string): boolean =>
  */
 export interface EngineSelectionContext {
   /** Which capability is being dispatched. */
-  kind: 'convert' | 'mutate'
+  kind: 'convert' | 'mutate' | 'edit'
   /** The dispatch request (for convert under multi-hop, the CURRENT hop's input/target). */
   request: {
     /** The input MIME type. */
@@ -133,6 +142,15 @@ export interface EngineRegistry extends CapabilityProbe {
    * @returns The transformed bytes.
    */
   mutate(request: MutateRequest): Promise<EngineBytesResult>
+  /**
+   * Apply one structural document operation. Candidates are engines whose `over` matches the
+   * input and whose `ops` include the requested op; the selection rule arbitrates between
+   * engines of differing fidelity (supply order wins by default).
+   *
+   * @param request - The op, its args, and the input bytes.
+   * @returns The restructured bytes plus optional change counts.
+   */
+  edit(request: EditRequest): Promise<EditResult>
 }
 
 /** One engine's matching capability group for a dispatch. */
@@ -143,6 +161,10 @@ interface ConvertCandidate {
 interface MutateCandidate {
   engine: MediaEngine
   capability: MutateCapability
+}
+interface EditCandidate {
+  engine: MediaEngine
+  capability: EditCapability
 }
 
 /** One hop of a computed conversion path. */
@@ -205,9 +227,23 @@ export const buildEngineRegistry = (
     return out
   }
 
+  const editCandidates = (mimeType: string, op: string): EditCandidate[] => {
+    const mime = normalizeMime(mimeType)
+    const out: EditCandidate[] = []
+    for (const engine of engines) {
+      for (const capability of engine.edits ?? []) {
+        if (!matchesAny(capability.over, mime)) continue
+        if (!capability.ops.includes(op)) continue
+        out.push({ engine, capability })
+        break
+      }
+    }
+    return out
+  }
+
   // ── the selection rule ─────────────────────────────────────────────────────
   const arbitrate = async <C extends { engine: MediaEngine }>(
-    kind: 'convert' | 'mutate',
+    kind: 'convert' | 'mutate' | 'edit',
     request: EngineSelectionContext['request'],
     candidates: C[]
   ): Promise<C | undefined> => {
@@ -391,12 +427,54 @@ export const buildEngineRegistry = (
     return chosen.capability.mutate(request)
   }
 
+  const edit = async (request: EditRequest): Promise<EditResult> => {
+    const candidates = editCandidates(request.mimeType, request.op)
+    if (candidates.length === 0) {
+      const allOps = new Set<string>()
+      for (const engine of engines) {
+        for (const capability of engine.edits ?? []) {
+          for (const op of capability.ops) allOps.add(op)
+        }
+      }
+      throw new Error(
+        `no configured engine can apply "${request.op}" to ${request.mimeType}; declared edit ops: ${[...allOps].join(', ') || '(none)'} (engines: ${ids()})`
+      )
+    }
+    const chosen = await arbitrate(
+      'edit',
+      {
+        mimeType: request.mimeType,
+        filename: '',
+        bytes: request.bytes,
+        ops: [request.op],
+      },
+      candidates
+    )
+    if (!chosen) {
+      throw new Error(
+        `all engines capable of "${request.op}" (${candidates.map((c) => c.engine.id).join(', ')}) were excluded by selection middleware`
+      )
+    }
+    return chosen.capability.edit(request)
+  }
+
   return {
     engines,
     hasConvert,
     hasMutate: () => engines.some((e) => (e.mutates ?? []).length > 0),
+    hasEdit: (mime?: string, op?: string): boolean => {
+      for (const engine of engines) {
+        for (const capability of engine.edits ?? []) {
+          if (mime !== undefined && !matchesAny(capability.over, normalizeMime(mime))) continue
+          if (op !== undefined && !capability.ops.includes(op)) continue
+          return true
+        }
+      }
+      return false
+    },
     convertTargets,
     convert,
     mutate,
+    edit,
   }
 }

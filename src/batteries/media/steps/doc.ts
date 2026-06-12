@@ -1,14 +1,16 @@
 /**
- * Doc-domain step extensions: format-preserving text mutation for DOCX/PPTX, asset
- * extraction from OOXML/ODF archives and PDFs, and format conversion via the convert engine.
+ * Doc-domain step extensions: format-preserving text mutation for DOCX/PPTX/ODF, PDF visual
+ * redaction, asset extraction from OOXML/ODF archives and PDFs, and format conversion via the
+ * convert engine.
  *
  * @remarks
  * Internal sibling of the `@nhtio/adk/batteries/media` entry. Ported from the source server's
  * doc adapters; the format-dispatch contract follows the server's green e2e suite: DOCX and
  * PPTX redact/sanitize/normalize/update_text mutate text in place inside the container
- * (preserving the source format); text-like inputs mutate as text; PDF redact falls back to
- * text extraction (the server's PDF "visual annotation" path is content-stream-preserving and
- * out of scope here — the failure message says exactly that).
+ * (preserving the source format); ODT/ODS/ODP redact/update_text mutate `content.xml` the
+ * same way; text-like inputs mutate as text. PDF redact is VISUAL (pdf-lib draw-over +
+ * metadata strip — content streams keep the text); the result carries that warning verbatim
+ * because it is a trust boundary, not a footnote.
  */
 
 import { MIME } from '../formats'
@@ -137,16 +139,177 @@ const toGlobalRegex = (value: MediaArgScalar): RegExp => {
   return new RegExp(ref.source, ref.flags.includes('g') ? ref.flags : `${ref.flags}g`)
 }
 
+// ── ODF (content.xml) text mutation — ported from the server's odf_xml.ts ───
+
+const ODF_MIMES: ReadonlySet<string> = new Set([MIME.ODT, MIME.ODS, MIME.ODP])
+
+/**
+ * Replace matches inside the text nodes of ODF `content.xml`, aggregating per paragraph so
+ * patterns spanning `<text:span>` formatting splits still match.
+ */
+const replaceTextInContentXml = (
+  xml: string,
+  pattern: RegExp,
+  replacement: string
+): { xml: string; matchCount: number } => {
+  let totalMatches = 0
+  const result = xml.replace(/<text:(?:p|h)\b[^>]*>[\s\S]*?<\/text:(?:p|h)>/g, (paragraphXml) => {
+    const textNodes: Array<{ content: string; start: number; end: number }> = []
+    const textRegex = />([^<]+)</g
+    let match: RegExpExecArray | null
+    while ((match = textRegex.exec(paragraphXml))) {
+      const content = unescapeXml(match[1])
+      if (content.trim() === '') continue
+      textNodes.push({ content, start: match.index, end: match.index + match[0].length })
+    }
+    if (textNodes.length === 0) return paragraphXml
+    const aggregated = textNodes.map((n) => n.content).join('')
+    const p = new RegExp(pattern.source, pattern.flags)
+    const replaced = aggregated.replace(p, replacement)
+    if (replaced === aggregated) return paragraphXml
+    const counter = new RegExp(pattern.source, pattern.flags)
+    while (counter.exec(aggregated)) {
+      totalMatches += 1
+      if (!counter.global) break
+    }
+    // Put all content in the first text node, empty the rest.
+    let out = paragraphXml
+    for (let i = textNodes.length - 1; i >= 0; i--) {
+      const node = textNodes[i]
+      const newContent = i === 0 ? escapeXml(replaced) : ''
+      out = out.slice(0, node.start) + `>${newContent}<` + out.slice(node.end)
+    }
+    return out
+  })
+  return { xml: result, matchCount: totalMatches }
+}
+
+/** Map a `content.xml` mutation over an ODF container (ODT/ODS/ODP). */
+const mutateOdfText = async (
+  ctx: StepContext,
+  verb: string,
+  mutateXml: (xml: string) => string
+): Promise<StepResult> => {
+  const JSZip = await jszip()
+  let zip: JSZipNS
+  try {
+    zip = await JSZip.loadAsync(ctx.payload.bytes)
+  } catch (err) {
+    const detail = isError(err) ? err.message : String(err)
+    fail(verb, `could not open the document container: ${detail}`)
+    /* unreachable */ throw err
+  }
+  const part = zip.file('content.xml')
+  if (!part) fail(verb, 'the ODF container has no content.xml (corrupt file?)')
+  const xml = await part!.async('text')
+  const next = mutateXml(xml)
+  if (next !== xml) zip.file('content.xml', next)
+  const bytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' })
+  return { kind: 'media', payload: { ...ctx.payload, bytes } }
+}
+
+// ── PDF visual redaction — ported from the server's pdf_mutation.ts ─────────
+
+/**
+ * The honest caveat every PDF redaction result must carry. Visual redaction draws over
+ * matched pages and strips metadata; the content streams still contain the original text.
+ */
+export const PDF_REDACTION_WARNING =
+  'PDF redaction applies visual annotations. Content streams are not modified. For full content-level redaction, convert to text first.'
+
+/** Visual page-level redaction: draw-over banner on matching pages + metadata strip. */
+const redactPdf = async (
+  ctx: StepContext,
+  verb: string,
+  patterns: RegExp[]
+): Promise<StepResult> => {
+  const { PDFDocument, PDFName, PDFString, rgb, StandardFonts } = await import('pdf-lib')
+  let doc: Awaited<ReturnType<typeof PDFDocument.load>>
+  try {
+    doc = await PDFDocument.load(ctx.payload.bytes, { ignoreEncryption: true })
+  } catch (err) {
+    const detail = isError(err) ? err.message : String(err)
+    fail(verb, `could not parse the PDF: ${detail}`)
+    /* unreachable */ throw err
+  }
+
+  // Per-page text via the same extractor the ingest steps use.
+  let pageTexts: string[] = []
+  try {
+    const { PDFParse } = await import('pdf-parse')
+    const parser = new PDFParse({ data: ctx.payload.bytes })
+    const result = await parser.getText()
+    pageTexts = result.pages.map((p: { text?: string }) => p.text ?? '')
+  } catch {
+    pageTexts = []
+  }
+
+  const pages = doc.getPages()
+  const font = await doc.embedFont(StandardFonts.Helvetica)
+  let pagesRedacted = 0
+  for (const [i, page] of pages.entries()) {
+    const pageText = pageTexts[i] ?? ''
+    const hasMatch = patterns.some((pattern) =>
+      new RegExp(pattern.source, pattern.flags).test(pageText)
+    )
+    if (!hasMatch) continue
+    const { width } = page.getSize()
+    page.drawRectangle({ x: 0, y: 0, width, height: 14, color: rgb(1, 1, 0.9) })
+    page.drawText(`[Page ${i + 1}: content redacted]`, {
+      x: 4,
+      y: 2,
+      size: 8,
+      font,
+      color: rgb(0.5, 0, 0),
+    })
+    pagesRedacted += 1
+  }
+
+  // Metadata strip (sanitizePdfMetadata, ported): blank the Info fields + drop XMP.
+  const metadataFields = ['Title', 'Author', 'Subject', 'Keywords', 'Creator', 'Producer']
+  for (const field of metadataFields) {
+    try {
+      const infoDict = doc.context.lookup(doc.context.trailerInfo.Info) as
+        | { get?: (n: unknown) => unknown; set?: (n: unknown, v: unknown) => void }
+        | undefined
+      if (infoDict && typeof infoDict.get === 'function' && typeof infoDict.set === 'function') {
+        if (infoDict.get(PDFName.of(field))) infoDict.set(PDFName.of(field), PDFString.of(''))
+      }
+    } catch {
+      // Field doesn't exist or can't be modified — skip.
+    }
+  }
+  try {
+    const catalog = doc.context.lookup(doc.context.trailerInfo.Root) as
+      | { get?: (n: unknown) => unknown; delete?: (n: unknown) => void }
+      | undefined
+    if (catalog && typeof catalog.get === 'function' && typeof catalog.delete === 'function') {
+      if (catalog.get(PDFName.of('Metadata'))) catalog.delete(PDFName.of('Metadata'))
+    }
+  } catch {
+    // No metadata stream — skip.
+  }
+
+  if (pagesRedacted === 0) {
+    fail(verb, 'no page text matched the redaction pattern(s) — nothing was redacted')
+  }
+  const bytes = new Uint8Array(await doc.save())
+  return { kind: 'media', payload: { ...ctx.payload, bytes } }
+}
+
 // ── doc-aware step dispatch ──────────────────────────────────────────────────
 
-/** `redact` — format dispatch: text media → text path; DOCX/PPTX → in-place container edit. */
+/**
+ * `redact` — format dispatch: text media → text path; DOCX/PPTX/ODF → in-place container
+ * edit; PDF → visual redaction (draw-over + metadata strip — see {@link PDF_REDACTION_WARNING}).
+ */
 export const docRedactStep: StepImpl = async (ctx) => {
   const mime = ctx.payload.mimeType.toLowerCase().split(';')[0].trim()
   if (mime.startsWith('text/')) return textRedactStep(ctx)
+  const raw = ctx.step.args.match
+  const patterns = (Array.isArray(raw) ? raw : [raw]) as MediaArgScalar[]
+  const replacement = argOf<string>(ctx.step, 'replace') ?? '█'
   if (mime === MIME.DOCX || mime === MIME.PPTX) {
-    const raw = ctx.step.args.match
-    const patterns = (Array.isArray(raw) ? raw : [raw]) as MediaArgScalar[]
-    const replacement = argOf<string>(ctx.step, 'replace') ?? '█'
     return mutateOoxmlText(ctx, 'redact', (xml, kind) => {
       let out = xml
       for (const p of patterns) {
@@ -161,9 +324,21 @@ export const docRedactStep: StepImpl = async (ctx) => {
       return out
     })
   }
+  if (ODF_MIMES.has(mime)) {
+    return mutateOdfText(ctx, 'redact', (xml) => {
+      let out = xml
+      for (const p of patterns) {
+        out = replaceTextInContentXml(out, toGlobalRegex(p), replacement).xml
+      }
+      return out
+    })
+  }
+  if (mime === MIME.PDF) {
+    return redactPdf(ctx, 'redact', patterns.map(toGlobalRegex))
+  }
   fail(
     'redact',
-    `redaction for ${mime} is not supported in this build (text, DOCX, and PPTX are). For PDF, extract the text first: extract text | redact …`
+    `redaction for ${mime} is not supported in this build (text, DOCX, PPTX, ODT/ODS/ODP, and PDF are).`
   )
   /* unreachable */ throw new Error('unreachable')
 }
@@ -244,22 +419,38 @@ export const docNormalizeStep: StepImpl = async (ctx) => {
   /* unreachable */ throw new Error('unreachable')
 }
 
-/** `update_text` — anchor replacement; DOCX/PPTX in-place, TARGET_NOT_FOUND when absent. */
+/** `update_text` — anchor replacement; DOCX/PPTX/ODF in-place, TARGET_NOT_FOUND when absent. */
 export const docUpdateTextStep: StepImpl = async (ctx) => {
   const mime = ctx.payload.mimeType.toLowerCase().split(';')[0].trim()
   if (mime.startsWith('text/')) return textUpdateTextStep(ctx)
+  const anchor = argOf<string>(ctx.step, 'anchor') as string
+  const replace = argOf<string>(ctx.step, 'replace') ?? ''
+  const escapedAnchor = anchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   if (mime === MIME.DOCX || mime === MIME.PPTX) {
-    const anchor = argOf<string>(ctx.step, 'anchor') as string
-    const replace = argOf<string>(ctx.step, 'replace') ?? ''
     let found = 0
     const result = await mutateOoxmlText(ctx, 'update_text', (xml, kind) => {
       if (found > 0) return xml
-      const escaped = anchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       const { xml: next, matchCount } = replaceInOoxml(
         xml,
         kind === 'docx' ? 'w:p' : 'a:p',
         kind === 'docx' ? 'w:t' : 'a:t',
-        new RegExp(escaped),
+        new RegExp(escapedAnchor),
+        replace
+      )
+      found += matchCount
+      return next
+    })
+    if (found === 0) {
+      fail('update_text', `anchor text not found: "${anchor.slice(0, 80)}"`)
+    }
+    return result
+  }
+  if (ODF_MIMES.has(mime)) {
+    let found = 0
+    const result = await mutateOdfText(ctx, 'update_text', (xml) => {
+      const { xml: next, matchCount } = replaceTextInContentXml(
+        xml,
+        new RegExp(escapedAnchor),
         replace
       )
       found += matchCount
@@ -272,7 +463,7 @@ export const docUpdateTextStep: StepImpl = async (ctx) => {
   }
   fail(
     'update_text',
-    `text update for ${mime} is not supported (text, DOCX, PPTX are; PDF text is not reliably editable)`
+    `text update for ${mime} is not supported (text, DOCX, PPTX, ODT/ODS/ODP are; PDF text is not reliably editable)`
   )
   /* unreachable */ throw new Error('unreachable')
 }

@@ -8,17 +8,26 @@
  * The local-by-default raster engine: runs anywhere TypeScript runs. Declares one mutate
  * capability over png/jpeg/bmp/gif/tiff with resize (cover/contain approximations), rotate,
  * flip, quality, and metadata stripping (Jimp re-encodes pixels, so EXIF never survives —
- * `strip_metadata` is inherently satisfied). For webp/avif output or native-speed processing,
+ * `strip_metadata` is inherently satisfied), plus a generation edge: `EMPTY_MIME` → a blank
+ * 1024×1024 white canvas in any supported encoding (resize in the same statement —
+ * `empty:png | image resize width=64`). For webp/avif output or native-speed processing,
  * compose a sharp-backed engine instead — the capability declaration is the seam.
  *
  * `jimp` is an optional peer dependency, lazily imported on first actual use (constructing
  * the engine — and therefore the pipeline — never loads it).
  */
 
+import { EMPTY_MIME } from '../contracts'
 import { isError } from '@nhtio/adk/guards'
 import { E_INVALID_MEDIA_PIPELINE_CONFIG } from '../exceptions'
 import type * as JimpNS from 'jimp'
-import type { MediaEngine, MutateRequest, EngineBytesResult } from '../contracts'
+import type {
+  MediaEngine,
+  MutateRequest,
+  EngineBytesResult,
+  ConvertRequest,
+  ConvertResult,
+} from '../contracts'
 
 type JimpModule = typeof JimpNS
 
@@ -103,8 +112,23 @@ export const jimpEngine = (options: JimpEngineOptions = {}): MediaEngine => {
     return { bytes: new Uint8Array(buffer), mimeType }
   }
 
+  // Generation: a blank 1024×1024 white canvas, encoded to the requested format.
+  const convert = async (request: ConvertRequest): Promise<ConvertResult> => {
+    const mimeType = MIME_BY_FORMAT[request.to]
+    if (!mimeType) {
+      throw new Error(
+        `jimp cannot generate "${request.to}"; supported: ${SUPPORTED_OUTPUT.join(', ')}`
+      )
+    }
+    const { Jimp } = await getJimp()
+    const image = new Jimp({ width: 1024, height: 1024, color: 0xffffffff })
+    const buffer = await image.getBuffer(mimeType as 'image/png')
+    return { outputs: [{ bytes: new Uint8Array(buffer), mimeType }] }
+  }
+
   return {
     id: 'jimp',
+    converts: [{ from: [EMPTY_MIME], to: SUPPORTED_OUTPUT, convert }],
     mutates: [
       {
         over: ['image/png', 'image/jpeg', 'image/bmp', 'image/gif', 'image/tiff'],

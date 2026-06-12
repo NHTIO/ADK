@@ -20,7 +20,7 @@
  */
 
 import { E_INVALID_MEDIA_PIPELINE_CONFIG } from '../exceptions'
-import { implementsBinaryExecutor, implementsScratchWorkspace } from '../contracts'
+import { EMPTY_MIME, implementsBinaryExecutor, implementsScratchWorkspace } from '../contracts'
 import type {
   MediaEngine,
   ConvertCapability,
@@ -99,6 +99,36 @@ const CONVERT_TOKEN: Record<string, string> = {
   md: 'txt:Text',
   json: 'csv',
 }
+
+/**
+ * Seed extension per generation target: which silo's empty file to materialize when the
+ * source is {@link EMPTY_MIME}. LibreOffice treats a zero-byte input as an empty document of
+ * the extension's type (verified across all three silos, both directions, on 25.x — pinned by
+ * a binary-gated spec), so generation needs no templates at all. The seed is always a
+ * DIFFERENT extension than the target within the same silo, because soffice won't "convert"
+ * docx to docx.
+ */
+const SEED_EXT_FOR_TARGET: Record<string, string> = {
+  docx: 'odt',
+  odt: 'docx',
+  doc: 'docx',
+  rtf: 'docx',
+  pdf: 'docx',
+  html: 'docx',
+  txt: 'docx',
+  md: 'docx',
+  xlsx: 'ods',
+  ods: 'xlsx',
+  xls: 'xlsx',
+  csv: 'xlsx',
+  json: 'xlsx',
+  pptx: 'odp',
+  odp: 'pptx',
+  ppt: 'pptx',
+}
+
+/** Every format this engine can generate from {@link EMPTY_MIME}. */
+const GENERATION_TARGETS: readonly string[] = Object.keys(SEED_EXT_FOR_TARGET)
 
 const validateOptions = (options: SofficeEngineOptions, name: string): void => {
   if (typeof options?.path !== 'string' || options.path.length === 0) {
@@ -185,9 +215,10 @@ export const sofficeEngine = (options: SofficeEngineOptions): MediaEngine => {
 
   const convert = async (request: ConvertRequest): Promise<ConvertResult> => {
     const mime = request.mimeType.toLowerCase().split(';')[0].trim()
-    const inputExt = EXT_BY_MIME[mime]
+    // Generation: a zero-byte seed file in the target's silo converts as an empty document.
+    const inputExt = mime === EMPTY_MIME ? SEED_EXT_FOR_TARGET[request.to] : EXT_BY_MIME[mime]
     if (!inputExt) throw new Error(`unsupported input MIME for conversion: ${request.mimeType}`)
-    const targets = TARGETS_BY_EXT[inputExt] ?? []
+    const targets = mime === EMPTY_MIME ? GENERATION_TARGETS : (TARGETS_BY_EXT[inputExt] ?? [])
     if (!targets.includes(request.to)) {
       throw new Error(
         `cannot convert ${inputExt} to ${request.to}; supported: ${targets.join(', ')}`
@@ -238,6 +269,8 @@ export const sofficeEngine = (options: SofficeEngineOptions): MediaEngine => {
       group(['odp'], TARGETS_BY_EXT.odp),
       group(['ppt'], TARGETS_BY_EXT.ppt),
       group(['pdf'], TARGETS_BY_EXT.pdf),
+      // Generation: zero-byte seed in the target's silo (see SEED_EXT_FOR_TARGET).
+      { from: [EMPTY_MIME], to: GENERATION_TARGETS, convert },
     ],
   }
 }

@@ -288,3 +288,72 @@ describe('engine config validation (loud-config rules)', () => {
     expect(out.mimeType).toBe('image/webp')
   })
 })
+
+describe('generation edges — blank canvas + silent wav', () => {
+  it('empty:png via jimp mints a 1024×1024 white canvas', async () => {
+    const engine = jimpEngine()
+    const result = await engine.converts![0].convert({
+      bytes: new Uint8Array(0),
+      mimeType: 'application/x-adk-empty',
+      filename: 'untitled',
+      to: 'png',
+    })
+    const out = result.outputs[0]
+    expect(out.mimeType).toBe('image/png')
+    const image = await Jimp.read(
+      out.bytes.buffer.slice(
+        out.bytes.byteOffset,
+        out.bytes.byteOffset + out.bytes.byteLength
+      ) as ArrayBuffer
+    )
+    expect(image.width).toBe(1024)
+    expect(image.height).toBe(1024)
+  })
+
+  it('empty:png | image resize width=64 — generate then shape in one chain', async () => {
+    const mp = await createMediaPipeline({ engines: [() => jimpEngine()] })
+    const minted = await mp.capabilities.convert({
+      bytes: new Uint8Array(0),
+      mimeType: 'application/x-adk-empty',
+      filename: 'untitled',
+      to: 'png',
+    })
+    const out = (await mp({
+      bytes: minted.outputs[0].bytes,
+      mimeType: minted.outputs[0].mimeType,
+      filename: 'untitled.png',
+    }).image.resize({ width: 64, height: 64 })) as StepPayload
+    const image = await Jimp.read(
+      out.bytes.buffer.slice(
+        out.bytes.byteOffset,
+        out.bytes.byteOffset + out.bytes.byteLength
+      ) as ArrayBuffer
+    )
+    expect(image.width).toBe(64)
+  })
+
+  it('empty:wav mints decodable 44100 Hz mono silence (real audio-decode round-trip)', async () => {
+    const { audioDecodeEngine } =
+      await import('../../../../src/batteries/media/engines/audio_decode')
+    const engine = audioDecodeEngine()
+    const generation = engine.converts!.find((c) => c.from.includes('application/x-adk-empty'))!
+    const minted = await generation.convert({
+      bytes: new Uint8Array(0),
+      mimeType: 'application/x-adk-empty',
+      filename: 'untitled',
+      to: 'wav',
+    })
+    expect(minted.outputs[0].mimeType).toBe('audio/wav')
+    // The engine's own decode path accepts its own seed.
+    const decoded = await engine.converts![0].convert({
+      bytes: minted.outputs[0].bytes,
+      mimeType: 'audio/wav',
+      filename: 'untitled.wav',
+      to: 'pcm',
+    })
+    expect(Number(decoded.outputs[0].meta?.sampleRate)).toBe(44_100)
+    const pcm = bytesToPcm(decoded.outputs[0].bytes)
+    expect(pcm.length).toBe(44_100) // one second, mono
+    expect(pcm.every((sample) => sample === 0)).toBe(true) // silence
+  })
+})

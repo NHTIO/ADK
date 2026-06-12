@@ -58,6 +58,7 @@ export interface VerbArgSpec {
 export type VerbRequirement =
   | { capability: 'convert'; from?: string; to?: string }
   | { capability: 'mutate' }
+  | { capability: 'edit'; op?: string }
 
 /** Broad input families used for verb-applicability checks. */
 export type FormatFamily =
@@ -91,7 +92,7 @@ export interface VerbSpec {
   output: VerbOutput
 }
 
-/** Conversion targets supported by `convert` (matches the server's enum exactly). */
+/** Conversion targets supported by `convert` (the server's enum plus the SheetJS/data matrix). */
 export const CONVERT_TARGETS = [
   'pdf',
   'html',
@@ -99,6 +100,7 @@ export const CONVERT_TARGETS = [
   'md',
   'csv',
   'json',
+  'yaml',
   'docx',
   'doc',
   'rtf',
@@ -106,6 +108,13 @@ export const CONVERT_TARGETS = [
   'xlsx',
   'xls',
   'ods',
+  'xlsm',
+  'xlsb',
+  'fods',
+  'sylk',
+  'dif',
+  'dbf',
+  'numbers',
   'pptx',
   'ppt',
   'odp',
@@ -193,7 +202,8 @@ export const VERBS: readonly VerbSpec[] = [
   },
   {
     id: 'redact',
-    description: 'Redact matching text. Prefer literal strings; /regex/ is supported.',
+    description:
+      'Redact matching text. Prefer literal strings; /regex/ is supported. PDF redaction is VISUAL (draw-over + metadata strip; content streams keep the text) — for content-level PDF redaction, extract text first.',
     args: {
       match: {
         type: 'regex-or-string-list',
@@ -242,7 +252,8 @@ export const VERBS: readonly VerbSpec[] = [
   },
   {
     id: 'diff',
-    description: 'Compare this media against another; returns a structured diff.',
+    description:
+      'Compare this media against another; returns a structured diff whose patch text feeds apply_patch directly.',
     args: {
       with: {
         type: 'media-ref',
@@ -255,16 +266,81 @@ export const VERBS: readonly VerbSpec[] = [
   },
   {
     id: 'apply_patch',
-    description: 'Apply a unified-diff patch to the media text.',
+    description:
+      'Apply a patch to the media text: a unified diff (as produced by the diff verb — that output feeds this verb directly), or a structured "*** Begin Patch" envelope (Add/Delete/Update File) for multi-file changes. In the structured envelope, add-file content lines must start with "+" (the unified-diff convention).',
     args: {
       patch: {
         type: 'string',
         required: true,
-        description: 'The unified diff content.',
+        description:
+          'The patch content: unified diff, or a structured envelope starting with "*** Begin Patch". Add-file content lines must start with "+".',
       },
       with: {
         type: 'media-ref-list',
         description: 'Optional additional context media, as @id refs.',
+      },
+    },
+    appliesTo: ['document'],
+    output: 'media',
+  },
+  {
+    id: 'append',
+    description: 'Append text to text-family media (txt/md/csv/yaml).',
+    args: {
+      text: { type: 'string', required: true, description: 'The text to append.' },
+      newline: {
+        type: 'boolean',
+        description: 'Terminate with a newline (and separate from existing content). Default true.',
+      },
+    },
+    appliesTo: ['document', 'spreadsheet'],
+    output: 'media',
+  },
+  // ── data namespace (JSON/YAML structural ops) ───────────────────────────────
+  {
+    id: 'data.set',
+    description: 'Set a value at a path in JSON/YAML media (creates missing containers).',
+    args: {
+      path: {
+        type: 'string',
+        required: true,
+        description: 'Dot/bracket path, e.g. a.b[2].c',
+      },
+      value: {
+        type: 'string',
+        required: true,
+        description: "JSON-encoded value: '42', '\"text\"', '{\"k\":1}'. Bare strings accepted.",
+      },
+    },
+    appliesTo: ['document'],
+    output: 'media',
+  },
+  {
+    id: 'data.merge',
+    description: 'Merge a JSON object fragment into JSON/YAML media.',
+    args: {
+      fragment: {
+        type: 'string',
+        required: true,
+        description: 'The JSON object to merge, e.g. \'{"a":{"b":1}}\'.',
+      },
+      strategy: {
+        type: 'enum',
+        values: ['deep', 'shallow'],
+        description: 'Merge strategy. Default deep.',
+      },
+    },
+    appliesTo: ['document'],
+    output: 'media',
+  },
+  {
+    id: 'data.delete',
+    description: 'Delete a key or array element at a path in JSON/YAML media.',
+    args: {
+      path: {
+        type: 'string',
+        required: true,
+        description: 'Dot/bracket path of the key/element to remove.',
       },
     },
     appliesTo: ['document'],
@@ -360,6 +436,7 @@ export const VERBS: readonly VerbSpec[] = [
       before: { type: 'number', min: 1, description: 'Insert before this 1-based row.' },
       after: { type: 'number', min: 1, description: 'Insert after this 1-based row.' },
     },
+    requires: { capability: 'edit' },
     appliesTo: ['spreadsheet'],
     output: 'media',
   },
@@ -379,6 +456,7 @@ export const VERBS: readonly VerbSpec[] = [
       before: { type: 'number', min: 1, description: 'Insert before this 1-based column.' },
       after: { type: 'number', min: 1, description: 'Insert after this 1-based column.' },
     },
+    requires: { capability: 'edit' },
     appliesTo: ['spreadsheet'],
     output: 'media',
   },
@@ -394,6 +472,7 @@ export const VERBS: readonly VerbSpec[] = [
           'JSON array of updates: \'[{"address":"B2","value":42}]\' or \'[{"row":2,"col":3,"value":"x"}]\'.',
       },
     },
+    requires: { capability: 'edit' },
     appliesTo: ['spreadsheet'],
     output: 'media',
   },
@@ -409,6 +488,7 @@ export const VERBS: readonly VerbSpec[] = [
         description: '1-based row indices to delete.',
       },
     },
+    requires: { capability: 'edit' },
     appliesTo: ['spreadsheet'],
     output: 'media',
   },
@@ -424,6 +504,7 @@ export const VERBS: readonly VerbSpec[] = [
         description: '1-based column indices to delete.',
       },
     },
+    requires: { capability: 'edit' },
     appliesTo: ['spreadsheet'],
     output: 'media',
   },
@@ -438,6 +519,7 @@ export const VERBS: readonly VerbSpec[] = [
       },
       to: { type: 'string', required: true, description: 'New sheet name.' },
     },
+    requires: { capability: 'edit' },
     appliesTo: ['spreadsheet'],
     output: 'media',
   },
@@ -448,6 +530,7 @@ export const VERBS: readonly VerbSpec[] = [
       name: { type: 'string', required: true, description: 'Name for the new worksheet.' },
       at: { type: 'number', min: 1, description: 'Insert at this 1-based position.' },
     },
+    requires: { capability: 'edit' },
     appliesTo: ['spreadsheet'],
     output: 'media',
   },
@@ -461,6 +544,7 @@ export const VERBS: readonly VerbSpec[] = [
         description: 'Sheet name to remove (names only; quote it).',
       },
     },
+    requires: { capability: 'edit' },
     appliesTo: ['spreadsheet'],
     output: 'media',
   },
@@ -475,6 +559,7 @@ export const VERBS: readonly VerbSpec[] = [
           'JSON array of sheet names and/or 1-based indices in the new order: \'["Summary",2,3]\'.',
       },
     },
+    requires: { capability: 'edit' },
     appliesTo: ['spreadsheet'],
     output: 'media',
   },
@@ -491,6 +576,7 @@ export const VERBS: readonly VerbSpec[] = [
         description: 'JSON array of renames: \'[{"from":"Old","to":"New"}]\'.',
       },
     },
+    requires: { capability: 'edit' },
     appliesTo: ['spreadsheet'],
     output: 'media',
   },

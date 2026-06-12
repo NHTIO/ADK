@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { default as JSZip } from 'jszip'
 import { describe, expect, it } from 'vitest'
 import { loadMediaFixture } from '../../../_fixtures/media_fixtures'
+import { countSlides } from '../../../../src/batteries/media/steps/slides'
 import { createMediaPipeline, MIME } from '../../../../src/batteries/media'
 import { sofficeEngine } from '../../../../src/batteries/media/engines/soffice'
 import { execaExecutor } from '../../../../src/batteries/media/engines/execa_executor'
@@ -61,10 +62,23 @@ describe('doc.* steps — format-preserving mutation (cross-env paths)', () => {
     expect(zip.file('word/document.xml')).toBeTruthy()
   })
 
-  it('redact on PDF points the model at the extract-text composition', async () => {
+  it('redact on PDF applies visual redaction (draw-over) and stays a valid PDF', async () => {
     const mp = await createMediaPipeline()
     const pdf = await loadMediaFixture('sample.pdf')
-    await expect(mp(pdf).redact({ match: ['x'] })).rejects.toThrow(/extract text \| redact/)
+    const out = (await mp(pdf).redact({ match: ['Hello PDF World'] })) as StepPayload
+    expect(out.mimeType).toBe('application/pdf')
+    // Still parses as a PDF after the draw-over + metadata strip.
+    const { PDFDocument } = await import('pdf-lib')
+    const doc = await PDFDocument.load(out.bytes)
+    expect(doc.getPageCount()).toBeGreaterThan(0)
+  })
+
+  it('redact on PDF fails readably when no page text matches', async () => {
+    const mp = await createMediaPipeline()
+    const pdf = await loadMediaFixture('sample.pdf')
+    await expect(mp(pdf).redact({ match: ['zzz-no-such-text'] })).rejects.toThrow(
+      /no page text matched/
+    )
   })
 
   it('extract assets from rich.pptx yields embedded images', async () => {
@@ -100,6 +114,9 @@ describe.skipIf(!haveSoffice)('soffice engines (binary-gated)', () => {
             executor: execaExecutor(),
             workspace: fsScratchWorkspace({ root: join(tmpdir(), 'adk-soffice-spec') }),
           }),
+        // sheet.* edits dispatch through the edit capability.
+        () =>
+          import('../../../../src/batteries/media/engines/exceljs').then((m) => m.exceljsEngine()),
       ],
     })
 
@@ -131,5 +148,59 @@ describe.skipIf(!haveSoffice)('soffice engines (binary-gated)', () => {
     const odp = await loadMediaFixture('sample.odp')
     const out = (await mp(odp).slides.add({ title: 'From ODP' })) as StepPayload
     expect(out.mimeType).toBe(MIME.PPTX)
+  })
+
+  // Zero-byte generation: LibreOffice treats an empty seed file as an empty document of its
+  // extension's type. Undocumented tolerance — these tests pin it so a future soffice
+  // regression surfaces as a failure, not a silent capability lie.
+  it('generates docx/xlsx/pptx/pdf from EMPTY_MIME', { timeout: 240_000 }, async () => {
+    const mp = await makePipeline()
+    const expectations: Array<[string, (bytes: Uint8Array) => boolean]> = [
+      ['docx', (b) => b[0] === 0x50 && b[1] === 0x4b], // zip magic
+      ['xlsx', (b) => b[0] === 0x50 && b[1] === 0x4b],
+      ['pptx', (b) => b[0] === 0x50 && b[1] === 0x4b],
+      ['pdf', (b) => new TextDecoder().decode(b.subarray(0, 4)) === '%PDF'],
+    ]
+    for (const [format, check] of expectations) {
+      const result = await mp.capabilities.convert({
+        bytes: new Uint8Array(0),
+        mimeType: 'application/x-adk-empty',
+        filename: 'untitled',
+        to: format,
+      })
+      const out = result.outputs[0]
+      expect(out.bytes.length, format).toBeGreaterThan(0)
+      expect(check(out.bytes), `${format} magic`).toBe(true)
+    }
+  })
+
+  it('a generated xlsx accepts a sheet edit (Sheet1 exists)', { timeout: 120_000 }, async () => {
+    const mp = await makePipeline()
+    const minted = await mp.capabilities.convert({
+      bytes: new Uint8Array(0),
+      mimeType: 'application/x-adk-empty',
+      filename: 'untitled',
+      to: 'xlsx',
+    })
+    const result = await mp.query(
+      {
+        bytes: minted.outputs[0].bytes,
+        mimeType: minted.outputs[0].mimeType,
+        filename: 'untitled.xlsx',
+      },
+      `sheet update_cells updates='[{"address":"A1","value":"generated"}]'`
+    )
+    expect(result.kind).toBe('media')
+  })
+
+  it('a generated pptx parses with exactly one slide', { timeout: 120_000 }, async () => {
+    const mp = await makePipeline()
+    const minted = await mp.capabilities.convert({
+      bytes: new Uint8Array(0),
+      mimeType: 'application/x-adk-empty',
+      filename: 'untitled',
+      to: 'pptx',
+    })
+    expect(await countSlides(minted.outputs[0].bytes)).toBe(1)
   })
 })

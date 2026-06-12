@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { buildEngineRegistry } from '../../../../src/batteries/media/registry'
-import { createMediaPipeline, MIME, PCM_MIME } from '../../../../src/batteries/media'
+import { createMediaPipeline, MIME, PCM_MIME, EMPTY_MIME } from '../../../../src/batteries/media'
 import type { StepPayload } from '../../../../src/batteries/media'
 import type { EngineSelectionMiddlewareFn } from '../../../../src/batteries/media/registry'
 import type {
@@ -491,5 +491,115 @@ describe('createMediaPipeline — engine array construction', () => {
     })
     await mp.query(payloadOf('x', MIME.DOCX, 'a.docx'), 'convert to=pdf')
     expect(log).toEqual([`fast:${MIME.DOCX}->pdf`])
+  })
+})
+
+describe('buildEngineRegistry — EMPTY_MIME generation reachability', () => {
+  it('convertTargets(EMPTY_MIME) lists every declared generation target', () => {
+    const registry = buildEngineRegistry([
+      convertEngineOf('gen', { [EMPTY_MIME]: ['xlsx', 'txt'] }),
+    ])
+    expect([...registry.convertTargets(EMPTY_MIME)].sort()).toEqual(['txt', 'xlsx'])
+  })
+
+  it('multi-hop: empty → xlsx → pdf composes through two engines', async () => {
+    const log: string[] = []
+    const registry = buildEngineRegistry([
+      convertEngineOf('gen', { [EMPTY_MIME]: ['xlsx'] }, log),
+      convertEngineOf('office', { [MIME.XLSX]: ['pdf'] }, log),
+    ])
+    expect(registry.convertTargets(EMPTY_MIME)).toContain('pdf')
+    const result = await registry.convert({
+      bytes: new Uint8Array(0),
+      mimeType: EMPTY_MIME,
+      filename: 'untitled',
+      to: 'pdf',
+    })
+    expect(result.outputs[0].mimeType).toBe(MIME.PDF)
+    expect(log).toEqual([`gen:${EMPTY_MIME}->xlsx`, `office:${MIME.XLSX}->pdf`])
+  })
+
+  it('unrelated from-MIMEs are unaffected by the generation edge', () => {
+    const registry = buildEngineRegistry([
+      convertEngineOf('gen', { [EMPTY_MIME]: ['xlsx'] }),
+      convertEngineOf('office', { [MIME.DOCX]: ['pdf'] }),
+    ])
+    expect(registry.convertTargets(MIME.DOCX)).toEqual(['pdf'])
+    expect(registry.convertTargets(MIME.PDF)).toEqual([])
+  })
+})
+
+describe('buildEngineRegistry — edit dispatch', () => {
+  const editEngineOf = (name: string, over: string[], ops: string[], log?: string[]) => ({
+    id: name,
+    edits: [
+      {
+        over,
+        ops,
+        edit: async (request: { op: string }) => {
+          log?.push(`${name}:${request.op}`)
+          return { bytes: encoder.encode(name), mimeType: MIME.XLSX }
+        },
+      },
+    ],
+  })
+
+  it('dispatches to the first capable engine in supply order', async () => {
+    const log: string[] = []
+    const registry = buildEngineRegistry([
+      editEngineOf('first', [MIME.XLSX], ['sheet.update_cells'], log),
+      editEngineOf('second', [MIME.XLSX], ['sheet.update_cells'], log),
+    ])
+    const result = await registry.edit({
+      bytes: new Uint8Array(0),
+      mimeType: MIME.XLSX,
+      op: 'sheet.update_cells',
+      args: {},
+    })
+    expect(new TextDecoder().decode(result.bytes)).toBe('first')
+    expect(log).toEqual(['first:sheet.update_cells'])
+  })
+
+  it('hasEdit narrows by mime and op', () => {
+    const registry = buildEngineRegistry([editEngineOf('e', [MIME.XLSX], ['sheet.update_cells'])])
+    expect(registry.hasEdit?.()).toBe(true)
+    expect(registry.hasEdit?.(MIME.XLSX)).toBe(true)
+    expect(registry.hasEdit?.(MIME.XLSX, 'sheet.update_cells')).toBe(true)
+    expect(registry.hasEdit?.(MIME.XLSX, 'sheet.nope')).toBe(false)
+    expect(registry.hasEdit?.(MIME.DOCX)).toBe(false)
+  })
+
+  it('no capable engine fails with the declared-ops inventory', async () => {
+    const registry = buildEngineRegistry([editEngineOf('e', [MIME.XLSX], ['sheet.add_rows'])])
+    await expect(
+      registry.edit({
+        bytes: new Uint8Array(0),
+        mimeType: MIME.XLSX,
+        op: 'sheet.update_cells',
+        args: {},
+      })
+    ).rejects.toThrow(/declared edit ops: sheet\.add_rows/)
+  })
+
+  it('selection middleware arbitrates edit candidates', async () => {
+    const log: string[] = []
+    const preferSecond: EngineSelectionMiddlewareFn = async (ctx, next) => {
+      if (ctx.kind === 'edit') ctx.candidates.reverse()
+      await next()
+    }
+    const registry = buildEngineRegistry(
+      [
+        editEngineOf('first', [MIME.XLSX], ['sheet.update_cells'], log),
+        editEngineOf('second', [MIME.XLSX], ['sheet.update_cells'], log),
+      ],
+      [preferSecond]
+    )
+    await registry.edit({
+      bytes: new Uint8Array(0),
+      mimeType: MIME.XLSX,
+      op: 'sheet.update_cells',
+      args: {},
+    })
+    expect(log).toEqual(['second:sheet.update_cells'])
   })
 })

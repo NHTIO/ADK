@@ -6,17 +6,28 @@
  *
  * @remarks
  * The performance/fidelity engine for Node deployments: native speed plus webp/avif output
- * and the full `fit` mode set. sharp is permanently Node-only (native bindings); for a
- * cross-environment engine compose the jimp implementation instead — the capability
- * declaration is the seam, and BYO instances adapt via {@link fromSharp}.
+ * and the full `fit` mode set, plus a generation edge — `EMPTY_MIME` → a blank 1024×1024
+ * white canvas in any supported encoding (resize in the same statement). sharp is permanently
+ * Node-only (native bindings); for a cross-environment engine compose the jimp implementation
+ * instead — the capability declaration is the seam, and BYO instances adapt via
+ * {@link fromSharp}.
  *
  * `sharp` is an optional peer dependency, lazily imported on first actual use.
  */
 
+import { EMPTY_MIME } from '../contracts'
 import { isError } from '@nhtio/adk/guards'
 import { default as SharpDefault } from 'sharp'
 import { E_INVALID_MEDIA_PIPELINE_CONFIG } from '../exceptions'
-import type { MediaEngine, MutateCapability, MutateRequest, EngineBytesResult } from '../contracts'
+import type {
+  MediaEngine,
+  MutateCapability,
+  MutateRequest,
+  EngineBytesResult,
+  ConvertCapability,
+  ConvertRequest,
+  ConvertResult,
+} from '../contracts'
 
 type SharpFn = typeof SharpDefault
 
@@ -103,6 +114,37 @@ const capabilityOf = (
 })
 
 /**
+ * Build the generation capability over a sharp source: `EMPTY_MIME` → a blank 1024×1024
+ * white canvas (3 channels, so jpeg never trips on alpha) in any supported encoding.
+ */
+const blankCapability = (getSharp: () => Promise<SharpFn>): ConvertCapability => ({
+  from: [EMPTY_MIME],
+  to: SUPPORTED_OUTPUT,
+  convert: async (request: ConvertRequest): Promise<ConvertResult> => {
+    const mimeType = MIME_BY_FORMAT[request.to]
+    if (!mimeType) {
+      throw new Error(
+        `sharp cannot generate "${request.to}"; supported: ${SUPPORTED_OUTPUT.join(', ')}`
+      )
+    }
+    const sharp = await getSharp()
+    const formatKey = (request.to === 'jpg' ? 'jpeg' : request.to) as
+      | 'png'
+      | 'jpeg'
+      | 'webp'
+      | 'tiff'
+      | 'avif'
+      | 'gif'
+    const buffer = await sharp({
+      create: { width: 1024, height: 1024, channels: 3, background: { r: 255, g: 255, b: 255 } },
+    })
+      .toFormat(formatKey)
+      .toBuffer()
+    return { outputs: [{ bytes: new Uint8Array(buffer), mimeType }] }
+  },
+})
+
+/**
  * Construct the sharp-backed image engine.
  *
  * @param options - Optional module resolver override.
@@ -116,6 +158,7 @@ export const sharpEngine = (options: SharpEngineOptions = {}): MediaEngine => {
   }
   return {
     id: 'sharp',
+    converts: [blankCapability(getSharp)],
     mutates: [capabilityOf(async (request) => runTransform(await getSharp(), request))],
   }
 }
@@ -129,6 +172,7 @@ export const sharpEngine = (options: SharpEngineOptions = {}): MediaEngine => {
  */
 export const fromSharp = (sharp: SharpFn): MediaEngine => ({
   id: 'sharp',
+  converts: [blankCapability(async () => sharp)],
   mutates: [capabilityOf(async (request) => runTransform(sharp, request))],
 })
 

@@ -1,6 +1,6 @@
 {
   "name": "@nhtio/adk",
-  "version": "0.0.1",
+  "version": "1.20260612.0",
   "description": "An opinionated Agent Development Kit for building custom AI agents with bring-your-own infrastructure and opt-in batteries.",
   "scripts": {
     "build": "npx rimraf dist && vite build && npx jiti bin/type.ts && npx jiti bin/stubs.ts",

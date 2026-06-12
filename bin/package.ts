@@ -9,7 +9,11 @@ const skillsDir = resolve(BASE_DIR, 'skills')
 const destSkillsDir = resolve(BASE_DIR, 'dist/skills')
 const packageJsonPath = resolve(BASE_DIR, 'package.json')
 const destPackageJsonPath = resolve(BASE_DIR, 'dist/package.json')
+const destServerJsonPath = resolve(BASE_DIR, 'dist/server.json')
 const destMcpCorpusPath = resolve(BASE_DIR, 'dist/mcp/adk-docs-corpus.json')
+
+const MCP_SERVER_NAME = 'io.nht/adk-assembly'
+const MCP_SERVER_DESCRIPTION = 'Opinionated Agent Development Kit — bring-your-own infrastructure, opt-in batteries.'
 
 const srcReadmePath = resolve(BASE_DIR, 'README.md')
 const destReadmePath = resolve(BASE_DIR, 'dist/README.md')
@@ -144,11 +148,37 @@ readFile(packageJsonPath, 'utf-8').then(async (packageJson) => {
     }
   })
   parsedPackageJson.exports = exports
+  parsedPackageJson.mcpName = MCP_SERVER_NAME
   delete parsedPackageJson.files
   delete parsedPackageJson.resolutions
   delete parsedPackageJson.nonExternal
+
+  const repository = process.env.GITHUB_MIRROR_REPOSITORY?.replace(/^\/+|\/+$/g, '')
+  const serverJson: Record<string, unknown> = {
+    $schema: 'https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json',
+    name: MCP_SERVER_NAME,
+    title: 'ADK Assembly',
+    description: MCP_SERVER_DESCRIPTION,
+    version: parsedPackageJson.version,
+    packages: [
+      {
+        registryType: 'npm',
+        identifier: parsedPackageJson.name,
+        version: parsedPackageJson.version,
+        transport: { type: 'stdio' },
+      },
+    ],
+  }
+  if (repository) {
+    serverJson.repository = {
+      url: `https://github.com/${repository}`,
+      source: 'github',
+    }
+  }
+
   await Promise.all([
     writeFile(destPackageJsonPath, JSON.stringify(parsedPackageJson, null, 2)),
+    writeFile(destServerJsonPath, JSON.stringify(serverJson, null, 2)),
     doCopyFile(srcReadmePath, destReadmePath),
     doCopyFile(srcLicensePath, destLicensePath),
     doCopyFile(srcChangelogPath, destChangelogPath),

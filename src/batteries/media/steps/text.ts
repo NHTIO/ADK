@@ -9,10 +9,18 @@
  */
 
 import { argOf } from '../runtime'
+import { isError } from '@nhtio/adk/guards'
 import { E_MEDIA_STEP_FAILED } from '../exceptions'
 import { familyOf, replaceExtension, MIME } from '../formats'
-import type { StepImpl, StepPayload } from '../runtime'
+import {
+  isStructuredPatch,
+  parseStructuredPatch,
+  applyOperations,
+  normalizeWorkspacePath,
+} from './patch'
+import type { ParsedApplyPatch, WorkspaceFile } from './patch'
 import type { RegExpRef, MediaRef, MediaArgScalar } from '../plan'
+import type { StepImpl, StepResult, StepPayload } from '../runtime'
 
 /** One text chunk with its position in the source. */
 export interface Chunk {
@@ -250,9 +258,13 @@ export const diffStep: StepImpl = async (ctx) => {
   return { kind: 'data', data, asText: patch }
 }
 
-/** `apply_patch` — apply a unified diff to the media text. */
+/**
+ * `apply_patch` — apply a unified diff, or a structured `*** Begin Patch` envelope
+ * (multi-file Add/Delete/Update/Move — the GitHub Copilot apply_patch dialect).
+ */
 export const applyPatchStep: StepImpl = async (ctx) => {
   const patch = argOf<string>(ctx.step, 'patch') as string
+  if (isStructuredPatch(patch)) return applyStructuredPatch(ctx, patch)
   const text = decodeText(ctx.payload.bytes)
   const mod = await import('diff')
   const result = mod.applyPatch(text, patch)
@@ -263,4 +275,58 @@ export const applyPatchStep: StepImpl = async (ctx) => {
     ])
   }
   return { kind: 'media', payload: { ...ctx.payload, bytes: encoder.encode(result) } }
+}
+
+/** The structured-envelope path: primary media + `with=@refs` form a virtual workspace. */
+const applyStructuredPatch = async (
+  ctx: Parameters<StepImpl>[0],
+  patch: string
+): Promise<StepResult> => {
+  const verb = 'apply_patch'
+  const fail = (message: string): never => {
+    throw new E_MEDIA_STEP_FAILED([verb, message])
+  }
+
+  // Build the workspace: the primary media plus any @refs, keyed by normalized filename.
+  const files = new Map<string, WorkspaceFile>()
+  const addToWorkspace = (payload: StepPayload): void => {
+    let path: string
+    try {
+      path = normalizeWorkspacePath(payload.filename)
+    } catch (err) {
+      fail(isError(err) ? err.message : String(err))
+      /* unreachable */ throw err
+    }
+    if (files.has(path)) fail(`duplicate workspace path in inputs: "${path}"`)
+    files.set(path, { text: decodeText(payload.bytes), mimeType: payload.mimeType })
+  }
+  addToWorkspace(ctx.payload)
+  const raw = ctx.step.args.with
+  if (raw !== undefined) {
+    const refs = (Array.isArray(raw) ? raw : [raw]) as MediaRef[]
+    for (const ref of refs) {
+      if (ref.kind !== 'id') fail('builder refs are not yet supported here')
+      addToWorkspace(await ctx.resolveRef((ref as { kind: 'id'; id: string }).id))
+    }
+  }
+
+  let parsed: ParsedApplyPatch
+  let applied: { files: Map<string, WorkspaceFile>; modifiedFiles: number }
+  try {
+    parsed = parseStructuredPatch(patch)
+    applied = applyOperations(files, parsed)
+  } catch (err) {
+    fail(isError(err) ? err.message : String(err))
+    /* unreachable */ throw err
+  }
+
+  const finalFiles = [...applied.files.entries()].sort(([a], [b]) => a.localeCompare(b))
+  const payloads: StepPayload[] = finalFiles.map(([path, file]) => ({
+    bytes: encoder.encode(file.text),
+    mimeType: file.mimeType,
+    filename: path,
+  }))
+  if (payloads.length === 0) fail('the patch deleted every file in the workspace')
+  if (payloads.length === 1) return { kind: 'media', payload: payloads[0] }
+  return { kind: 'media-list', payloads }
 }

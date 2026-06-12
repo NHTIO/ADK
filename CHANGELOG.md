@@ -15,6 +15,80 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-06-12
+
+### Added
+
+- **Media generation: the `empty:<format>` sentinel.** Agents can now CREATE media, not just
+  derive it. `media_id: "empty:xlsx"` (or `empty:png`, `empty:json`, …) mints a brand-new
+  blank file and runs the statement against it — creation and population in one round-trip;
+  `@empty:<format>` works as a statement ref too (`merge with=@empty:xlsx`). Strictly
+  additive: harness ids are UUIDs, so every `empty:*` value was previously a guaranteed
+  `MEDIA_NOT_FOUND`. Under the hood, generation is one new convert edge — the virtual source
+  MIME `EMPTY_MIME` (`application/x-adk-empty`) — declared per engine; the creatable set is
+  pure graph reachability (`convertTargets(EMPTY_MIME)`, multi-hop included), never a policy
+  list. Deterministic generation (blank workbook/canvas/silence) ships bundled; model-based
+  semantic generation (diffusion/TTS) is BYO via the same edge. Generation edges landed on
+  jimp + sharp (1024×1024 white canvas), audio_decode (1 s of 16-bit mono silence at
+  44100 Hz, dependency-free), soffice (its whole matrix, via zero-byte seed files —
+  LibreOffice treats an empty seed as an empty document; pinned by a binary-gated spec), and
+  the three new engines below.
+- **`edits` — a third engine capability kind** (additive: `MediaEngine.edits?`,
+  `EditCapability`/`EditRequest`/`EditResult`, `registry.edit()`/`hasEdit()`, selection
+  middleware sees `kind: 'edit'`). Structural document ops are now declared, dispatched, and
+  swappable like converts and mutates — and two engines may declare the same ops with
+  different fidelity, with supply order picking the winner.
+- **New engine `engines/sheetjs`** (`sheetjsEngine()`, optional peer `xlsx` **>=0.20.2 — install
+  from the SheetJS CDN**, the npm registry copy is frozen at 0.18.5 with CVE-2023-30533 and
+  CVE-2024-22363): the in-process, cross-env spreadsheet engine. Reads
+  xlsx/xlsm/xlsb/xls(all BIFFs)/ods/fods/csv/NUMBERS/sylk/dif/dbf; writes those plus
+  txt/html/rtf/json; generates any write target from `EMPTY_MIME`; edits every `sheet.*` op
+  over its whole read matrix. SheetJS CE strips styling — documented loudly, asserted in
+  tests, and the reason exceljs exists alongside it.
+- **New engine `engines/exceljs`** (`exceljsEngine()`): workbook editing promoted out of the
+  `sheet.*` steps into a fleet-visible engine. Edits every `sheet.*` op over xlsx with
+  **styling preserved** (bold/fills/comments/formulas survive untouched — the fidelity pin is
+  a test), and generates blank xlsx from `EMPTY_MIME`. Compose it before sheetjs when
+  formatting matters; sheetjs alone covers data-only workloads without the extra peer.
+- **New engine `engines/data`** (`dataEngine()`): the deterministic text/data engine. Generates
+  txt/md/json/yaml/csv/html seeds from `EMPTY_MIME`; converts json⇄yaml, json⇄csv (papaparse
+  peer, lazy), json→txt.
+- **New verbs: `append`, `data.set`, `data.merge`, `data.delete`.** The lossy text family is
+  first-class media now: append a line to txt/md/csv/yaml, set/merge/delete at a JSON or YAML
+  path (output format follows the input). `empty:json | data set path=… value=…` is a
+  complete create-then-populate chain with zero engine requirements.
+- **Structured `apply_patch` envelope** — the GitHub Copilot apply_patch dialect
+  (`*** Begin Patch`, Add/Delete/Update File, `*** Move to:`, `@@` context hunks), preserved
+  exactly because models already know it. Multi-file via `with=@refs`; Add File can grow the
+  workspace, so the result may be multiple media. Ambiguous hunk context fails rather than
+  guessing. The unified-diff path is untouched, and the diff→apply_patch round-trip is now a
+  tested contract (`diff A with=@B` applied to A reproduces B byte-exact).
+- **`redact` and `update_text` on ODF** (odt/ods/odp — in-place `content.xml` edits with the
+  same paragraph-aggregation matching the OOXML path uses) and **`redact` on PDF** — VISUAL
+  redaction via pdf-lib (draw-over on matching pages + metadata strip). The caveat ships in
+  the verb description and the docs because it is a trust boundary: content streams keep the
+  original text; for content-level redaction, extract text first.
+- **Spreadsheet vocabulary expansion**: xlsm/xlsb/fods/sylk/dif/dbf/numbers/yaml join the
+  format tables and `convert to=` targets; all spreadsheet-family MIMEs normalize to xlsx for
+  `sheet.*` edits whenever any configured engine declares the conversion (sheetjs in-process,
+  or soffice).
+
+### Changed
+
+- **`sheet.*` verbs now require a registered edit-capable engine** (`requires: { capability:
+  'edit' }`). Previously the steps lazy-imported exceljs directly, so merely installing the
+  peer lit the verbs up; now the consumer registers `exceljsEngine()` (or `sheetjsEngine()`)
+  in the engines array like every other capability. This is a behavior change for deployments
+  that installed exceljs without declaring it — the failure message names the exact fix, and
+  the engines docs carry a migration note.
+- `convert` may newly appear in image-only deployments: jimp/sharp now declare generation
+  convert edges, so `hasConvert()` turns true. A model attempting an unreachable conversion
+  still gets the existing model-actionable reachable-targets failure.
+- `MediaPipeline.capabilities` is now typed as the full `EngineRegistry` (the runtime value
+  always was); `CapabilityProbe` gains an optional `hasEdit()`.
+- **`dist/package.json` gains `mcpName: "io.nht/adk-assembly"`** and the build emits
+  `dist/server.json` for the MCP Registry. No behavioral change for existing consumers.
+
 ## 2026-06-11
 
 ### Security

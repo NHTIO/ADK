@@ -3,7 +3,11 @@ import { describe, expect, it } from 'vitest'
 import { loadMediaFixture } from '../../../_fixtures/media_fixtures'
 import { countSlides } from '../../../../src/batteries/media/steps/slides'
 import { createMediaPipeline, MIME } from '../../../../src/batteries/media'
+import { exceljsEngine } from '../../../../src/batteries/media/engines/exceljs'
 import type { StepPayload } from '../../../../src/batteries/media'
+
+/** Sheet edits dispatch through the edit capability — register the exceljs engine. */
+const sheetPipeline = () => createMediaPipeline({ engines: [exceljsEngine()] })
 
 const openWb = async (payload: StepPayload): Promise<ExcelJS.Workbook> => {
   const wb = new ExcelJS.Workbook()
@@ -27,7 +31,7 @@ const makeXlsx = async (rows: Array<Array<string | number>>): Promise<StepPayloa
 
 describe('sheet.* steps (ExcelJS, in-memory)', () => {
   it('update_cells by address and by row/col, formulas via leading =', async () => {
-    const mp = await createMediaPipeline()
+    const mp = await sheetPipeline()
     const input = await makeXlsx([
       ['Name', 'Value'],
       ['a', 1],
@@ -44,7 +48,7 @@ describe('sheet.* steps (ExcelJS, in-memory)', () => {
   })
 
   it('update_cells via the pipe surface with quoted JSON', async () => {
-    const mp = await createMediaPipeline()
+    const mp = await sheetPipeline()
     const input = await makeXlsx([['H'], ['x']])
     const result = await mp.query(
       input,
@@ -56,7 +60,7 @@ describe('sheet.* steps (ExcelJS, in-memory)', () => {
   })
 
   it('add_rows appends and inserts before', async () => {
-    const mp = await createMediaPipeline()
+    const mp = await sheetPipeline()
     const input = await makeXlsx([['H'], ['one']])
     const appended = (await mp(input).sheet.addRows([['two'], ['three']])) as StepPayload
     const appendedWb = await openWb(appended)
@@ -70,7 +74,7 @@ describe('sheet.* steps (ExcelJS, in-memory)', () => {
   })
 
   it('delete_rows and delete_columns', async () => {
-    const mp = await createMediaPipeline()
+    const mp = await sheetPipeline()
     const input = await makeXlsx([
       ['A', 'B', 'C'],
       ['1', '2', '3'],
@@ -84,7 +88,7 @@ describe('sheet.* steps (ExcelJS, in-memory)', () => {
   })
 
   it('rename/add/remove/reorder sheets', async () => {
-    const mp = await createMediaPipeline()
+    const mp = await sheetPipeline()
     const input = await makeXlsx([['x']])
     const out = (await mp(input)
       .sheet.renameSheet('Data', 'Renamed')
@@ -98,7 +102,7 @@ describe('sheet.* steps (ExcelJS, in-memory)', () => {
   })
 
   it('transform_table renames, drops, selects columns by header', async () => {
-    const mp = await createMediaPipeline()
+    const mp = await sheetPipeline()
     const input = await makeXlsx([
       ['Name', 'Age', 'City'],
       ['a', 30, 'X'],
@@ -115,7 +119,7 @@ describe('sheet.* steps (ExcelJS, in-memory)', () => {
   })
 
   it('sheet name vs index disambiguation: quoted numeric names are names', async () => {
-    const mp = await createMediaPipeline()
+    const mp = await sheetPipeline()
     const wb = new ExcelJS.Workbook()
     wb.addWorksheet('First')
     wb.addWorksheet('2026')
@@ -134,29 +138,29 @@ describe('sheet.* steps (ExcelJS, in-memory)', () => {
   })
 
   it('rename targets sheet NAMES only and explains the rule', async () => {
-    const mp = await createMediaPipeline()
+    const mp = await sheetPipeline()
     const input = await makeXlsx([['x']])
     await expect(mp(input).sheet.renameSheet('Nope', 'New')).rejects.toThrow(/sheet NAME/)
   })
 
   it('ODS without a sheetNormalize engine fails with do-not-retry', async () => {
-    const mp = await createMediaPipeline()
+    const mp = await sheetPipeline()
     const ods = await loadMediaFixture('sample.ods')
     await expect(mp(ods).sheet.addRows([['x']])).rejects.toThrow(/converts it to xlsx is required/)
   })
 
   it('legacy xls is mutation-blocked with the conversion hint', async () => {
-    const mp = await createMediaPipeline()
+    const mp = await sheetPipeline()
     const xls: StepPayload = {
       bytes: new Uint8Array([1, 2, 3]),
       mimeType: 'application/vnd.ms-excel',
       filename: 'old.xls',
     }
-    await expect(mp(xls).sheet.addRows([['x']])).rejects.toThrow(/converts it to xlsx/)
+    await expect(mp(xls).sheet.addRows([['x']])).rejects.toThrow(/no configured engine converts/)
   })
 
   it('real rich.xlsx fixture round-trips a mutation', async () => {
-    const mp = await createMediaPipeline()
+    const mp = await sheetPipeline()
     const fixture = await loadMediaFixture('rich.xlsx')
     const out = (await mp(fixture).sheet.addSheet('FromTest')) as StepPayload
     const wb = await openWb(out)

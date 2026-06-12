@@ -30,11 +30,18 @@ export const MIME = {
   PAGES: 'application/x-iwork-pages-sffpages',
   NUMBERS: 'application/x-iwork-numbers-sffnumbers',
   KEYNOTE: 'application/x-iwork-keynote-sffkey',
+  XLSM: 'application/vnd.ms-excel.sheet.macroEnabled.12',
+  XLSB: 'application/vnd.ms-excel.sheet.binary.macroEnabled.12',
+  FODS: 'application/vnd.oasis.opendocument.spreadsheet-flat-xml',
+  SYLK: 'application/x-sylk',
+  DIF: 'application/x-dif',
+  DBF: 'application/x-dbf',
   TXT: 'text/plain',
   MD: 'text/markdown',
   CSV: 'text/csv',
   HTML: 'text/html',
   JSON: 'application/json',
+  YAML: 'application/yaml',
   PNG: 'image/png',
   JPEG: 'image/jpeg',
   WEBP: 'image/webp',
@@ -50,7 +57,20 @@ export const LEGACY_OFFICE_MIMES: ReadonlySet<string> = new Set([MIME.DOC, MIME.
 /** Apple iWork MIME types (extraction only — mutation is rejected). */
 export const IWORK_MIMES: ReadonlySet<string> = new Set([MIME.PAGES, MIME.NUMBERS, MIME.KEYNOTE])
 
-const SPREADSHEET_MIMES: ReadonlySet<string> = new Set([MIME.XLSX, MIME.ODS, MIME.XLS, MIME.CSV])
+/** Every MIME the battery classifies as a spreadsheet (drives verb applicability + normalize). */
+export const SPREADSHEET_MIMES: ReadonlySet<string> = new Set([
+  MIME.XLSX,
+  MIME.XLSM,
+  MIME.XLSB,
+  MIME.ODS,
+  MIME.FODS,
+  MIME.XLS,
+  MIME.CSV,
+  MIME.NUMBERS,
+  MIME.SYLK,
+  MIME.DIF,
+  MIME.DBF,
+])
 const PRESENTATION_MIMES: ReadonlySet<string> = new Set([
   MIME.PPTX,
   MIME.ODP,
@@ -67,6 +87,7 @@ const DOCUMENT_MIMES: ReadonlySet<string> = new Set([
   MIME.MD,
   MIME.HTML,
   MIME.JSON,
+  MIME.YAML,
   'application/rtf',
   'text/rtf',
 ])
@@ -98,10 +119,10 @@ export const familyOf = (mimeType: string): FormatFamily => {
 export const unsupportedForMutationReason = (mimeType: string): string | undefined => {
   const mime = mimeType.toLowerCase().split(';')[0].trim()
   if (LEGACY_OFFICE_MIMES.has(mime)) {
-    return `legacy Office format (${mime}) supports extraction only — convert it first (e.g. convert to=docx)`
+    return `legacy Office format (${mime}) cannot be mutated in place and no configured engine converts it — convert it first (e.g. convert to=docx)`
   }
   if (IWORK_MIMES.has(mime)) {
-    return `Apple iWork format (${mime}) supports extraction only`
+    return `Apple iWork format (${mime}) cannot be mutated in place and no configured engine converts it`
   }
   return undefined
 }
@@ -118,11 +139,20 @@ export const EXT_TO_MIME: Readonly<Record<string, string>> = {
   doc: MIME.DOC,
   xls: MIME.XLS,
   ppt: MIME.PPT,
+  xlsm: MIME.XLSM,
+  xlsb: MIME.XLSB,
+  fods: MIME.FODS,
+  sylk: MIME.SYLK,
+  dif: MIME.DIF,
+  dbf: MIME.DBF,
+  numbers: MIME.NUMBERS,
   txt: MIME.TXT,
   md: MIME.MD,
   csv: MIME.CSV,
   html: MIME.HTML,
   json: MIME.JSON,
+  yaml: MIME.YAML,
+  yml: MIME.YAML,
   rtf: 'application/rtf',
   png: MIME.PNG,
   jpg: MIME.JPEG,

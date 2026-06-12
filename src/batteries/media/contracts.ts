@@ -7,12 +7,15 @@
  * @remarks
  * Engines are seams, not policies. An engine is a self-declaring capability provider: it
  * states exactly which transforms it supports — {@link ConvertCapability} edges (input MIME
- * patterns to output format tokens) and {@link MutateCapability} groups (same-format content
- * transforms) — and the pipeline dispatches against those declarations. There are only two
- * capability shapes because there are only two things a media engine ever does: change the
- * format, or change the content. OCR is a convert (image to text). Transcription is a convert
- * (PCM to text). Decoding audio is a convert (container to PCM). Resizing is a mutate. A new
- * capability is a new edge in the data, never a new contract.
+ * patterns to output format tokens), {@link MutateCapability} groups (same-format content
+ * transforms), and {@link EditCapability} groups (structural document operations) — and the
+ * pipeline dispatches against those declarations. There are only three capability shapes
+ * because there are only three things a media engine ever does: change the format, change the
+ * content, or restructure the document. OCR is a convert (image to text). Transcription is a
+ * convert (PCM to text). Decoding audio is a convert (container to PCM). Generating a blank
+ * file is a convert (from {@link EMPTY_MIME} — the source format happens to be nothing).
+ * Resizing is a mutate. Inserting a worksheet row is an edit. A new capability is a new edge
+ * in the data, never a new contract.
  *
  * Engines are supplied to `createMediaPipeline` as a flat ordered array and resolved eagerly
  * at construction (declarations drive verb narrowing, so they must be known up front).
@@ -150,6 +153,23 @@ export type MimePattern = string
 export const PCM_MIME = 'audio/x-adk-pcm'
 
 /**
+ * The virtual source MIME type for media generation — the single seam through which new media
+ * comes into existence. An engine that can mint a blank/seed file declares
+ * `converts: [{ from: [EMPTY_MIME], to: [...] }]` and receives a {@link ConvertRequest} with
+ * zero bytes; the format token in `to` names what gets created.
+ *
+ * @remarks
+ * Generating an .xlsx, a blank canvas, or a second of silence IS media generation — it is
+ * *deterministic* generation (same inputs, same bytes). *Model-based semantic* generation
+ * (diffusion, TTS) is the same edge with different machinery: a BYO engine declares
+ * `from: [EMPTY_MIME]` and consumes a prompt from `request.options`. Both kinds ride one
+ * declaration shape, which is exactly why this is a MIME and not a special API. `EMPTY_MIME`
+ * can never become a conversion intermediate: no engine declares `to: 'empty'`, so the
+ * pathfinder only ever sees it as a source.
+ */
+export const EMPTY_MIME = 'application/x-adk-empty'
+
+/**
  * Pack PCM samples into transport bytes for a {@link ConvertOutput}.
  *
  * @remarks
@@ -225,7 +245,7 @@ export interface ImagesConvertOptions {
 export interface ConvertOptions
   extends OcrConvertOptions, AsrConvertOptions, ImagesConvertOptions {}
 
-// ── the two capabilities ─────────────────────────────────────────────────────
+// ── the three capabilities ───────────────────────────────────────────────────
 
 /** A format-changing request handed to a {@link ConvertCapability}. */
 export interface ConvertRequest {
@@ -328,6 +348,67 @@ export interface MutateCapability {
 }
 
 /**
+ * A structural document operation handed to an {@link EditCapability}: one named op with its
+ * verb-table args, applied to in-memory bytes. Unlike the fused {@link MutateRequest} (which
+ * folds adjacent image transforms into one decode/encode), edits run one op per request — a
+ * worksheet splice is not a pixel pass and gains nothing from fusion.
+ */
+export interface EditRequest {
+  /** The input bytes. */
+  bytes: Uint8Array
+  /** The input MIME type. */
+  mimeType: string
+  /** The operation name, namespaced as in the verb table (`sheet.update_cells`, …). */
+  op: string
+  /** The op's arguments, in the verb table's declared shapes. */
+  args: Record<string, unknown>
+  /** Abort signal threaded from the pipeline execution. */
+  signal?: AbortSignal
+}
+
+/** Counts an edit reports back for result summaries. */
+export interface EditSummary {
+  /** Items added (rows, columns, sheets…). */
+  added?: number
+  /** Items removed. */
+  removed?: number
+  /** Items modified. */
+  modified?: number
+  /** Non-fatal notes surfaced to the model. */
+  warnings?: string[]
+}
+
+/** The settled result of an edit: the restructured bytes plus optional change counts. */
+export interface EditResult extends EngineBytesResult {
+  /** Change counts for result summaries. */
+  summary?: EditSummary
+}
+
+/**
+ * A structural document-editing capability group: every op in `ops` is applicable to every
+ * input matching `over`.
+ *
+ * @remarks
+ * Two engines may declare the same ops over the same patterns with different fidelity — e.g.
+ * an ExcelJS-backed editor preserves styling while a SheetJS CE-backed one strips it. The
+ * registry does not rank fidelity; supply order (or selection middleware) decides, which makes
+ * the trade-off the consumer's visible composition decision.
+ */
+export interface EditCapability {
+  /** Input patterns this block edits. */
+  over: readonly MimePattern[]
+  /** Operation names supported (`sheet.update_cells`, `sheet.add_rows`, …). */
+  ops: readonly string[]
+  /**
+   * Apply one structural operation.
+   *
+   * @param request - The op, its args, and the input bytes.
+   * @returns The restructured bytes plus optional change counts.
+   */
+  edit(request: EditRequest): Promise<EditResult>
+}
+
+/**
  * A self-declaring media engine: an id for error messages plus the capabilities it provides.
  * At least one capability entry is required.
  */
@@ -338,6 +419,8 @@ export interface MediaEngine {
   readonly converts?: readonly ConvertCapability[]
   /** Same-format content-transform capability groups. */
   readonly mutates?: readonly MutateCapability[]
+  /** Structural document-editing capability groups. */
+  readonly edits?: readonly EditCapability[]
 }
 
 // ── duck-typed guards ────────────────────────────────────────────────────────
@@ -369,6 +452,12 @@ export const implementsMutateCapability = (value: unknown): value is MutateCapab
   isStringArray((value as MutateCapability).ops) &&
   isStringArray((value as MutateCapability).encodes)
 
+/** `true` when `value` structurally implements {@link EditCapability}. */
+export const implementsEditCapability = (value: unknown): value is EditCapability =>
+  hasFns(value, ['edit']) &&
+  isStringArray((value as EditCapability).over) &&
+  isStringArray((value as EditCapability).ops)
+
 /**
  * `true` when `value` structurally implements {@link MediaEngine}: a string id plus at least
  * one well-formed capability entry. Every declared entry must pass its capability guard.
@@ -379,13 +468,18 @@ export const implementsMediaEngine = (value: unknown): value is MediaEngine => {
   if (typeof engine.id !== 'string' || engine.id.length === 0) return false
   const converts = engine.converts
   const mutates = engine.mutates
+  const edits = engine.edits
   if (converts !== undefined) {
     if (!Array.isArray(converts) || !converts.every(implementsConvertCapability)) return false
   }
   if (mutates !== undefined) {
     if (!Array.isArray(mutates) || !mutates.every(implementsMutateCapability)) return false
   }
+  if (edits !== undefined) {
+    if (!Array.isArray(edits) || !edits.every(implementsEditCapability)) return false
+  }
   const convertCount = Array.isArray(converts) ? converts.length : 0
   const mutateCount = Array.isArray(mutates) ? mutates.length : 0
-  return convertCount + mutateCount > 0
+  const editCount = Array.isArray(edits) ? edits.length : 0
+  return convertCount + mutateCount + editCount > 0
 }

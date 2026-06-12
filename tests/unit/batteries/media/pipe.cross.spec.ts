@@ -9,8 +9,16 @@ import {
 import type { MediaPlan } from '../../../../src/batteries/media/plan'
 import type { CapabilityProbe } from '../../../../src/batteries/media/validate'
 
-const ALL_ENGINES: CapabilityProbe = { hasConvert: () => true, hasMutate: () => true }
-const NO_ENGINES: CapabilityProbe = { hasConvert: () => false, hasMutate: () => false }
+const ALL_ENGINES: CapabilityProbe = {
+  hasConvert: () => true,
+  hasMutate: () => true,
+  hasEdit: () => true,
+}
+const NO_ENGINES: CapabilityProbe = {
+  hasConvert: () => false,
+  hasMutate: () => false,
+  hasEdit: () => false,
+}
 
 const parse = (q: string, capabilities: CapabilityProbe = ALL_ENGINES): MediaPlan =>
   validateSegments(parsePipeRaw(q), { capabilities })
