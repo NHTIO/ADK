@@ -1,5 +1,6 @@
 import { validator } from '@nhtio/validation'
 import { passesSchema } from '../utils/validation'
+import type { ReaderDescriptor } from './reader_descriptor'
 
 /**
  * Backing store contract for a {@link @nhtio/adk!SpooledArtifact}.
@@ -61,6 +62,22 @@ export interface SpoolReader {
    * @returns The full underlying content as a single string.
    */
   readAll(): string | Promise<string>
+
+  /**
+   * Optionally emit a serialisable {@link ReaderDescriptor} so a {@link @nhtio/adk!SpooledArtifact}
+   * backed by this reader can round-trip through `encode()`/`decode()` as a **handle**.
+   *
+   * @remarks
+   * Synchronous by contract — the encoder's `[ENCODE_METHOD]()` is synchronous and cannot await. The
+   * descriptor describes *where the bytes live* (a spool key, or an inlined string for in-memory
+   * readers) — never the live binding (`Disk`, OPFS root), which the matching resolver re-injects on
+   * decode. A reader that omits this method is treated as non-describable: line/text reads still work at
+   * runtime, the `SpooledArtifact` simply cannot be serialised, and encoding it throws
+   * {@link @nhtio/adk!E_READER_NOT_DESCRIBABLE}.
+   *
+   * @returns A tagged, serialisable handle, or `undefined`/absent when the reader cannot describe itself.
+   */
+  describe?(): ReaderDescriptor | undefined
 }
 
 /**

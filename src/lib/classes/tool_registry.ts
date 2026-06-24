@@ -1,6 +1,8 @@
 import { isInstanceOf } from '../utils/guards'
 import { E_TOOL_ALREADY_REGISTERED } from '../exceptions/runtime'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import type { Tool } from './tool'
+import type { AdkEncodableSnapshot } from './encodable'
 import type { DispatchContext } from '../contracts/dispatch_context'
 
 /**
@@ -326,5 +328,36 @@ export class ToolRegistry {
       }
     }
     return merged
+  }
+
+  /**
+   * Serialise this ToolRegistry into an `@nhtio/encoder` snapshot.
+   *
+   * @remarks
+   * Emits the live {@link @nhtio/adk!Tool} instances (the encoder recurses into each — so every tool's
+   * handler-closure caveat from {@link Tool.[ENCODE_METHOD]} applies) plus the hidden-set names. Both
+   * {@link @nhtio/adk!Tool} and {@link @nhtio/adk!ArtifactTool} entries round-trip to their correct
+   * subtype. Round-trips via {@link ToolRegistry.[DECODE_METHOD]}.
+   *
+   * @returns A `{ tools, hidden }` snapshot.
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    return {
+      tools: this.all(),
+      hidden: this.hidden().map((tool) => tool.name),
+    }
+  }
+
+  /**
+   * Reconstruct a {@link ToolRegistry} from a {@link ToolRegistry.[ENCODE_METHOD]} snapshot.
+   *
+   * @param data - The snapshot produced by {@link ToolRegistry.[ENCODE_METHOD]}.
+   * @returns A fresh {@link ToolRegistry} with the same tools and hidden set.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): ToolRegistry {
+    const snapshot = data as { tools: Tool[]; hidden: string[] }
+    const registry = new ToolRegistry(snapshot.tools)
+    registry.setHidden(...snapshot.hidden)
+    return registry
   }
 }

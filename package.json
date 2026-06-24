@@ -65,6 +65,7 @@
     "@huggingface/transformers": "^4.2.0",
     "@lancedb/lancedb": "^0.30.0",
     "@mlc-ai/web-llm": "^0.2.83",
+    "@nhtio/encoder": "^1.20260624.0",
     "@opensearch-project/opensearch": "^3.6.0",
     "@orama/orama": "^3.1.18",
     "@pinecone-database/pinecone": "^7.2.0",
@@ -131,6 +132,9 @@
       "optional": true
     },
     "@mlc-ai/web-llm": {
+      "optional": true
+    },
+    "@nhtio/encoder": {
       "optional": true
     },
     "@opensearch-project/opensearch": {
@@ -280,6 +284,7 @@
     "@lancedb/lancedb": "^0.30.0",
     "@mlc-ai/web-llm": "^0.2.83",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@nhtio/encoder": "^1.20260624.0",
     "@nhtio/eslint-config": "1.20260518.0",
     "@nhtio/swarm": "^1.20260111.0",
     "@nhtio/vite-plugins": "^1.20251202.1",

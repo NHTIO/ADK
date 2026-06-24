@@ -3,11 +3,15 @@ import { isInstanceOf } from '../utils/guards'
 import { ArtifactTool } from './artifact_tool'
 import { ToolRegistry } from './tool_registry'
 import { Tokenizable, TokenEncoding } from './tokenizable'
-import { E_NOT_A_SPOOL_READER } from '../exceptions/runtime'
 import { implementsSpoolReader } from '../contracts/spool_reader'
+import { resolveSpoolReader } from '../contracts/reader_resolvers'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
+import { E_NOT_A_SPOOL_READER, E_READER_NOT_DESCRIBABLE } from '../exceptions/runtime'
 import type { ObjectSchema } from '@nhtio/validation'
+import type { AdkEncodableSnapshot } from './encodable'
 import type { SpoolReader } from '../contracts/spool_reader'
 import type { DispatchContext } from '../contracts/dispatch_context'
+import type { ReaderDescriptor } from '../contracts/reader_descriptor'
 
 /**
  * Constructor signature for {@link SpooledArtifact} and any subclass.
@@ -201,6 +205,57 @@ export class SpooledArtifact {
       throw new E_NOT_A_SPOOL_READER()
     }
     this.#reader = reader
+  }
+
+  /**
+   * Emit the backing reader's serialisable {@link ReaderDescriptor}, or throw if it cannot describe
+   * itself.
+   *
+   * @remarks
+   * `protected` so subclasses can build their own encode snapshots over the base reader (which is
+   * otherwise private). Throws {@link @nhtio/adk!E_READER_NOT_DESCRIBABLE} when the reader has no
+   * `describe()` (or returns `undefined`) — there is no serialisable handle to write.
+   *
+   * @returns The reader's tagged handle descriptor.
+   * @throws {@link @nhtio/adk!E_READER_NOT_DESCRIBABLE} when the reader is not describable.
+   */
+  protected readerDescriptor(): ReaderDescriptor {
+    const descriptor = this.#reader.describe?.()
+    if (!descriptor) {
+      throw new E_READER_NOT_DESCRIBABLE(['reader'])
+    }
+    return descriptor
+  }
+
+  /**
+   * Serialise this SpooledArtifact into an `@nhtio/encoder` snapshot — the reader **handle**, not the
+   * bytes.
+   *
+   * @remarks
+   * Emits the backing reader's {@link ReaderDescriptor}; decode re-binds the reader through the
+   * registered resolver. Throws {@link @nhtio/adk!E_READER_NOT_DESCRIBABLE} when the reader cannot
+   * describe itself. Subclasses override this to include their own discriminators (e.g.
+   * {@link @nhtio/adk!SpooledJsonArtifact} adds `format`).
+   *
+   * @returns A snapshot consumed by {@link SpooledArtifact.[DECODE_METHOD]}.
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    return { reader: this.readerDescriptor() }
+  }
+
+  /**
+   * Reconstruct a {@link SpooledArtifact} from an {@link SpooledArtifact.[ENCODE_METHOD]} snapshot.
+   *
+   * @remarks
+   * Re-binds the reader via {@link @nhtio/adk!resolveSpoolReader}; throws
+   * {@link @nhtio/adk!E_NO_READER_RESOLVER} when no resolver is registered for the descriptor's tag.
+   *
+   * @param data - The snapshot produced by {@link SpooledArtifact.[ENCODE_METHOD]}.
+   * @returns A fresh {@link SpooledArtifact} backed by a freshly-resolved reader.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): SpooledArtifact {
+    const snapshot = data as { reader: ReaderDescriptor }
+    return new SpooledArtifact(resolveSpoolReader(snapshot.reader))
   }
 
   /**

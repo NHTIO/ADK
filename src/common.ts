@@ -102,6 +102,24 @@ export type { SpoolReader } from './lib/contracts/spool_reader'
 /**
  * @primaryExport
  */
+export type { ReaderDescriptor, LocatorValue } from './lib/contracts/reader_descriptor'
+/**
+ * @primaryExport
+ */
+export {
+  registerMediaReaderResolver,
+  registerSpoolReaderResolver,
+  resolveMediaReader,
+  resolveSpoolReader,
+} from './lib/contracts/reader_resolvers'
+/**
+ * @primaryExport
+ */
+export type { MediaReaderResolver, SpoolReaderResolver } from './lib/contracts/reader_resolvers'
+
+/**
+ * @primaryExport
+ */
 export { implementsByteStore, byteStoreSchema } from './lib/contracts/byte_store'
 /**
  * @primaryExport
@@ -134,7 +152,17 @@ export type { MediaReader } from './lib/contracts/media_reader'
 /**
  * @primaryExport
  */
-export { inMemoryMediaReader, fromFetch, fromWebFile } from './lib/helpers/media_readers'
+export {
+  inMemoryMediaReader,
+  fromFetch,
+  fromWebFile,
+  MEDIA_READER_TAG_IN_MEMORY,
+  MEDIA_READER_TAG_FETCH,
+} from './lib/helpers/media_readers'
+/**
+ * @primaryExport
+ */
+export { encodeBase64, decodeBase64 } from './lib/helpers/base64'
 
 export { SpooledJsonArtifact } from './lib/classes/spooled_json_artifact'
 export type { JsonArtifactFormat } from './lib/classes/spooled_json_artifact'

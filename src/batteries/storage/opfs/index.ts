@@ -47,7 +47,14 @@
  */
 
 import { isInstanceOf } from '@nhtio/adk/guards'
-import type { SpoolReader, SpoolStore } from '@nhtio/adk/common'
+import type { ReaderDescriptor, SpoolReader, SpoolStore } from '@nhtio/adk/common'
+
+/**
+ * Resolver tag for the OPFS spool reader handle. The locator carries the OPFS file `name`; the live OPFS
+ * root directory is re-injected by the consumer-registered resolver on decode (the name alone cannot
+ * re-open the file).
+ */
+export const SPOOL_READER_TAG_OPFS = 'spool:opfs'
 
 // The project's tsconfig limits `lib` to `ESNext`, so the DOM and File System Access types
 // referenced below are not in scope by default — neither `tsc --noEmit` nor the downstream dts
@@ -190,6 +197,18 @@ export interface OpfsSpoolReaderOptions {
    * @defaultValue `10 * 1024 * 1024` (10 MiB)
    */
   streamThresholdBytes?: number
+
+  /**
+   * The stable OPFS file name (key) this reader was opened from.
+   *
+   * @remarks
+   * Optional. When supplied, the reader can emit a serialisable {@link @nhtio/adk!ReaderDescriptor} via
+   * `describe()` so a {@link @nhtio/adk!SpooledArtifact} backed by it round-trips through
+   * `encode()`/`decode()`. {@link OpfsSpoolStore} threads this in automatically; a reader constructed
+   * from a bare file handle with no `name` is not describable (the opaque handle has no serialisable
+   * locator) and the artifact cannot be encoded.
+   */
+  name?: string
 }
 
 interface EagerState {
@@ -245,10 +264,12 @@ const isWorkerScope = (): boolean => {
 export class OpfsSpoolReader implements SpoolReader {
   readonly #handle: OpfsFileHandle
   readonly #threshold: number
+  readonly #name: string | undefined
   #ready: Promise<ReaderState> | undefined
 
   constructor(handle: OpfsFileHandle, opts: OpfsSpoolReaderOptions = {}) {
     this.#handle = handle
+    this.#name = opts.name
     const raw = opts.streamThresholdBytes ?? DEFAULT_STREAM_THRESHOLD_BYTES
     // Allow `Infinity` (forces eager) but reject anything non-finite-negative.
     if (typeof raw !== 'number' || Number.isNaN(raw) || raw < 0) {
@@ -302,6 +323,17 @@ export class OpfsSpoolReader implements SpoolReader {
     const state = await this.#load()
     if (state.mode === 'eager') return state.content
     return state.file.text()
+  }
+
+  describe(): ReaderDescriptor | undefined {
+    // Describable only when the store threaded the stable file name through. A reader built from a bare
+    // opaque handle has no serialisable locator → undefined → encoding the artifact throws
+    // E_READER_NOT_DESCRIBABLE. The live OPFS root is re-injected by the registered resolver on decode.
+    if (typeof this.#name !== 'string') return undefined
+    return {
+      tag: SPOOL_READER_TAG_OPFS,
+      locator: { name: this.#name, streamThresholdBytes: this.#threshold },
+    }
   }
 
   /**
@@ -509,6 +541,7 @@ export class OpfsSpoolStore implements SpoolStore {
       }
     }
     return new OpfsSpoolReader(handle, {
+      name,
       streamThresholdBytes: opts?.streamThresholdBytes ?? this.#defaultThreshold,
     })
   }
@@ -534,6 +567,7 @@ export class OpfsSpoolStore implements SpoolStore {
       throw err
     }
     return new OpfsSpoolReader(handle, {
+      name,
       streamThresholdBytes: opts?.streamThresholdBytes ?? this.#defaultThreshold,
     })
   }

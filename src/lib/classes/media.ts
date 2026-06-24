@@ -3,10 +3,19 @@ import { Registry } from './registry'
 import { isError } from '../utils/guards'
 import { validator } from '@nhtio/validation'
 import { isInstanceOf } from '../utils/guards'
+import { encodeBase64 } from '../helpers/base64'
 import { validateOrThrow } from '../utils/validation'
+import { resolveMediaReader } from '../contracts/reader_resolvers'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import { implementsMediaReader, mediaReaderSchema } from '../contracts/media_reader'
-import { E_INVALID_INITIAL_MEDIA_VALUE, E_NOT_A_MEDIA_READER } from '../exceptions/runtime'
+import {
+  E_INVALID_INITIAL_MEDIA_VALUE,
+  E_NOT_A_MEDIA_READER,
+  E_READER_NOT_DESCRIBABLE,
+} from '../exceptions/runtime'
+import type { AdkEncodableSnapshot } from './encodable'
 import type { MediaReader } from '../contracts/media_reader'
+import type { ReaderDescriptor } from '../contracts/reader_descriptor'
 
 /**
  * The set of supported media kinds.
@@ -199,30 +208,6 @@ export interface SerializedMedia {
   stash: Record<string, MediaStashEntry>
   /** Size of the underlying bytes in bytes, when known. */
   byteLength?: number
-}
-
-/**
- * Cross-environment base64 encoder for a `Uint8Array`.
- *
- * @remarks
- * Prefers Node's `Buffer.from(buf).toString('base64')` when `globalThis.Buffer` exists; otherwise
- * chunk-encodes through `btoa` with a 0x8000-byte window to avoid `Maximum call stack size
- * exceeded` on large buffers.
- */
-const encodeBase64 = (bytes: Uint8Array): string => {
-  const maybeBuffer = (
-    globalThis as { Buffer?: { from(b: Uint8Array): { toString(enc: string): string } } }
-  ).Buffer
-  if (maybeBuffer && typeof maybeBuffer.from === 'function') {
-    return maybeBuffer.from(bytes).toString('base64')
-  }
-  const chunkSize = 0x8000
-  let binary = ''
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize)
-    binary += String.fromCharCode.apply(null, Array.from(chunk) as number[])
-  }
-  return btoa(binary)
 }
 
 /**
@@ -452,6 +437,73 @@ export class Media {
       modalityHazard: this.#modalityHazard,
       stash: this.#stash.all() as Record<string, MediaStashEntry>,
     }
+  }
+
+  /**
+   * Serialise this Media into an `@nhtio/encoder` snapshot — the **handle**, never the bytes.
+   *
+   * @remarks
+   * Emits every metadata field plus the reader's {@link @nhtio/adk!ReaderDescriptor} (via its
+   * `describe()` method). The bytes are not inlined: decode re-binds the reader from the descriptor
+   * through a registered resolver. Throws {@link @nhtio/adk!E_READER_NOT_DESCRIBABLE} when the backing
+   * reader cannot describe itself (e.g. a `fromWebFile` Blob reader) — there is no serialisable handle to
+   * write, and silently dropping the reader would decode into a handle pointing at nothing.
+   *
+   * @returns A snapshot consumed by {@link Media.[DECODE_METHOD]} / the encoder.
+   * @throws {@link @nhtio/adk!E_READER_NOT_DESCRIBABLE} when the reader has no `describe()`.
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    const descriptor = this.#reader.describe?.()
+    if (!descriptor) {
+      throw new E_READER_NOT_DESCRIBABLE(['reader'])
+    }
+    return {
+      id: this.#id,
+      kind: this.#kind,
+      mimeType: this.#mimeType,
+      filename: this.#filename,
+      source: this.#source,
+      trustTier: this.#trustTier,
+      modalityHazard: this.#modalityHazard,
+      stash: this.#stash.all(),
+      reader: descriptor,
+    }
+  }
+
+  /**
+   * Reconstruct a {@link Media} from an {@link Media.[ENCODE_METHOD]} snapshot.
+   *
+   * @remarks
+   * Re-binds the reader from the captured descriptor through the registered resolver
+   * ({@link @nhtio/adk!resolveMediaReader}), then re-validates via the normal constructor. Throws
+   * {@link @nhtio/adk!E_NO_READER_RESOLVER} when no resolver is registered for the descriptor's tag.
+   *
+   * @param data - The snapshot produced by {@link Media.[ENCODE_METHOD]}.
+   * @returns A fully-validated {@link Media} backed by a freshly-resolved reader.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): Media {
+    const snapshot = data as {
+      id: string
+      kind: MediaKind
+      mimeType: string
+      filename: string
+      source?: string
+      trustTier: MediaTrustTier
+      modalityHazard: MediaModalityHazard
+      stash?: Record<string, MediaStashEntry>
+      reader: ReaderDescriptor
+    }
+    return new Media({
+      id: snapshot.id,
+      kind: snapshot.kind,
+      mimeType: snapshot.mimeType,
+      filename: snapshot.filename,
+      source: snapshot.source,
+      trustTier: snapshot.trustTier,
+      modalityHazard: snapshot.modalityHazard,
+      stash: snapshot.stash,
+      reader: resolveMediaReader(snapshot.reader),
+    })
   }
 
   /**

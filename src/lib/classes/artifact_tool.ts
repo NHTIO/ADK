@@ -1,11 +1,13 @@
 import { Tool } from './tool'
-import { validator } from '@nhtio/validation'
 import { isInstanceOf } from '../utils/guards'
 import { E_INVALID_INITIAL_TOOL_VALUE } from '../exceptions/runtime'
+import { validator, decode as decodeSchema } from '@nhtio/validation'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import { validateOrThrow, ValidationException } from '../utils/validation'
 import type { Registry } from './registry'
 import type { Schema } from '@nhtio/validation'
 import type { Tokenizable } from './tokenizable'
+import type { AdkEncodableSnapshot } from './encodable'
 import type { DispatchContext } from '../contracts/dispatch_context'
 
 /**
@@ -179,5 +181,35 @@ export class ArtifactTool extends Tool {
       throw err
     }
     super(raw as never)
+  }
+
+  /**
+   * Serialise this ArtifactTool into an `@nhtio/encoder` snapshot.
+   *
+   * @remarks
+   * Reuses the base {@link Tool.[ENCODE_METHOD]} (function-serialised `handler`, validation-encoded
+   * `inputSchema`, plain config) and strips `artifactConstructor` — which {@link ArtifactTool.schema}
+   * forbids. The handler's closure caveat from {@link Tool.[ENCODE_METHOD]} applies here too.
+   *
+   * @returns A {@link RawArtifactTool}-shaped snapshot (with `inputSchema` as an encoded string).
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    const base = super[ENCODE_METHOD]() as Record<string, unknown>
+    delete base.artifactConstructor
+    return base
+  }
+
+  /**
+   * Reconstruct an {@link ArtifactTool} from an {@link ArtifactTool.[ENCODE_METHOD]} snapshot.
+   *
+   * @param data - The snapshot produced by {@link ArtifactTool.[ENCODE_METHOD]}.
+   * @returns A fully-validated {@link ArtifactTool}.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): ArtifactTool {
+    const snapshot = data as Omit<RawArtifactTool, 'inputSchema'> & { inputSchema: string }
+    return new ArtifactTool({
+      ...snapshot,
+      inputSchema: decodeSchema(snapshot.inputSchema),
+    })
   }
 }

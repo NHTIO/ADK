@@ -8,11 +8,15 @@ import { ToolRegistry } from './tool_registry'
 import { default as remarkGfm } from 'remark-gfm'
 import { toString as mdastToString } from 'mdast-util-to-string'
 import { default as remarkFrontmatter } from 'remark-frontmatter'
+import { resolveSpoolReader } from '../contracts/reader_resolvers'
 import { SpooledArtifact, defaultSerialise } from './spooled_artifact'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import type { Root, Link, Image } from 'mdast'
+import type { AdkEncodableSnapshot } from './encodable'
 import type { SpoolReader } from '../contracts/spool_reader'
 import type { ToolMethodDescriptor } from './spooled_artifact'
 import type { DispatchContext } from '../contracts/dispatch_context'
+import type { ReaderDescriptor } from '../contracts/reader_descriptor'
 
 /**
  * A single heading entry in the document's structural index.
@@ -636,5 +640,30 @@ export class SpooledMarkdownArtifact extends SpooledArtifact {
     const lines = await this.cat(startLine, endLine)
     const ast = processor().parse(lines.join('\n'))
     return mdastToString(ast)
+  }
+
+  /**
+   * Serialise this SpooledMarkdownArtifact into an `@nhtio/encoder` snapshot — the reader **handle**.
+   *
+   * @remarks
+   * The structural index and frontmatter caches are derived and not encoded. Round-trips via
+   * {@link SpooledMarkdownArtifact.[DECODE_METHOD]}.
+   *
+   * @returns A snapshot consumed by {@link SpooledMarkdownArtifact.[DECODE_METHOD]}.
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    return { reader: this.readerDescriptor() }
+  }
+
+  /**
+   * Reconstruct a {@link SpooledMarkdownArtifact} from a
+   * {@link SpooledMarkdownArtifact.[ENCODE_METHOD]} snapshot.
+   *
+   * @param data - The snapshot produced by {@link SpooledMarkdownArtifact.[ENCODE_METHOD]}.
+   * @returns A fresh {@link SpooledMarkdownArtifact} backed by a freshly-resolved reader.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): SpooledMarkdownArtifact {
+    const snapshot = data as { reader: ReaderDescriptor }
+    return new SpooledMarkdownArtifact(resolveSpoolReader(snapshot.reader))
   }
 }

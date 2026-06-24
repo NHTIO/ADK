@@ -15,6 +15,55 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-06-24
+
+### Added
+
+- **Serialization: the ADK primitives now round-trip through [`@nhtio/encoder`](https://encoder.nht.io).**
+  Encode an entire conversation graph — `Message`s with nested `Identity`, `Tokenizable`, and `Media`;
+  `ToolCall`s with their results; `Memory`, `Thought`, `Retrievable`, `Registry` — to a string with
+  `encode()` and rebuild it (instances, not plain objects) with `decode()`. Every primitive implements
+  the encoder's custom-class contract via raw `Symbol.for()` keys, so **the contract adds zero
+  dependency to the core** — `@nhtio/encoder` is an optional peer, pulled in only by the new battery.
+- **New opt-in battery `@nhtio/adk/batteries/encoding`.** Call `registerAdkEncodables()` once at startup,
+  before your first `decode()` — it registers every primitive with the decoder and auto-registers the
+  binding-free reader resolvers (in-memory, fetch). This is the only code that imports `@nhtio/encoder`.
+- **Reader handles round-trip, not bytes.** `Media` and `SpooledArtifact` serialize the *handle* — a
+  tagged, re-openable locator — via a new optional `describe()` method on the `MediaReader` /
+  `SpoolReader` contracts. On decode, a tag→reader resolver registry (`registerMediaReaderResolver` /
+  `registerSpoolReaderResolver`) re-binds the handle to a live reader; for durable stores (flydrive,
+  OPFS) the consumer registers the resolver carrying the live `Disk`/root the locator cannot itself
+  carry. In-memory readers inline their buffer; the fetch reader captures its URL.
+- **New exceptions** `E_READER_NOT_DESCRIBABLE` (encoding a primitive whose reader has no `describe()` —
+  e.g. a `fromWebFile`-backed `Media`) and `E_NO_READER_RESOLVER` (decoding a handle whose tag has no
+  registered resolver), both exported from `@nhtio/adk/exceptions`.
+
+#### Not encodable, by design
+
+- **`TurnGate`** wraps a live pending Promise + `AbortController` — there is no serialized form of "a
+  thing some caller is awaiting", so it deliberately does not implement the contract.
+- **`Tool` handlers serialize by source text only.** A handler that closes over `ctx`, service clients,
+  or config loses those bindings on decode (the captured variables read back `undefined`); a `.bind()`-ed
+  or native handler cannot be serialized at all. `Tool.inputSchema` round-trips losslessly via
+  `@nhtio/validation`'s own `encode`/`decode`. Tools are rarely serialized; when they are, reconstruct
+  dependencies inside the handler body rather than closing over them.
+- **`fromWebFile`-backed `Media`** is not encodable — a browser `Blob` has no re-openable locator and the
+  synchronous encoder cannot drain it. Persist to a media/spool store and wrap in a describable reader
+  first.
+
+This release is **additive — no major bump** (per the `<major>.<YYYYMMDD>.<n>` scheme, the major moves
+only on core-contract breaks). The symbol methods are new surface; the new optional `describe()` on the
+reader contracts is backward-compatible (optional method, duck-typed schemas unchanged); no existing
+primitive constructor or field changed.
+
+### Fixed
+
+- **`Message` with empty `attachments` is no longer mis-rejected by its own serializer.** The
+  newly-added `Message` encode path emitted `attachments: []` for text-only messages, which the message
+  schema's "at least one of content/attachments, and a present `attachments` must be non-empty"
+  cross-field rule then rejected on `decode()`. The encode snapshot now omits `attachments` entirely when
+  empty. Only reachable via the new serialization path — no impact on existing construction.
+
 ## 2026-06-23
 
 ### Fixed

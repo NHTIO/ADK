@@ -1,9 +1,10 @@
 import { DateTime } from 'luxon'
 import { sha256 } from 'js-sha256'
 import { Registry } from './registry'
-import { validator } from '@nhtio/validation'
 import { isInstanceOf, isError } from '../utils/guards'
 import { canonicalStringify } from '../utils/canonical_json'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
+import { validator, encode as encodeSchema, decode as decodeSchema } from '@nhtio/validation'
 import { validateOrThrow, asyncValidateOrThrow, ValidationException } from '../utils/validation'
 import { implementsSpooledArtifactConstructor } from '../contracts/spooled_artifact_constructor'
 import {
@@ -12,6 +13,7 @@ import {
   E_TOOL_DOWNSTREAM_ERROR,
 } from '../exceptions/runtime'
 import type { Media } from './media'
+import type { AdkEncodableSnapshot } from './encodable'
 import type { Schema, Description } from '@nhtio/validation'
 import type { DispatchContext } from '../contracts/dispatch_context'
 import type { SpooledArtifact, SpooledArtifactConstructor } from './spooled_artifact'
@@ -434,5 +436,57 @@ export class Tool<A extends SpooledArtifact = SpooledArtifact> {
       description: this.#description,
       inputSchema: this.#inputSchema.describe(),
     }
+  }
+
+  /**
+   * Serialise this Tool into an `@nhtio/encoder` snapshot.
+   *
+   * @remarks
+   * Three halves with different serialisation strategies:
+   *
+   * - **Plain config** (`name`, `description`, `meta`, flags) — emitted verbatim.
+   * - **`inputSchema`** — delegated to `@nhtio/validation`'s `encode()`, which captures the full schema
+   *   description plus its library version into a compact string; decode rebuilds the live `Schema`.
+   * - **`handler` / `artifactConstructor`** — emitted as **functions**. The encoder's `FunctionSerializer`
+   *   serialises them by **source text** (`fn.toString()`). This is the sharp edge: a handler that
+   *   closes over `ctx`, service clients, or config loses those bindings on decode — only the source
+   *   survives, and the captured variables read back as `undefined`. A `.bind()`-ed or native handler
+   *   cannot be serialised at all and the encoder throws. Tools are rarely serialised in practice; when
+   *   they are, write handlers that reconstruct their dependencies inside the body rather than closing
+   *   over them.
+   *
+   * @returns A {@link RawTool}-shaped snapshot (with `inputSchema` as an encoded string).
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    return {
+      name: this.#name,
+      description: this.#description,
+      inputSchema: encodeSchema(this.#inputSchema),
+      handler: this.#handler,
+      artifactConstructor: this.#artifactConstructor,
+      meta: this.#meta.all(),
+      ephemeral: this.#ephemeral,
+      trusted: this.#trusted,
+      onCollision: this.#onCollision,
+    }
+  }
+
+  /**
+   * Reconstruct a {@link Tool} from a {@link Tool.[ENCODE_METHOD]} snapshot.
+   *
+   * @remarks
+   * Rebuilds the live `Schema` via `@nhtio/validation`'s `decode()`, then re-validates through the
+   * constructor. The rehydrated `handler` carries only its source text — see
+   * {@link Tool.[ENCODE_METHOD]} for the closure caveat.
+   *
+   * @param data - The snapshot produced by {@link Tool.[ENCODE_METHOD]}.
+   * @returns A fully-validated {@link Tool}.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): Tool {
+    const snapshot = data as Omit<RawTool, 'inputSchema'> & { inputSchema: string }
+    return new Tool({
+      ...snapshot,
+      inputSchema: decodeSchema(snapshot.inputSchema),
+    })
   }
 }

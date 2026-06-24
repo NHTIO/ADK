@@ -20,7 +20,13 @@
  */
 
 import { isInstanceOf } from '@nhtio/adk/guards'
-import type { SpoolReader, SpoolStore } from '@nhtio/adk/common'
+import type { ReaderDescriptor, SpoolReader, SpoolStore } from '@nhtio/adk/common'
+
+/**
+ * Resolver tag for the in-memory spool reader handle. The locator inlines the decoded content because an
+ * in-memory reader owns its bytes outright — there is no external store to point at.
+ */
+export const SPOOL_READER_TAG_IN_MEMORY = 'spool:in-memory'
 
 /**
  * Sync in-memory {@link @nhtio/adk!SpoolReader} over a byte-faithful `Uint8Array` body.
@@ -70,6 +76,11 @@ export class InMemorySpoolReader implements SpoolReader {
 
   readAll(): string {
     return this.#content
+  }
+
+  describe(): ReaderDescriptor {
+    // The decoded content IS the backing store — inline it, no external locator exists.
+    return { tag: SPOOL_READER_TAG_IN_MEMORY, locator: { content: this.#content } }
   }
 }
 

@@ -3,9 +3,11 @@ import { Tokenizable } from './tokenizable'
 import { validator } from '@nhtio/validation'
 import { validateOrThrow } from '../utils/validation'
 import { isInstanceOf, isError } from '../utils/guards'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import { E_INVALID_INITIAL_THOUGHT_VALUE } from '../exceptions/runtime'
 import type { DateTime } from 'luxon'
 import type { RawIdentity } from './identity'
+import type { AdkEncodableSnapshot } from './encodable'
 
 /**
  * Plain input object supplied to {@link Thought} at construction time.
@@ -268,5 +270,39 @@ export class Thought {
         configurable: false,
       },
     })
+  }
+
+  /**
+   * Serialise this Thought into an `@nhtio/encoder` snapshot.
+   *
+   * @remarks
+   * Emits a {@link RawThought}-shaped object; `content` is the live {@link @nhtio/adk!Tokenizable},
+   * `identity` the live {@link @nhtio/adk!Identity}, and the temporal fields live Luxon `DateTime`s (the
+   * encoder recurses into each). The vendor-opaque `payload` is passed through as-is — if it holds a
+   * value the encoder cannot serialise, encode throws (standard encoder behaviour). Round-trips via
+   * {@link Thought.[DECODE_METHOD]}, which re-validates through the constructor.
+   *
+   * @returns A {@link RawThought}-shaped snapshot.
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    return {
+      id: this.#id,
+      content: this.#content,
+      identity: this.#identity,
+      payload: this.#payload,
+      replayCompatibility: this.#replayCompatibility,
+      createdAt: this.#createdAt,
+      updatedAt: this.#updatedAt,
+    }
+  }
+
+  /**
+   * Reconstruct a {@link Thought} from a {@link Thought.[ENCODE_METHOD]} snapshot.
+   *
+   * @param data - The snapshot produced by {@link Thought.[ENCODE_METHOD]}.
+   * @returns A fully-validated {@link Thought}.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): Thought {
+    return new Thought(data as RawThought)
   }
 }

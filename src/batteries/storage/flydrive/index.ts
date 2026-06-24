@@ -35,7 +35,14 @@
 import { Disk } from 'flydrive'
 import { Readable } from 'node:stream'
 import { isInstanceOf } from '@nhtio/adk/guards'
-import type { SpoolReader, SpoolStore } from '@nhtio/adk/common'
+import type { ReaderDescriptor, SpoolReader, SpoolStore } from '@nhtio/adk/common'
+
+/**
+ * Resolver tag for the flydrive spool reader handle. The locator carries the flydrive `key`; the live
+ * `Disk` binding is re-injected by the consumer-registered resolver on decode (the key alone cannot
+ * re-open the object store).
+ */
+export const SPOOL_READER_TAG_FLYDRIVE = 'spool:flydrive'
 
 const DEFAULT_STREAM_THRESHOLD_BYTES = 10 * 1024 * 1024 // 10 MiB
 
@@ -159,6 +166,15 @@ export class FlydriveSpoolReader implements SpoolReader {
       offset += view.length
     }
     return new TextDecoder().decode(concat)
+  }
+
+  describe(): ReaderDescriptor {
+    // The flydrive key is the re-openable locator. The live `Disk` is NOT serialised — the
+    // consumer-registered resolver re-injects it on decode (see registerSpoolReaderResolver).
+    return {
+      tag: SPOOL_READER_TAG_FLYDRIVE,
+      locator: { key: this.#key, streamThresholdBytes: this.#threshold },
+    }
   }
 
   /**

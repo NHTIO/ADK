@@ -4,9 +4,11 @@ import { Tokenizable } from './tokenizable'
 import { validator } from '@nhtio/validation'
 import { validateOrThrow } from '../utils/validation'
 import { isInstanceOf, isError } from '../utils/guards'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import { E_INVALID_INITIAL_MESSAGE_VALUE } from '../exceptions/runtime'
 import type { DateTime } from 'luxon'
 import type { RawIdentity } from './identity'
+import type { AdkEncodableSnapshot } from './encodable'
 
 /**
  * The roles a {@link Message} author can hold.
@@ -283,5 +285,43 @@ export class Message {
         configurable: false,
       },
     })
+  }
+
+  /**
+   * Serialise this Message into an `@nhtio/encoder` snapshot.
+   *
+   * @remarks
+   * Emits a {@link RawMessage}-shaped object holding the live nested primitives — `content`
+   * ({@link @nhtio/adk!Tokenizable}), `attachments` ({@link @nhtio/adk!Media}[]), `identity`
+   * ({@link @nhtio/adk!Identity}), and Luxon temporal fields — which the encoder recurses into. A
+   * text-only message round-trips trivially; a message carrying {@link @nhtio/adk!Media} round-trips only
+   * if each attachment's reader is describable (a `fromWebFile`-backed attachment throws
+   * {@link @nhtio/adk!E_READER_NOT_DESCRIBABLE} at encode). The frozen attachments array is copied to a
+   * plain array for the snapshot. Round-trips via {@link Message.[DECODE_METHOD]}.
+   *
+   * @returns A {@link RawMessage}-shaped snapshot.
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    return {
+      id: this.#id,
+      role: this.#role,
+      content: this.#content,
+      // Omit when empty: the schema's cross-field rule treats a present-but-empty `attachments`
+      // array as invalid (it must contain ≥1 entry when supplied). A text-only message has none.
+      ...(this.#attachments.length > 0 ? { attachments: [...this.#attachments] } : {}),
+      identity: this.#identity,
+      createdAt: this.#createdAt,
+      updatedAt: this.#updatedAt,
+    }
+  }
+
+  /**
+   * Reconstruct a {@link Message} from a {@link Message.[ENCODE_METHOD]} snapshot.
+   *
+   * @param data - The snapshot produced by {@link Message.[ENCODE_METHOD]}.
+   * @returns A fully-validated {@link Message}.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): Message {
+    return new Message(data as RawMessage)
   }
 }

@@ -2,7 +2,9 @@ import { dset } from 'dset'
 import { klona } from 'klona'
 import { default as delve } from 'dlv'
 import { isInstanceOf, isObject } from '../utils/guards'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import { E_INVALID_INITIAL_REGISTRY_VALUE } from '../exceptions/runtime'
+import type { AdkEncodableSnapshot } from './encodable'
 
 /**
  * A controlled-mutation key-value store with dot-path access and deep-clone isolation.
@@ -128,5 +130,29 @@ export class Registry {
    */
   all(): Record<string, unknown> {
     return klona(this.#store)
+  }
+
+  /**
+   * Serialise this Registry into an `@nhtio/encoder` snapshot.
+   *
+   * @remarks
+   * The snapshot is a deep clone of the store ({@link Registry.all}). Leaf values that are themselves
+   * registered encodable instances round-trip; anything the encoder cannot serialise throws at encode
+   * time (standard encoder behaviour). Round-trips via {@link Registry.[DECODE_METHOD]}.
+   *
+   * @returns A deep-cloned plain-object snapshot of the store.
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    return this.all()
+  }
+
+  /**
+   * Reconstruct a {@link Registry} from a {@link Registry.[ENCODE_METHOD]} snapshot.
+   *
+   * @param data - The store snapshot produced by {@link Registry.[ENCODE_METHOD]}.
+   * @returns A fresh {@link Registry} seeded with the snapshot.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): Registry {
+    return new Registry(data as Record<string, unknown>)
   }
 }

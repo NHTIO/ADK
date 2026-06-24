@@ -120,6 +120,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
+      '@nhtio/encoder':
+        specifier: ^1.20260624.0
+        version: 1.20260624.0
       '@nhtio/eslint-config':
         specifier: 1.20260518.0
         version: 1.20260518.0(@stylistic/eslint-plugin@5.10.0(eslint@9.39.4(jiti@2.7.0)))(@typescript-eslint/parser@8.60.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(jiti@2.7.0)(prettier@3.8.3)(typescript@5.9.3)
@@ -2069,6 +2072,9 @@ packages:
     peerDependencies:
       '@emnapi/core': ^1.7.1
       '@emnapi/runtime': ^1.7.1
+
+  '@nhtio/encoder@1.20260624.0':
+    resolution: {integrity: sha512-yqzu/Cnd/pkg1GaTg3Rw58cNTLNWjYuwrDnYPZsRHXarkk5QyvS1VCNhblwGM2yOKJoUY7wkHHVfUSY9casR2w==}
 
   '@nhtio/eslint-config@1.20260518.0':
     resolution: {integrity: sha512-oXBpBUKuiluwstmll7hXtumjdL1uXJT0aEvcYERtooENPRC2YLswGqV6pMiT3ePY3I3CMRaDFYhI0I3HuIp/Ug==}
@@ -9311,6 +9317,8 @@ snapshots:
       '@emnapi/runtime': 1.10.0
       '@tybys/wasm-util': 0.10.2
     optional: true
+
+  '@nhtio/encoder@1.20260624.0': {}
 
   '@nhtio/eslint-config@1.20260518.0(@stylistic/eslint-plugin@5.10.0(eslint@9.39.4(jiti@2.7.0)))(@typescript-eslint/parser@8.60.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(jiti@2.7.0)(prettier@3.8.3)(typescript@5.9.3)':
     dependencies:

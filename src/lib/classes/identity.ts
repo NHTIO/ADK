@@ -2,7 +2,9 @@ import { Tokenizable } from './tokenizable'
 import { validator } from '@nhtio/validation'
 import { validateOrThrow } from '../utils/validation'
 import { isInstanceOf, isError } from '../utils/guards'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import { E_INVALID_INITIAL_IDENTITY_VALUE } from '../exceptions/runtime'
+import type { AdkEncodableSnapshot } from './encodable'
 
 /**
  * Plain input object supplied to {@link Identity} at construction time.
@@ -134,5 +136,32 @@ export class Identity {
         configurable: false,
       },
     })
+  }
+
+  /**
+   * Serialise this Identity into an `@nhtio/encoder` snapshot.
+   *
+   * @remarks
+   * Emits a {@link RawIdentity}-shaped object; `representation` is the live {@link @nhtio/adk!Tokenizable}
+   * instance (the encoder recurses into it). Round-trips via {@link Identity.[DECODE_METHOD]}, which
+   * re-validates through the constructor.
+   *
+   * @returns A {@link RawIdentity}-shaped snapshot.
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    return {
+      identifier: this.#identifier,
+      representation: this.#representation,
+    }
+  }
+
+  /**
+   * Reconstruct an {@link Identity} from an {@link Identity.[ENCODE_METHOD]} snapshot.
+   *
+   * @param data - The snapshot produced by {@link Identity.[ENCODE_METHOD]}.
+   * @returns A fully-validated {@link Identity}.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): Identity {
+    return new Identity(data as RawIdentity)
   }
 }

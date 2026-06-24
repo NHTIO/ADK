@@ -3,7 +3,9 @@ import { validator } from '@nhtio/validation'
 import { validateOrThrow } from '../utils/validation'
 import { isInstanceOf, isError } from '../utils/guards'
 import { E_INVALID_INITIAL_MEMORY_VALUE } from '../exceptions/runtime'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import type { DateTime } from 'luxon'
+import type { AdkEncodableSnapshot } from './encodable'
 
 /**
  * Plain input object supplied to {@link Memory} at construction time.
@@ -172,5 +174,36 @@ export class Memory {
         configurable: false,
       },
     })
+  }
+
+  /**
+   * Serialise this Memory into an `@nhtio/encoder` snapshot.
+   *
+   * @remarks
+   * Emits a {@link RawMemory}-shaped object; `content` is the live {@link @nhtio/adk!Tokenizable} and the
+   * temporal fields are live Luxon `DateTime` instances (the encoder recurses into both). Round-trips
+   * via {@link Memory.[DECODE_METHOD]}, which re-validates through the constructor.
+   *
+   * @returns A {@link RawMemory}-shaped snapshot.
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    return {
+      id: this.#id,
+      content: this.#content,
+      confidence: this.#confidence,
+      importance: this.#importance,
+      createdAt: this.#createdAt,
+      updatedAt: this.#updatedAt,
+    }
+  }
+
+  /**
+   * Reconstruct a {@link Memory} from a {@link Memory.[ENCODE_METHOD]} snapshot.
+   *
+   * @param data - The snapshot produced by {@link Memory.[ENCODE_METHOD]}.
+   * @returns A fully-validated {@link Memory}.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): Memory {
+    return new Memory(data as RawMemory)
   }
 }

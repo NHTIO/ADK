@@ -112,6 +112,8 @@ export {
   E_INVALID_LLM_DISPATCH_INPUT,
   E_DISPATCH_PIPELINE_ERROR,
   E_LLM_EXECUTION_EXECUTOR_ERROR,
+  E_READER_NOT_DESCRIBABLE,
+  E_NO_READER_RESOLVER,
 } from './exceptions'
 
 // ── Types (re-exported via `export type *` form) ──────────────────────────────

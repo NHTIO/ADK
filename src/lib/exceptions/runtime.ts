@@ -546,3 +546,57 @@ export const E_LLM_EXECUTION_EXECUTOR_ERROR = createException(
   500,
   false
 )
+
+/**
+ * Thrown when `encode()`-ing a reader-backed primitive ({@link @nhtio/adk!Media},
+ * {@link @nhtio/adk!SpooledArtifact}) whose underlying reader cannot describe itself.
+ *
+ * @remarks
+ * The encoder serialises reader-backed primitives as **handles**, not bytes: the reader emits a
+ * `{ tag, locator }` descriptor (via its optional `describe()` method) and decode re-binds it through a
+ * registered resolver. A reader with no `describe()` has no serialisable handle — there is nothing to
+ * write down. The single printf argument names the offending field (e.g. `"reader"`).
+ *
+ * This is deliberately not silent: dropping the reader would yield a `Media`/`SpooledArtifact` that
+ * decodes into a handle pointing at nothing. The framework refuses to fabricate that. The canonical
+ * trigger is a `fromWebFile`-backed `Media` — a browser `Blob` is not re-openable across a
+ * serialisation boundary, and the encoder is synchronous so it cannot drain the bytes inline. Re-wrap
+ * the bytes in a describable reader (e.g. persist to a spool/media store) before encoding.
+ *
+ * Not fatal — an un-encodable value is a caller condition, not a runner failure.
+ *
+ * @group Primitive Validation
+ */
+export const E_READER_NOT_DESCRIBABLE = createException<[string]>(
+  'E_READER_NOT_DESCRIBABLE',
+  'Cannot encode this value: its %s reader does not implement describe(), so it has no serialisable handle. Back it with a describable reader (a spool/media store) before encoding.',
+  'E_READER_NOT_DESCRIBABLE',
+  422,
+  false
+)
+
+/**
+ * Thrown when `decode()`-ing a reader handle whose `tag` has no registered resolver.
+ *
+ * @remarks
+ * A reader descriptor's `tag` (e.g. `"spool:flydrive"`, `"media:in-memory"`) names the resolver that
+ * re-binds the handle to a live reader. In-memory and fetch resolvers auto-register when the
+ * `@nhtio/adk/batteries/encoding` battery loads; durable-store resolvers (flydrive, OPFS) must be
+ * registered by the consumer **with the live `Disk`/OPFS root** before decoding, because the locator
+ * carries only the key — not the binding. The single printf argument is the unresolved `tag`.
+ *
+ * The fix is always the same: call `registerSpoolReaderResolver(tag, …)` /
+ * `registerMediaReaderResolver(tag, …)` (re-exported from the encoding battery) at application startup,
+ * supplying the same ambient store the bytes were written to.
+ *
+ * Not fatal — a missing resolver is a wiring condition the caller can correct and retry.
+ *
+ * @group Primitive Validation
+ */
+export const E_NO_READER_RESOLVER = createException<[string]>(
+  'E_NO_READER_RESOLVER',
+  'No reader resolver registered for tag "%s". Register one (with its live store binding) before decoding — see the @nhtio/adk/batteries/encoding battery.',
+  'E_NO_READER_RESOLVER',
+  422,
+  false
+)

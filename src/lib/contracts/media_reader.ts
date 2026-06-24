@@ -1,5 +1,6 @@
 import { validator } from '@nhtio/validation'
 import { passesSchema } from '../utils/validation'
+import type { ReaderDescriptor } from './reader_descriptor'
 
 /**
  * Re-openable byte source contract for a Media instance.
@@ -41,6 +42,24 @@ export interface MediaReader {
    * @returns The byte length of the underlying data, or `undefined` when unknown.
    */
   byteLength(): number | undefined | Promise<number | undefined>
+
+  /**
+   * Optionally emit a serialisable {@link ReaderDescriptor} so a {@link @nhtio/adk!Media} backed by this
+   * reader can round-trip through `encode()`/`decode()` as a **handle**.
+   *
+   * @remarks
+   * Synchronous by contract — the encoder's `[ENCODE_METHOD]()` is synchronous and cannot await, so a
+   * reader whose handle is only obtainable asynchronously (e.g. draining a `Blob`) must NOT implement
+   * this method; encoding such a `Media` throws {@link @nhtio/adk!E_READER_NOT_DESCRIBABLE}. The
+   * descriptor describes *where the bytes live* (a key, a URL, or an inlined buffer) — never the live
+   * binding (`Disk`, OPFS root, `fetch`), which the matching resolver re-injects on decode.
+   *
+   * A reader that omits this method is treated as non-describable: the bytes still stream normally at
+   * runtime, the `Media` simply cannot be serialised.
+   *
+   * @returns A tagged, serialisable handle, or `undefined`/absent when the reader cannot describe itself.
+   */
+  describe?(): ReaderDescriptor | undefined
 }
 
 /**

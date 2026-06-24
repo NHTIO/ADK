@@ -2,8 +2,10 @@ import { getEncoding } from 'js-tiktoken'
 import { validator } from '@nhtio/validation'
 import { isInstanceOf } from '../utils/guards'
 import { LlamaTokenizer } from 'llama-tokenizer-js'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import { fromPreTrained as geminiFromPreTrained } from '@lenml/tokenizer-gemini'
 import type { Tiktoken } from 'js-tiktoken'
+import type { AdkEncodableSnapshot } from './encodable'
 
 /**
  * The set of supported token encoding identifiers.
@@ -289,6 +291,30 @@ export class Tokenizable {
    */
   public static isTokenizable(value: unknown): value is Tokenizable {
     return isInstanceOf(value, 'Tokenizable', Tokenizable)
+  }
+
+  /**
+   * Serialise this Tokenizable into an `@nhtio/encoder` snapshot.
+   *
+   * @remarks
+   * The wrapped string is the entire state; the per-encoding token-count cache is derived and
+   * deliberately not encoded (it rebuilds lazily on demand after decode). Round-trips via
+   * {@link Tokenizable.[DECODE_METHOD]}.
+   *
+   * @returns The wrapped string.
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    return this.toString()
+  }
+
+  /**
+   * Reconstruct a {@link Tokenizable} from an {@link Tokenizable.[ENCODE_METHOD]} snapshot.
+   *
+   * @param data - The wrapped string produced by {@link Tokenizable.[ENCODE_METHOD]}.
+   * @returns A fresh {@link Tokenizable} over the same string.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): Tokenizable {
+    return new Tokenizable(data as string)
   }
 }
 

@@ -4,8 +4,10 @@ import { validator } from '@nhtio/validation'
 import { SpooledArtifact } from './spooled_artifact'
 import { validateOrThrow } from '../utils/validation'
 import { isObject, isInstanceOf, isError } from '../utils/guards'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import { E_INVALID_INITIAL_TOOL_CALL_VALUE } from '../exceptions/runtime'
 import type { DateTime } from 'luxon'
+import type { AdkEncodableSnapshot } from './encodable'
 
 /**
  * Union of every shape a {@link ToolCall.results} field may carry.
@@ -385,5 +387,45 @@ export class ToolCall {
         configurable: false,
       },
     })
+  }
+
+  /**
+   * Serialise this ToolCall into an `@nhtio/encoder` snapshot.
+   *
+   * @remarks
+   * Emits a {@link RawToolCall}-shaped object. `results` is the live {@link ToolCallResults} union —
+   * a {@link @nhtio/adk!Tokenizable}, {@link @nhtio/adk!SpooledArtifact}(s), or {@link @nhtio/adk!Media}(s) —
+   * which the encoder recurses into; reader-backed results round-trip as handles (and throw
+   * {@link @nhtio/adk!E_READER_NOT_DESCRIBABLE} if a backing reader cannot describe itself). The `args`
+   * object and the producer-supplied `checksum` are emitted verbatim, so the constructor's
+   * checksum re-validation passes on decode. Round-trips via {@link ToolCall.[DECODE_METHOD]}.
+   *
+   * @returns A {@link RawToolCall}-shaped snapshot.
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    return {
+      id: this.#id,
+      tool: this.#tool,
+      args: this.#args,
+      checksum: this.#checksum,
+      isComplete: this.#isComplete,
+      isError: this.#isError,
+      results: this.#results,
+      fromArtifactTool: this.#fromArtifactTool,
+      inline: this.#inline,
+      createdAt: this.#createdAt,
+      updatedAt: this.#updatedAt,
+      completedAt: this.#completedAt,
+    }
+  }
+
+  /**
+   * Reconstruct a {@link ToolCall} from a {@link ToolCall.[ENCODE_METHOD]} snapshot.
+   *
+   * @param data - The snapshot produced by {@link ToolCall.[ENCODE_METHOD]}.
+   * @returns A fully-validated {@link ToolCall}.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): ToolCall {
+    return new ToolCall(data as RawToolCall)
   }
 }

@@ -4,10 +4,14 @@ import { validator } from '@nhtio/validation'
 import { ArtifactTool } from './artifact_tool'
 import { ToolRegistry } from './tool_registry'
 import { isInstanceOf, isObject } from '../utils/guards'
+import { resolveSpoolReader } from '../contracts/reader_resolvers'
 import { SpooledArtifact, defaultSerialise } from './spooled_artifact'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
+import type { AdkEncodableSnapshot } from './encodable'
 import type { SpoolReader } from '../contracts/spool_reader'
 import type { ToolMethodDescriptor } from './spooled_artifact'
 import type { DispatchContext } from '../contracts/dispatch_context'
+import type { ReaderDescriptor } from '../contracts/reader_descriptor'
 
 /**
  * The set of JSON-derived formats that {@link SpooledJsonArtifact} can handle.
@@ -442,5 +446,32 @@ export class SpooledJsonArtifact<T = unknown> extends SpooledArtifact {
    */
   async json_pluck(path: string): Promise<unknown[]> {
     return this.json_get(path)
+  }
+
+  /**
+   * Serialise this SpooledJsonArtifact into an `@nhtio/encoder` snapshot — the reader **handle** plus
+   * the `format` discriminator.
+   *
+   * @remarks
+   * Overrides {@link SpooledArtifact.[ENCODE_METHOD]} to carry the constructor's `format` hint (the
+   * parsed-record cache is derived and not encoded). Round-trips via
+   * {@link SpooledJsonArtifact.[DECODE_METHOD]}.
+   *
+   * @returns A snapshot consumed by {@link SpooledJsonArtifact.[DECODE_METHOD]}.
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    return { reader: this.readerDescriptor(), format: this.#format }
+  }
+
+  /**
+   * Reconstruct a {@link SpooledJsonArtifact} from a {@link SpooledJsonArtifact.[ENCODE_METHOD]}
+   * snapshot.
+   *
+   * @param data - The snapshot produced by {@link SpooledJsonArtifact.[ENCODE_METHOD]}.
+   * @returns A fresh {@link SpooledJsonArtifact} backed by a freshly-resolved reader.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): SpooledJsonArtifact {
+    const snapshot = data as { reader: ReaderDescriptor; format?: JsonArtifactFormat }
+    return new SpooledJsonArtifact(resolveSpoolReader(snapshot.reader), snapshot.format)
   }
 }

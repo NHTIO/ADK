@@ -3,9 +3,11 @@ import { validator } from '@nhtio/validation'
 import { SpooledArtifact } from './spooled_artifact'
 import { validateOrThrow } from '../utils/validation'
 import { isInstanceOf, isError } from '../utils/guards'
+import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import { E_INVALID_INITIAL_RETRIEVABLE_VALUE } from '../exceptions/runtime'
 import type { DateTime } from 'luxon'
 import type { TokenEncoding } from './tokenizable'
+import type { AdkEncodableSnapshot } from './encodable'
 
 /**
  * Trust-tier discriminator declared by the retrieval middleware at construction time. Drives
@@ -284,5 +286,39 @@ export class Retrievable {
     return SpooledArtifact.isSpooledArtifact(this.#content)
       ? this.#content.asString()
       : this.#content.toString()
+  }
+
+  /**
+   * Serialise this Retrievable into an `@nhtio/encoder` snapshot.
+   *
+   * @remarks
+   * Emits a {@link RawRetrievable}-shaped object; `content` is the live {@link @nhtio/adk!Tokenizable} or
+   * {@link @nhtio/adk!SpooledArtifact} (the encoder recurses — a reader-backed artifact round-trips as a
+   * handle, throwing {@link @nhtio/adk!E_READER_NOT_DESCRIBABLE} if its reader cannot describe itself).
+   * Round-trips via {@link Retrievable.[DECODE_METHOD]}, which re-validates through the constructor.
+   *
+   * @returns A {@link RawRetrievable}-shaped snapshot.
+   */
+  [ENCODE_METHOD](): AdkEncodableSnapshot {
+    return {
+      id: this.#id,
+      content: this.#content,
+      trustTier: this.#trustTier,
+      source: this.#source,
+      kind: this.#kind,
+      score: this.#score,
+      createdAt: this.#createdAt,
+      updatedAt: this.#updatedAt,
+    }
+  }
+
+  /**
+   * Reconstruct a {@link Retrievable} from a {@link Retrievable.[ENCODE_METHOD]} snapshot.
+   *
+   * @param data - The snapshot produced by {@link Retrievable.[ENCODE_METHOD]}.
+   * @returns A fully-validated {@link Retrievable}.
+   */
+  static [DECODE_METHOD](data: AdkEncodableSnapshot): Retrievable {
+    return new Retrievable(data as RawRetrievable)
   }
 }
