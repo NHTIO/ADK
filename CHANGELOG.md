@@ -15,6 +15,26 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-06-23
+
+### Fixed
+
+- **`Tokenizable` now caches the tiktoken encoder instead of rebuilding it per call**
+  (reported against `1.20260612.0` from a Node/AdonisJS host embedding the ADK). `js-tiktoken`'s
+  `getEncoding` has no internal cache — every call does `new Tiktoken(<ranks>)`, parsing the full
+  BPE rank table (~800 ms for `o200k_base`), which is ~1000× the cost of the `encode()` that
+  follows. The tiktoken backend was the one estimator that never got the lazy-singleton treatment
+  the Gemini and Llama backends already had, so a fresh encoder was constructed on **every**
+  `estimateTokens` invocation that missed the per-value memo. On a tool-heavy turn — where a
+  battery re-measures an accumulating dispatch context once per iteration — this rebuilt the BPE
+  table O(results × iterations) times, saturating a single-threaded host's event loop (CPU pegged,
+  RSS oscillating multi-GB under GC of the repeatedly-allocated vocabulary, co-tenant HTTP
+  starved). The encoder is now memoized in a module-level `Map<TokenEncoding, Tiktoken>`, mirroring
+  the existing Gemini/Llama singletons; construction drops to once per encoding per process.
+  Behaviour-preserving (`Tiktoken` instances are stateless and reusable), benefits every
+  tokenization path ADK-wide, and is the single highest-leverage change against the reported
+  event-loop starvation.
+
 ## 2026-06-12
 
 ### Added

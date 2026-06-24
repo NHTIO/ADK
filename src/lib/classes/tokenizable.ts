@@ -67,6 +67,15 @@ const stringOrTokenizableSchema = validator.alternatives(
 let geminiTokenizerInstance: ReturnType<typeof geminiFromPreTrained> | undefined
 let llamaTokenizerInstance: InstanceType<typeof LlamaTokenizer> | undefined
 
+// js-tiktoken's `getEncoding` has no internal cache — each call does `new Tiktoken(<ranks>)`,
+// parsing the full BPE rank table (~800ms for o200k_base). Building the encoder dwarfs the
+// subsequent `encode()` (~0.6ms) by ~1000×, so a fresh encoder per `estimateTokens` call turns
+// repeated counting (e.g. re-measuring an accumulating dispatch context every iteration) into
+// O(iterations) encoder rebuilds that monopolise a single-threaded host. Cache the encoder per
+// encoding, mirroring the Gemini/Llama singletons above — Tiktoken instances are stateless and
+// safe to reuse across all Tokenizable instances.
+const tiktokenEncoderInstances = new Map<TokenEncoding, Tiktoken>()
+
 const getGeminiTokenizer = () => {
   if (!geminiTokenizerInstance) {
     geminiTokenizerInstance = geminiFromPreTrained()
@@ -79,6 +88,15 @@ const getLlamaTokenizer = () => {
     llamaTokenizerInstance = new LlamaTokenizer()
   }
   return llamaTokenizerInstance
+}
+
+const getTiktokenEncoder = (encoding: TokenEncoding): Tiktoken => {
+  let enc = tiktokenEncoderInstances.get(encoding)
+  if (!enc) {
+    enc = getEncoding(encoding as any)
+    tiktokenEncoderInstances.set(encoding, enc)
+  }
+  return enc
 }
 
 /**
@@ -131,7 +149,7 @@ export class Tokenizable {
 
     const estimateTokensWithTiktoken = (encoding: TokenEncoding): number => {
       try {
-        const enc: Tiktoken = getEncoding(encoding as any)
+        const enc: Tiktoken = getTiktokenEncoder(encoding)
         return enc.encode(this.#value, []).length
       } catch {
         return Number.POSITIVE_INFINITY
