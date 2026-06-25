@@ -77,6 +77,11 @@ export {
   extractReasoningFields,
 } from '../openai_chat_completions/helpers'
 
+// Re-export the shared text-parser layer so consumers import everything from this battery's barrel.
+// LiteRT-LM (v0.13.1) is text-only: tool calls + reasoning arrive as text in `content`, parsed here.
+export * from '../chat_common/tool_parsers'
+export * from '../chat_common/reasoning_parsers'
+
 // ── LiteRT-native mappers ─────────────────────────────────────────────────────────────────────────
 
 /**
@@ -431,30 +436,39 @@ export const defaultBuildLiteRtConversationInput = buildLiteRtConversationInput
  * A streaming accumulator over LiteRT `ReadableStream<Message>` chunks.
  *
  * @remarks
- * Each chunk is a partial {@link LiteRtMessage}. The accumulator handles BOTH delivery conventions —
- * incremental deltas (append) and full-accumulated snapshots (replace) — by detecting, per field,
- * whether the incoming value extends the running buffer (`startsWith`) or is a fresh fragment. It
- * separates assistant text (`content`), thought/channel text (`channels`), and `tool_calls`.
+ * Each chunk is a partial {@link LiteRtMessage}. The `@litert-lm/core` v0.13.1 JS runtime is
+ * **text-in / text-out**: it emits `content` only and does NOT populate `tool_calls` or `channels` on
+ * output (those wire fields exist for feeding history back IN). Tool calls and reasoning come out as
+ * **raw text inside `content`**, in the model family's own format — the adapter parses them out after
+ * the stream drains via the shared tool-call / reasoning parser layer.
+ *
+ * So the accumulator collects assistant `content` text only, handling BOTH delivery conventions —
+ * incremental deltas (append) and full-accumulated snapshots (replace) — by detecting whether the
+ * incoming value extends the running buffer (`startsWith`) or is a fresh fragment. It also tolerates
+ * `content` arriving as a `MessageContentItem[]` by concatenating the text items.
  */
 export interface LiteRtStreamAccumulator {
-  /** Feed one chunk; returns the per-field newly-appended text (for incremental reporting). */
-  feed(chunk: LiteRtMessage): {
-    contentDelta: string
-    channelDeltas: Array<{ channel: string; delta: string }>
-  }
+  /** Feed one chunk; returns the newly-appended content text (for incremental reporting). */
+  feed(chunk: LiteRtMessage): { contentDelta: string }
   /** Final assembled content text. */
   content(): string
-  /** Final assembled channel (thought) text, keyed by channel name. */
-  channels(): Record<string, string>
-  /** Final assembled tool calls. */
-  toolCalls(): Array<{ name: string; arguments: Record<string, unknown> }>
+}
+
+/** Extract the text from a chunk's `content` (string or text-item array). */
+const chunkContentText = (content: LiteRtMessage['content']): string => {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((i) => i.type === 'text' && typeof i.text === 'string')
+      .map((i) => i.text as string)
+      .join('')
+  }
+  return ''
 }
 
 /** Create a {@link LiteRtStreamAccumulator}. */
 export const createLiteRtStreamAccumulator = (): LiteRtStreamAccumulator => {
   let contentBuf = ''
-  const channelBufs = new Map<string, string>()
-  const calls: Array<{ name: string; arguments: Record<string, unknown> }> = []
 
   // Append `incoming` onto `prev`, tolerating either delta or full-accumulated delivery.
   const merge = (prev: string, incoming: string): { next: string; delta: string } => {
@@ -470,40 +484,13 @@ export const createLiteRtStreamAccumulator = (): LiteRtStreamAccumulator => {
 
   return {
     feed(chunk) {
-      let contentDelta = ''
-      const channelDeltas: Array<{ channel: string; delta: string }> = []
-
-      if (typeof chunk.content === 'string' && chunk.content.length > 0) {
-        const { next, delta } = merge(contentBuf, chunk.content)
-        contentBuf = next
-        contentDelta = delta
-      }
-      if (chunk.channels && typeof chunk.channels === 'object') {
-        for (const [channel, value] of Object.entries(chunk.channels)) {
-          if (typeof value !== 'string' || value.length === 0) continue
-          const { next, delta } = merge(channelBufs.get(channel) ?? '', value)
-          channelBufs.set(channel, next)
-          if (delta.length > 0) channelDeltas.push({ channel, delta })
-        }
-      }
-      if (Array.isArray(chunk.tool_calls)) {
-        for (const tc of chunk.tool_calls) {
-          const fn = tc?.function
-          if (!fn || typeof fn.name !== 'string') continue
-          calls.push({
-            name: fn.name,
-            arguments:
-              fn.arguments && typeof fn.arguments === 'object'
-                ? (fn.arguments as Record<string, unknown>)
-                : {},
-          })
-        }
-      }
-      return { contentDelta, channelDeltas }
+      const text = chunkContentText(chunk.content)
+      if (text.length === 0) return { contentDelta: '' }
+      const { next, delta } = merge(contentBuf, text)
+      contentBuf = next
+      return { contentDelta: delta }
     },
     content: () => contentBuf,
-    channels: () => Object.fromEntries(channelBufs),
-    toolCalls: () => calls,
   }
 }
 

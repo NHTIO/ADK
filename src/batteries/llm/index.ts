@@ -48,3 +48,34 @@ export type {
   OllamaHelpers,
   OllamaAdapterOptions,
 } from './ollama'
+
+export { LiteRtLmAdapter } from './litert_lm'
+export { liteRtLmOptionsSchema } from './litert_lm'
+export { validateOptions as validateLiteRtLmOptions } from './litert_lm'
+export {
+  E_INVALID_LITERT_LM_OPTIONS,
+  E_LITERT_LM_CONTEXT_OVERFLOW,
+  E_LITERT_LM_STREAM_ERROR,
+  E_LITERT_LM_INVALID_TOOL_CALL_ARGS,
+} from './litert_lm'
+export type { LiteRtLmAdapterOptions, LiteRtLmEngine, LiteRtLmConversation } from './litert_lm'
+
+export { TransformersJsAdapter } from './transformers_js'
+export { transformersJsOptionsSchema } from './transformers_js'
+export { validateOptions as validateTransformersJsOptions } from './transformers_js'
+export {
+  E_INVALID_TRANSFORMERS_JS_OPTIONS,
+  E_TRANSFORMERS_JS_CONTEXT_OVERFLOW,
+  E_TRANSFORMERS_JS_STREAM_ERROR,
+  E_TRANSFORMERS_JS_INVALID_TOOL_CALL_ARGS,
+  E_TRANSFORMERS_JS_TOOL_PARSE_FAILED,
+} from './transformers_js'
+export type {
+  TransformersJsAdapterOptions,
+  TransformersJsPipeline,
+  TransformersJsMessage,
+  ToolCallParserName,
+  ToolCallParserFn,
+  ReasoningParserName,
+  ReasoningParserFn,
+} from './transformers_js'

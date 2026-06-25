@@ -303,14 +303,11 @@ describe('LiteRtLmAdapter — engine invocation', () => {
     expect(ctx._stored.messages[0]?.content?.toString()).toBe('hello!')
   })
 
-  it('streaming: channels surface as thoughts', async () => {
-    const h = makeEngine({
-      chunks: [
-        { channels: { thinking: 'let me ' } as never },
-        { channels: { thinking: 'let me think' } as never, content: 'answer' },
-      ],
-    })
-    const adapter = new LiteRtLmAdapter({ model: 'm', stream: true, engine: h.engine as never })
+  it('reasoning in content text surfaces as thoughts (LiteRT is text-only)', async () => {
+    // The v0.13.1 JS runtime emits text only — reasoning arrives as <think> markup inside content,
+    // parsed out by the shared reasoning parser. (channels/tool_calls are never populated on output.)
+    const h = makeEngine({ message: { content: '<think>let me think</think>answer' } })
+    const adapter = new LiteRtLmAdapter({ model: 'm', stream: false, engine: h.engine as never })
     const ctx = makeCtx()
     await adapter.executor()(ctx, makeHelpers())
     expect(ctx._stored.thoughts[0]?.content?.toString()).toBe('let me think')
@@ -364,14 +361,12 @@ describe('LiteRtLmAdapter — tool calls', () => {
       handler: (args: unknown) => `echoed: ${(args as { text: string }).text}`,
     })
 
-  it('non-streaming tool_calls → executes the tool, stores result, no ack', async () => {
+  // LiteRT v0.13.1 is text-only: tool calls arrive as family-specific text in `content`, parsed by
+  // the shared tool-call parser layer (default 'auto'). These use the Hermes <tool_call> format.
+
+  it('non-streaming tool call (text in content) → executes the tool, stores result, no ack', async () => {
     const h = makeEngine({
-      message: {
-        content: '',
-        tool_calls: [
-          { type: 'function', function: { name: 'echo', arguments: { text: 'hi' } } },
-        ] as never,
-      },
+      message: { content: '<tool_call>{"name":"echo","arguments":{"text":"hi"}}</tool_call>' },
     })
     const adapter = new LiteRtLmAdapter({
       model: 'm',
@@ -389,14 +384,10 @@ describe('LiteRtLmAdapter — tool calls', () => {
     expect(ctx.ack).not.toHaveBeenCalled()
   })
 
-  it('streaming tool_calls → executes the tool', async () => {
+  it('streaming tool call (text in content) → executes the tool', async () => {
     const h = makeEngine({
       chunks: [
-        {
-          tool_calls: [
-            { type: 'function', function: { name: 'echo', arguments: { text: 'streamed' } } },
-          ] as never,
-        },
+        { content: '<tool_call>{"name":"echo","arguments":{"text":"streamed"}}</tool_call>' },
       ],
     })
     const adapter = new LiteRtLmAdapter({ model: 'm', stream: true, engine: h.engine as never })
@@ -409,13 +400,16 @@ describe('LiteRtLmAdapter — tool calls', () => {
   })
 
   it('unknown tool → stored as an error tool call', async () => {
-    const h = makeEngine({
-      message: {
-        content: '',
-        tool_calls: [{ type: 'function', function: { name: 'nope', arguments: {} } }] as never,
-      },
+    // Use a custom parser to surface a call to a tool that isn't registered (the bundled 'auto'
+    // parsers guard llama3_json/pythonic on callee∈toolNames; a custom fn bypasses that to test the
+    // adapter's not-found handling directly).
+    const h = makeEngine({ message: { content: 'CALL nope' } })
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      engine: h.engine as never,
+      toolCallParser: () => ({ calls: [{ name: 'nope', arguments: {} }], cleanedText: '' }),
     })
-    const adapter = new LiteRtLmAdapter({ model: 'm', stream: false, engine: h.engine as never })
     const ctx = makeCtx({ tools: new ToolRegistry([echoTool()]) })
     await adapter.executor()(ctx, makeHelpers())
     const stored = ctx._stored.toolCalls[0]
@@ -423,21 +417,16 @@ describe('LiteRtLmAdapter — tool calls', () => {
     expect((stored.results as Tokenizable).toString()).toContain('Tool not found: nope')
   })
 
-  it('malformed tool args (array, not object) → stored as an invalid-args error', async () => {
+  it('tool-call markup does not leak into the persisted assistant message', async () => {
     const h = makeEngine({
-      message: {
-        content: '',
-        tool_calls: [
-          { type: 'function', function: { name: 'echo', arguments: [1, 2, 3] } },
-        ] as never,
-      },
+      message: { content: 'Sure!<tool_call>{"name":"echo","arguments":{"text":"hi"}}</tool_call>' },
     })
     const adapter = new LiteRtLmAdapter({ model: 'm', stream: false, engine: h.engine as never })
     const ctx = makeCtx({ tools: new ToolRegistry([echoTool()]) })
     await adapter.executor()(ctx, makeHelpers())
-    const stored = ctx._stored.toolCalls[0]
-    expect(stored.isError).toBe(true)
-    expect((stored.results as Tokenizable).toString()).toContain('must be a JSON object')
+    const msg = ctx._stored.messages[0]?.content?.toString() ?? ''
+    expect(msg).not.toContain('<tool_call>')
+    expect(msg).toBe('Sure!')
   })
 })
 

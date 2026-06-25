@@ -1,23 +1,23 @@
 /**
- * Browser/WebGPU executor adapter for Google's LiteRT-LM (`@litert-lm/core`).
+ * Dual-environment (Node + browser) executor adapter for transformers.js (`@huggingface/transformers`).
  *
- * @module @nhtio/adk/batteries/llm/litert_lm/adapter
+ * @module @nhtio/adk/batteries/llm/transformers_js/adapter
  *
  * @remarks
- * On-device LLM inference via WebGPU + a bundled wasm runtime, `.litertlm` models. Unlike the WebLLM
- * battery (a thin extension of the OpenAI Chat Completions wire shape), LiteRT-LM has its **own** API —
- * `Engine.create() → engine.createConversation({ preface }) → conversation.sendMessageStreaming():
- * ReadableStream<Message>` — with native `Message`/`Tool`/`tool_calls`/`tool_response` shapes (tool-call
- * `arguments` arrive as a parsed object, not a JSON string). So this is a standalone adapter that reuses
- * the ADK's format-agnostic render helpers but maps history/tools/results to LiteRT's shapes.
+ * On-device text generation via ONNX Runtime — `onnxruntime-node` (native) in Node, `onnxruntime-web`
+ * (WASM + WebGPU) in the browser, auto-selected by the package. So this battery is
+ * **environment-neutral**: it does NOT gate on WebGPU.
+ *
+ * **transformers.js is text-in / text-out.** It injects tool definitions into the chat template but
+ * does NOT return structured tool calls or reasoning — the model emits both as **family-specific raw
+ * text**. This adapter parses them out via the shared, configurable parser layer (`toolCallParser` /
+ * `reasoningParser`, both defaulting to `'auto'`): after generation, the reasoning parser pulls
+ * thinking into ADK Thoughts and the tool-call parser pulls calls into ADK ToolCalls, leaving clean
+ * prose as the assistant Message.
  *
  * Three pluggable layers mirror the other LLM batteries: swappable translation helpers, three-layer
- * options merging (constructor → `executor()` overrides → `ctx.stash.liteRtLm`), and an
- * injectable/lazy engine (`engine` or `createEngine`, defaulting to a dynamic `@litert-lm/core` import).
- *
- * **The published `@litert-lm/core` docs lag the library** — every wire field here is mapped against the
- * installed package's type declarations, the source of truth. The dependency is young (pinned exact);
- * re-verify on upgrade.
+ * options merging (constructor → `executor()` overrides → `ctx.stash.transformersJs`), and an
+ * injectable/lazy pipeline (`pipeline` or `createPipeline`, defaulting to a dynamic import).
  */
 
 import { DateTime } from 'luxon'
@@ -40,10 +40,9 @@ import {
   ArtifactTool,
 } from '@nhtio/adk/common'
 import {
-  E_INVALID_LITERT_LM_OPTIONS,
-  E_LITERT_LM_CONTEXT_OVERFLOW,
-  E_LITERT_LM_STREAM_ERROR,
-  E_LITERT_LM_INVALID_TOOL_CALL_ARGS,
+  E_TRANSFORMERS_JS_CONTEXT_OVERFLOW,
+  E_TRANSFORMERS_JS_STREAM_ERROR,
+  E_TRANSFORMERS_JS_INVALID_TOOL_CALL_ARGS,
 } from './exceptions'
 import {
   defaultDescriptionToChatCompletionsJsonSchema,
@@ -59,42 +58,23 @@ import {
   defaultRenderThought,
   defaultFilterThoughts,
   defaultRenderChatCompletionsSystemPrompt,
-  defaultToolsToLiteRtTools,
-  defaultRenderLiteRtToolResult,
-  defaultBuildLiteRtConversationInput,
-  defaultCreateLiteRtStreamAccumulator,
+  defaultToolsToTransformersJsTools,
+  defaultRenderTransformersJsToolResult,
+  defaultBuildTransformersJsMessages,
+  defaultCreateTransformersJsStreamAccumulator,
 } from './helpers'
 import type { Tool } from '@nhtio/adk/common'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { ParsedToolCall } from '../chat_common/tool_parsers'
+import type { TransformersJsAdapterOptions, TransformersJsPipeline } from './types'
 import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
-import type {
-  LiteRtLmAdapterOptions,
-  LiteRtLmEngine,
-  LiteRtLmConversation,
-  LiteRtMessage,
-  LiteRtMessageContentItem,
-  LiteRtEngineSettings,
-  LiteRtConversationConfig,
-  LiteRtSessionConfig,
-} from './types'
-
-/** Markers that signal the start of tool-call / reasoning markup — used to stop streaming prose. */
-const TEXT_MARKUP_MARKERS = [
-  '<tool_call>',
-  '<|tool_call>',
-  '<|channel',
-  '<think',
-  '[TOOL_CALLS]',
-  '<function=',
-]
 
 // ─── Option merging (constructor → executor overrides → stash) ────────────────────────────────────
 
 const mergeHelpers = (
-  layers: ReadonlyArray<Partial<NonNullable<LiteRtLmAdapterOptions['helpers']>> | undefined>
-): Partial<NonNullable<LiteRtLmAdapterOptions['helpers']>> | undefined => {
-  let merged: Partial<NonNullable<LiteRtLmAdapterOptions['helpers']>> | undefined
+  layers: ReadonlyArray<Partial<NonNullable<TransformersJsAdapterOptions['helpers']>> | undefined>
+): Partial<NonNullable<TransformersJsAdapterOptions['helpers']>> | undefined => {
+  let merged: Partial<NonNullable<TransformersJsAdapterOptions['helpers']>> | undefined
   for (const layer of layers) {
     if (!layer) continue
     merged = { ...(merged ?? {}), ...layer }
@@ -103,11 +83,11 @@ const mergeHelpers = (
 }
 
 const mergeOptions = (
-  baseline: LiteRtLmAdapterOptions,
-  exec: Partial<LiteRtLmAdapterOptions> | undefined,
-  stash: Partial<LiteRtLmAdapterOptions> | undefined
-): Partial<LiteRtLmAdapterOptions> => {
-  const layers = [baseline as Partial<LiteRtLmAdapterOptions>, exec ?? {}, stash ?? {}]
+  baseline: TransformersJsAdapterOptions,
+  exec: Partial<TransformersJsAdapterOptions> | undefined,
+  stash: Partial<TransformersJsAdapterOptions> | undefined
+): Partial<TransformersJsAdapterOptions> => {
+  const layers = [baseline as Partial<TransformersJsAdapterOptions>, exec ?? {}, stash ?? {}]
   const out: Record<string, unknown> = {}
   for (const layer of layers) {
     for (const [k, v] of Object.entries(layer)) {
@@ -118,7 +98,7 @@ const mergeOptions = (
   }
   const helpers = mergeHelpers(layers.map((l) => l.helpers))
   if (helpers !== undefined) out.helpers = helpers
-  return out as Partial<LiteRtLmAdapterOptions>
+  return out as Partial<TransformersJsAdapterOptions>
 }
 
 // ─── Helper resolution (fall back to bundled defaults per field) ──────────────────────────────────
@@ -137,64 +117,71 @@ interface ResolvedHelpers {
   renderThought: typeof defaultRenderThought
   filterThoughts: typeof defaultFilterThoughts
   renderChatCompletionsSystemPrompt: typeof defaultRenderChatCompletionsSystemPrompt
-  toolsToLiteRtTools: typeof defaultToolsToLiteRtTools
-  renderLiteRtToolResult: typeof defaultRenderLiteRtToolResult
-  buildLiteRtConversationInput: typeof defaultBuildLiteRtConversationInput
-  createLiteRtStreamAccumulator: typeof defaultCreateLiteRtStreamAccumulator
+  toolsToTransformersJsTools: typeof defaultToolsToTransformersJsTools
+  renderTransformersJsToolResult: typeof defaultRenderTransformersJsToolResult
+  buildTransformersJsMessages: typeof defaultBuildTransformersJsMessages
+  createTransformersJsStreamAccumulator: typeof defaultCreateTransformersJsStreamAccumulator
 }
 
 const resolveHelpers = (
-  overrides: Partial<LiteRtLmAdapterOptions['helpers']> | undefined
+  overrides: Partial<TransformersJsAdapterOptions['helpers']> | undefined
 ): ResolvedHelpers => {
   const src = (overrides ?? {}) as Record<string, unknown>
+  const pick = <K extends keyof ResolvedHelpers>(
+    key: K,
+    dflt: ResolvedHelpers[K]
+  ): ResolvedHelpers[K] => (src[key as string] as ResolvedHelpers[K]) ?? dflt
   return {
-    descriptionToChatCompletionsJsonSchema:
-      (src.descriptionToChatCompletionsJsonSchema as ResolvedHelpers['descriptionToChatCompletionsJsonSchema']) ??
-      defaultDescriptionToChatCompletionsJsonSchema,
-    renderUntrustedContent:
-      (src.renderUntrustedContent as ResolvedHelpers['renderUntrustedContent']) ??
-      defaultRenderUntrustedContent,
-    renderTrustedContent:
-      (src.renderTrustedContent as ResolvedHelpers['renderTrustedContent']) ??
-      defaultRenderTrustedContent,
-    renderStandingInstructions:
-      (src.renderStandingInstructions as ResolvedHelpers['renderStandingInstructions']) ??
-      defaultRenderStandingInstructions,
-    renderMemories:
-      (src.renderMemories as ResolvedHelpers['renderMemories']) ?? defaultRenderMemories,
-    renderRetrievables:
-      (src.renderRetrievables as ResolvedHelpers['renderRetrievables']) ??
-      defaultRenderRetrievables,
-    renderRetrievableSafetyDirective:
-      (src.renderRetrievableSafetyDirective as ResolvedHelpers['renderRetrievableSafetyDirective']) ??
-      defaultRenderRetrievableSafetyDirective,
-    renderFirstPartyRetrievables:
-      (src.renderFirstPartyRetrievables as ResolvedHelpers['renderFirstPartyRetrievables']) ??
-      defaultRenderFirstPartyRetrievables,
-    renderThirdPartyPublicRetrievables:
-      (src.renderThirdPartyPublicRetrievables as ResolvedHelpers['renderThirdPartyPublicRetrievables']) ??
-      defaultRenderThirdPartyPublicRetrievables,
-    renderThirdPartyPrivateRetrievables:
-      (src.renderThirdPartyPrivateRetrievables as ResolvedHelpers['renderThirdPartyPrivateRetrievables']) ??
-      defaultRenderThirdPartyPrivateRetrievables,
-    renderThought: (src.renderThought as ResolvedHelpers['renderThought']) ?? defaultRenderThought,
-    filterThoughts:
-      (src.filterThoughts as ResolvedHelpers['filterThoughts']) ?? defaultFilterThoughts,
-    renderChatCompletionsSystemPrompt:
-      (src.renderChatCompletionsSystemPrompt as ResolvedHelpers['renderChatCompletionsSystemPrompt']) ??
-      defaultRenderChatCompletionsSystemPrompt,
-    toolsToLiteRtTools:
-      (src.toolsToLiteRtTools as ResolvedHelpers['toolsToLiteRtTools']) ??
-      defaultToolsToLiteRtTools,
-    renderLiteRtToolResult:
-      (src.renderLiteRtToolResult as ResolvedHelpers['renderLiteRtToolResult']) ??
-      defaultRenderLiteRtToolResult,
-    buildLiteRtConversationInput:
-      (src.buildLiteRtConversationInput as ResolvedHelpers['buildLiteRtConversationInput']) ??
-      defaultBuildLiteRtConversationInput,
-    createLiteRtStreamAccumulator:
-      (src.createLiteRtStreamAccumulator as ResolvedHelpers['createLiteRtStreamAccumulator']) ??
-      defaultCreateLiteRtStreamAccumulator,
+    descriptionToChatCompletionsJsonSchema: pick(
+      'descriptionToChatCompletionsJsonSchema',
+      defaultDescriptionToChatCompletionsJsonSchema
+    ),
+    renderUntrustedContent: pick('renderUntrustedContent', defaultRenderUntrustedContent),
+    renderTrustedContent: pick('renderTrustedContent', defaultRenderTrustedContent),
+    renderStandingInstructions: pick(
+      'renderStandingInstructions',
+      defaultRenderStandingInstructions
+    ),
+    renderMemories: pick('renderMemories', defaultRenderMemories),
+    renderRetrievables: pick('renderRetrievables', defaultRenderRetrievables),
+    renderRetrievableSafetyDirective: pick(
+      'renderRetrievableSafetyDirective',
+      defaultRenderRetrievableSafetyDirective
+    ),
+    renderFirstPartyRetrievables: pick(
+      'renderFirstPartyRetrievables',
+      defaultRenderFirstPartyRetrievables
+    ),
+    renderThirdPartyPublicRetrievables: pick(
+      'renderThirdPartyPublicRetrievables',
+      defaultRenderThirdPartyPublicRetrievables
+    ),
+    renderThirdPartyPrivateRetrievables: pick(
+      'renderThirdPartyPrivateRetrievables',
+      defaultRenderThirdPartyPrivateRetrievables
+    ),
+    renderThought: pick('renderThought', defaultRenderThought),
+    filterThoughts: pick('filterThoughts', defaultFilterThoughts),
+    renderChatCompletionsSystemPrompt: pick(
+      'renderChatCompletionsSystemPrompt',
+      defaultRenderChatCompletionsSystemPrompt
+    ),
+    toolsToTransformersJsTools: pick(
+      'toolsToTransformersJsTools',
+      defaultToolsToTransformersJsTools
+    ),
+    renderTransformersJsToolResult: pick(
+      'renderTransformersJsToolResult',
+      defaultRenderTransformersJsToolResult
+    ),
+    buildTransformersJsMessages: pick(
+      'buildTransformersJsMessages',
+      defaultBuildTransformersJsMessages
+    ),
+    createTransformersJsStreamAccumulator: pick(
+      'createTransformersJsStreamAccumulator',
+      defaultCreateTransformersJsStreamAccumulator
+    ),
   }
 }
 
@@ -203,8 +190,18 @@ const nowIso = (): string => DateTime.now().toISO() as string
 const computeChecksum = (tool: string, args: Record<string, unknown>): string =>
   sha256(canonicalStringify({ tool, args }))
 
-/** An assembled tool call drained from the stream/response (args already a parsed object). */
-interface AssembledLiteRtToolCall {
+/** Markers that signal the start of tool-call / reasoning markup — used to stop streaming prose. */
+const TEXT_MARKUP_MARKERS = [
+  '<tool_call>',
+  '<|tool_call>',
+  '<|channel',
+  '<think',
+  '[TOOL_CALLS]',
+  '<function=',
+]
+
+/** An assembled tool call ready for execution (args already a parsed object). */
+interface AssembledToolCall {
   id: string
   name: string
   args: Record<string, unknown>
@@ -212,118 +209,109 @@ interface AssembledLiteRtToolCall {
 }
 
 /**
- * Cross-environment executor adapter for LiteRT-LM.
+ * Dual-environment executor adapter for transformers.js text generation.
  *
  * @remarks
- * Construct with at least `{ model }`; wire `new LiteRtLmAdapter(opts).executor()` into a
- * `DispatchRunner` as the `executorCallback`. The engine is resolved lazily on first dispatch (or
- * eagerly via {@link LiteRtLmAdapter.preload}); pass `engine` to inject a pre-built one (e.g. in tests).
+ * Construct with at least `{ model }`; wire `new TransformersJsAdapter(opts).executor()` into a
+ * `DispatchRunner` as the `executorCallback`. The pipeline is resolved lazily on first dispatch (or
+ * eagerly via {@link TransformersJsAdapter.preload}); pass `pipeline` to inject a pre-built one.
  */
-export class LiteRtLmAdapter {
+export class TransformersJsAdapter {
   /** The `ctx.stash` key under which per-dispatch option overrides are read. */
-  public static readonly STASH_KEY = 'liteRtLm' as const
+  public static readonly STASH_KEY = 'transformersJs' as const
 
-  readonly #baseline: LiteRtLmAdapterOptions
-  #engine: LiteRtLmEngine | undefined
-  #enginePromise: Promise<LiteRtLmEngine> | undefined
+  readonly #baseline: TransformersJsAdapterOptions
+  #pipeline: TransformersJsPipeline | undefined
+  #pipelinePromise: Promise<TransformersJsPipeline> | undefined
 
   /**
-   * Returns `true` when the current runtime exposes WebGPU (`navigator.gpu`).
+   * Whether this battery is available. transformers.js is environment-neutral (Node + browser), so this
+   * is `true` whenever the runtime can import the peer — there is no WebGPU requirement. Static form
+   * returns `true`; the instance form honours an injected `isAvailable` override.
    */
   public static isAvailable(): boolean {
-    return (
-      typeof globalThis.navigator !== 'undefined' &&
-      'gpu' in globalThis.navigator &&
-      typeof (globalThis.navigator as { gpu?: unknown }).gpu !== 'undefined'
-    )
+    return true
   }
 
   /**
-   * @param options - Raw adapter options, validated against `liteRtLmOptionsSchema`.
-   * @throws {@link @nhtio/adk/batteries!E_INVALID_LITERT_LM_OPTIONS} when `options` are invalid.
+   * @param options - Raw adapter options, validated against `transformersJsOptionsSchema`.
+   * @throws {@link @nhtio/adk/batteries!E_INVALID_TRANSFORMERS_JS_OPTIONS} when `options` are invalid.
    */
   constructor(options: unknown) {
     this.#baseline = validateOptions(options)
-    this.#engine = this.#baseline.engine
+    this.#pipeline = this.#baseline.pipeline
   }
 
-  /** Instance WebGPU-availability probe (honours the `isWebGPUAvailable` option override). */
+  /** Instance availability probe (honours the `isAvailable` option override). */
   isAvailable(): boolean {
-    return (this.#baseline.isWebGPUAvailable ?? LiteRtLmAdapter.isAvailable)()
+    return (this.#baseline.isAvailable ?? TransformersJsAdapter.isAvailable)()
   }
 
   /**
-   * Eagerly resolve (load) the engine before the first dispatch.
+   * Eagerly resolve (load) the pipeline before the first dispatch.
    *
    * @param overrides - Optional option overrides applied for this load.
-   * @returns The resolved {@link LiteRtLmEngine}.
    */
-  async preload(overrides?: Partial<LiteRtLmAdapterOptions>): Promise<LiteRtLmEngine> {
+  async preload(
+    overrides?: Partial<TransformersJsAdapterOptions>
+  ): Promise<TransformersJsPipeline> {
     const merged = validateOptions(mergeOptions(this.#baseline, overrides, undefined))
-    return this.#resolveEngine(merged)
+    return this.#resolvePipeline(merged)
   }
 
-  /** Drop the cached engine and any in-flight load so the next dispatch re-resolves it. */
+  /** Drop the cached pipeline and any in-flight load so the next dispatch re-resolves it. */
   reset(): void {
-    this.#engine = undefined
-    this.#enginePromise = undefined
+    this.#pipeline = undefined
+    this.#pipelinePromise = undefined
   }
 
-  /** Build the LiteRT `EngineSettings` from the merged adapter options. */
-  #engineSettings(merged: LiteRtLmAdapterOptions): LiteRtEngineSettings {
-    const settings: LiteRtEngineSettings = {
-      model: merged.model as LiteRtEngineSettings['model'],
+  async #resolvePipeline(merged: TransformersJsAdapterOptions): Promise<TransformersJsPipeline> {
+    if (merged.pipeline) {
+      this.#pipeline = merged.pipeline
+      return merged.pipeline
     }
-    if (merged.backend !== undefined) settings.backend = merged.backend as never
-    if (merged.maxNumTokens !== undefined) {
-      settings.mainExecutorSettings = { maxNumTokens: merged.maxNumTokens }
-    }
-    return settings
-  }
-
-  async #resolveEngine(merged: LiteRtLmAdapterOptions): Promise<LiteRtLmEngine> {
-    if (merged.engine) {
-      this.#engine = merged.engine
-      return merged.engine
-    }
-    if (this.#engine) return this.#engine
-    const available = (merged.isWebGPUAvailable ?? LiteRtLmAdapter.isAvailable)()
-    if (!available) {
-      throw new E_INVALID_LITERT_LM_OPTIONS([
-        'LiteRT-LM requires a browser/runtime with WebGPU support',
-      ])
-    }
-    this.#enginePromise ??= (async () => {
-      const engineSettings = this.#engineSettings(merged)
-      const createEngine =
-        merged.createEngine ??
-        (async ({ engineSettings: settings }) => {
-          const { Engine } = await import('@litert-lm/core')
-          return (await Engine.create(
-            settings as never,
-            merged.inputPromptAsHint
-          )) as LiteRtLmEngine
+    if (this.#pipeline) return this.#pipeline
+    this.#pipelinePromise ??= (async () => {
+      try {
+        const createPipeline =
+          merged.createPipeline ??
+          (async ({ model, device, dtype, onInitProgress }) => {
+            const { pipeline } = await import('@huggingface/transformers')
+            return (await pipeline('text-generation', model, {
+              ...(device ? { device } : {}),
+              ...(dtype ? { dtype } : {}),
+              ...(onInitProgress ? { progress_callback: onInitProgress } : {}),
+            } as never)) as unknown as TransformersJsPipeline
+          })
+        const pipe = await createPipeline({
+          model: merged.model,
+          device: merged.device,
+          dtype: merged.dtype,
+          onInitProgress: merged.onInitProgress,
         })
-      const engine = await createEngine({
-        engineSettings,
-        onInitProgress: merged.onInitProgress,
-      })
-      this.#engine = engine
-      return engine
+        this.#pipeline = pipe
+        return pipe
+      } catch (err) {
+        this.#pipelinePromise = undefined
+        throw new E_TRANSFORMERS_JS_STREAM_ERROR([
+          `could not load the transformers.js pipeline: ${isError(err) ? err.message : String(err)} — install the peer dependency (pnpm add @huggingface/transformers)`,
+        ])
+      }
     })()
-    return this.#enginePromise
+    return this.#pipelinePromise
   }
 
-  /** Build the per-dispatch session config from the merged options. */
-  #sessionConfig(merged: LiteRtLmAdapterOptions): LiteRtSessionConfig | undefined {
-    const cfg: LiteRtSessionConfig = {}
-    if (merged.samplerParams !== undefined) cfg.samplerParams = merged.samplerParams as never
-    if (merged.maxOutputTokens !== undefined) cfg.maxOutputTokens = merged.maxOutputTokens
-    if (merged.audioModalityEnabled !== undefined)
-      cfg.audioModalityEnabled = merged.audioModalityEnabled
-    if (merged.visionModalityEnabled !== undefined)
-      cfg.visionModalityEnabled = merged.visionModalityEnabled
-    return Object.keys(cfg).length > 0 ? cfg : undefined
+  /** Build the transformers.js `generate` kwargs from the merged options (excluding tools/streamer). */
+  #generateKwargs(merged: TransformersJsAdapterOptions): Record<string, unknown> {
+    const kw: Record<string, unknown> = {}
+    if (merged.maxNewTokens !== undefined) kw.max_new_tokens = merged.maxNewTokens
+    if (merged.doSample !== undefined) kw.do_sample = merged.doSample
+    if (merged.temperature !== undefined) kw.temperature = merged.temperature
+    if (merged.topK !== undefined) kw.top_k = merged.topK
+    if (merged.topP !== undefined) kw.top_p = merged.topP
+    if (merged.repetitionPenalty !== undefined) kw.repetition_penalty = merged.repetitionPenalty
+    if (merged.stopStrings !== undefined) kw.stop_strings = [...merged.stopStrings]
+    return kw
   }
 
   /**
@@ -331,16 +319,16 @@ export class LiteRtLmAdapter {
    *
    * @param overrides - Option overrides layered above the constructor baseline (below `ctx.stash`).
    */
-  executor(overrides?: Partial<LiteRtLmAdapterOptions>): DispatchExecutorFn {
+  executor(overrides?: Partial<TransformersJsAdapterOptions>): DispatchExecutorFn {
     const baseline = this.#baseline
-    const adapterClass = LiteRtLmAdapter
+    const adapterClass = TransformersJsAdapter
     const self = this
     return async (ctx: DispatchContext, helpers: DispatchExecutorHelpers): Promise<void> => {
       // 1. Three-layer merge + re-validate.
       const stashRaw = ctx.stash.get(adapterClass.STASH_KEY, {}) as unknown
       const stashOverrides =
         stashRaw && typeof stashRaw === 'object'
-          ? (stashRaw as Partial<LiteRtLmAdapterOptions>)
+          ? (stashRaw as Partial<TransformersJsAdapterOptions>)
           : {}
       const merged = validateOptions(mergeOptions(baseline, overrides, stashOverrides))
       const h = resolveHelpers(merged.helpers)
@@ -371,20 +359,20 @@ export class LiteRtLmAdapter {
         mergedRegistry.bindContext(ctx)
       }
 
-      // 3. Pre-render persisted tool-call results into LiteRT tool_response content items.
-      const renderedToolCallResults = new Map<string, LiteRtMessageContentItem>()
+      // 3. Pre-render persisted tool-call results into plain-text tool message bodies.
+      const renderedToolCallResults = new Map<string, string>()
       for (const tc of ctx.turnToolCalls) {
         const tool = mergedRegistry.get(tc.tool)
-        const item = await h.renderLiteRtToolResult({
+        const body = await h.renderTransformersJsToolResult({
           toolCall: tc,
           results: tc.results,
           tool: tool as Tool | ArtifactTool | undefined,
           unsupportedMediaPolicy,
           renderUntrustedContent: h.renderUntrustedContent,
           renderTrustedContent: h.renderTrustedContent,
-          warn: (m) => helpers.log.warn({ kind: 'litert-render-warning', message: m }),
+          warn: (m) => helpers.log.warn({ kind: 'transformers-render-warning', message: m }),
         })
-        renderedToolCallResults.set(tc.id, item)
+        renderedToolCallResults.set(tc.id, body)
       }
 
       // 4. Optional context-window enforcement.
@@ -397,12 +385,9 @@ export class LiteRtLmAdapter {
         for (const r of ctx.turnRetrievables) total += tally((await r.contentString?.()) ?? '')
         for (const m of ctx.turnMessages) total += tally(m.content?.toString() ?? '')
         for (const t of ctx.turnThoughts) total += tally(t.content.toString())
-        for (const item of renderedToolCallResults.values()) {
-          const tr = (item as { tool_response?: { response?: { content?: string } } }).tool_response
-          total += tally(tr?.response?.content ?? '')
-        }
+        for (const body of renderedToolCallResults.values()) total += tally(body)
         if (total > merged.contextWindow) {
-          throw new E_LITERT_LM_CONTEXT_OVERFLOW([
+          throw new E_TRANSFORMERS_JS_CONTEXT_OVERFLOW([
             total,
             merged.contextWindow,
             String(enc),
@@ -411,8 +396,8 @@ export class LiteRtLmAdapter {
         }
       }
 
-      // 5. Build LiteRT conversation input (preface + per-turn messages).
-      const { preface, messages: turnMessages } = await h.buildLiteRtConversationInput({
+      // 5. Build the transformers.js message array + tools.
+      const { messages: turnMessages, tools: toolDefs } = await h.buildTransformersJsMessages({
         systemPrompt: ctx.systemPrompt,
         standingInstructions: ctx.standingInstructions,
         memories: ctx.turnMemories,
@@ -431,7 +416,7 @@ export class LiteRtLmAdapter {
         selfIdentity,
         thoughtSurfacing: merged.thoughtSurfacing ?? 'all-self',
         replayCompatibility: merged.replayCompatibility ?? [],
-        toolsToLiteRtTools: h.toolsToLiteRtTools,
+        toolsToTransformersJsTools: h.toolsToTransformersJsTools,
         renderThought: h.renderThought,
         filterThoughts: h.filterThoughts,
         renderUntrustedContent: h.renderUntrustedContent,
@@ -444,55 +429,35 @@ export class LiteRtLmAdapter {
         renderFirstPartyRetrievables: h.renderFirstPartyRetrievables,
         renderThirdPartyPublicRetrievables: h.renderThirdPartyPublicRetrievables,
         renderThirdPartyPrivateRetrievables: h.renderThirdPartyPrivateRetrievables,
-        warn: (m) => helpers.log.warn({ kind: 'litert-history-warning', message: m }),
+        warn: (m) => helpers.log.warn({ kind: 'transformers-history-warning', message: m }),
       })
 
-      // 6. Resolve engine + create the conversation.
-      const sessionConfig = self.#sessionConfig(merged)
-      const conversationConfig: LiteRtConversationConfig = {
-        preface,
-        ...(sessionConfig ? { sessionConfig } : {}),
-        ...(merged.enableConstrainedDecoding !== undefined
-          ? { enableConstrainedDecoding: merged.enableConstrainedDecoding }
-          : {}),
-        ...(merged.filterChannelContentFromKvCache !== undefined
-          ? { filterChannelContentFromKvCache: merged.filterChannelContentFromKvCache }
-          : {}),
-      }
-
-      let conversation: LiteRtLmConversation
+      // 6. Resolve the pipeline.
+      let pipe: TransformersJsPipeline
       try {
-        const engine = await self.#resolveEngine(merged)
-        conversation = await engine.createConversation(conversationConfig as never)
+        pipe = await self.#resolvePipeline(merged)
       } catch (err) {
-        ctx.nack(new E_LITERT_LM_STREAM_ERROR([isError(err) ? err.message : String(err)]))
+        ctx.nack(
+          isInstanceOf(err, 'E_TRANSFORMERS_JS_STREAM_ERROR', E_TRANSFORMERS_JS_STREAM_ERROR)
+            ? err
+            : new E_TRANSFORMERS_JS_STREAM_ERROR([isError(err) ? err.message : String(err)])
+        )
         return
       }
+
+      if (ctx.abortSignal.aborted) return
 
       const spoolStore = merged.spoolStore ?? new InMemorySpoolStore()
       const stream = merged.stream ?? true
-
-      // Wire abort → conversation.cancel().
-      const onAbort = (): void => {
-        try {
-          conversation.cancel()
-        } catch {
-          /* cancel is best-effort */
-        }
-      }
-      if (ctx.abortSignal.aborted) {
-        onAbort()
-        return
-      }
-      ctx.abortSignal.addEventListener('abort', onAbort, { once: true })
+      const generateKwargs = self.#generateKwargs(merged)
+      const toolNames = mergedRegistry.visible().map((t) => t.name)
 
       // ── Tool execution + persistence (args already an object — no JSON.parse) ──
-      const executeAndPersistToolCall = async (call: AssembledLiteRtToolCall): Promise<void> => {
+      const executeAndPersistToolCall = async (call: AssembledToolCall): Promise<void> => {
         const tool = mergedRegistry.get(call.name)
         const completedAt = nowIso()
-
         if (!call.argsWellFormed) {
-          const err = new E_LITERT_LM_INVALID_TOOL_CALL_ARGS([
+          const err = new E_TRANSFORMERS_JS_INVALID_TOOL_CALL_ARGS([
             'must be a JSON object',
             JSON.stringify(call.args),
           ])
@@ -515,7 +480,6 @@ export class LiteRtLmAdapter {
           )
           return
         }
-
         if (!tool) {
           const available = mergedRegistry
             .all()
@@ -544,7 +508,6 @@ export class LiteRtLmAdapter {
           )
           return
         }
-
         helpers.reportToolCall(call.id, { tool: tool.name, args: call.args })
         const isArtifactTool = ArtifactTool.isArtifactTool(tool)
         let results: Tokenizable | SpooledArtifact | SpooledArtifact[] | Media | Media[] =
@@ -602,7 +565,7 @@ export class LiteRtLmAdapter {
         )
       }
 
-      const assembleCalls = (raw: ReadonlyArray<ParsedToolCall>): AssembledLiteRtToolCall[] =>
+      const assembleCalls = (raw: ReadonlyArray<ParsedToolCall>): AssembledToolCall[] =>
         raw.map((c) => ({
           id: uuidv6(),
           name: c.name,
@@ -611,18 +574,17 @@ export class LiteRtLmAdapter {
         }))
 
       // Parse the full generated text → reasoning + clean prose + tool calls, then persist.
-      // LiteRT-LM (v0.13.1) is text-only: tool calls + reasoning arrive as text in `content`, in the
-      // model family's format, parsed here via the shared parser layer.
-      const toolNames = mergedRegistry.visible().map((t) => t.name)
       const finishFromText = async (
         fullText: string,
         streamId: string,
         streamedProse: boolean
       ): Promise<void> => {
         const reasoned = reasoningParser(fullText)
-        const parsed = toolCallParser(reasoned.cleanedText, { toolNames })
+        const afterReasoning = reasoned.cleanedText
+        const parsed = toolCallParser(afterReasoning, { toolNames })
         const cleanText = parsed.cleanedText
 
+        // Persist reasoning as Thoughts.
         for (const trace of reasoned.reasoning) {
           const id = uuidv6()
           helpers.reportThought(id, trace, { isComplete: true })
@@ -637,9 +599,13 @@ export class LiteRtLmAdapter {
           )
         }
 
+        // Persist the clean assistant message (if any).
         if (cleanText.length > 0) {
-          if (streamedProse) helpers.reportMessage(streamId, '', { isComplete: true })
-          else helpers.reportMessage(streamId, cleanText, { isComplete: true })
+          if (streamedProse) {
+            helpers.reportMessage(streamId, '', { isComplete: true })
+          } else {
+            helpers.reportMessage(streamId, cleanText, { isComplete: true })
+          }
           await ctx.storeMessage(
             new Message({
               id: streamId,
@@ -652,6 +618,7 @@ export class LiteRtLmAdapter {
           )
         }
 
+        // Execute tool calls.
         const calls = assembleCalls(parsed.calls)
         if (calls.length === 0) {
           if (merged.autoAck) ctx.ack()
@@ -665,71 +632,114 @@ export class LiteRtLmAdapter {
 
       // ── Streaming path ──
       if (stream) {
-        const accumulator = h.createLiteRtStreamAccumulator()
+        const accumulator = h.createTransformersJsStreamAccumulator()
         const streamId = uuidv6()
         let proseStopped = false
         let streamedProse = false
 
-        let readable: ReadableStream<LiteRtMessage>
+        // The decoded-text sink: feed the accumulator + stream safe prose deltas (stopping prose once
+        // tool-call/think markup appears; the clean message is persisted after generation completes).
+        const onText = (text: string): void => {
+          accumulator.feed(text)
+          if (proseStopped) return
+          if (TEXT_MARKUP_MARKERS.some((m) => accumulator.content().includes(m))) {
+            proseStopped = true
+            return
+          }
+          if (text.length > 0) {
+            streamedProse = true
+            helpers.reportMessage(streamId, text)
+          }
+        }
+
+        // Default streamer factory imports the peer's TextStreamer; `createStreamer` overrides it
+        // (e.g. tests inject a lightweight sink to avoid importing the heavy peer in the browser env).
+        const createStreamer =
+          merged.createStreamer ??
+          (async ({ pipeline: p, onText: cb }) => {
+            const { TextStreamer } = await import('@huggingface/transformers')
+            const tokenizer = (p as unknown as { tokenizer: unknown }).tokenizer
+            return new TextStreamer(
+              tokenizer as never,
+              {
+                skip_prompt: true,
+                skip_special_tokens: false,
+                callback_function: cb,
+              } as never
+            )
+          })
+
+        let streamer: unknown
         try {
-          readable = conversation.sendMessageStreaming(
-            turnMessages as never
-          ) as ReadableStream<LiteRtMessage>
+          streamer = await createStreamer({ pipeline: pipe, onText })
         } catch (err) {
-          ctx.nack(new E_LITERT_LM_STREAM_ERROR([isError(err) ? err.message : String(err)]))
+          ctx.nack(new E_TRANSFORMERS_JS_STREAM_ERROR([isError(err) ? err.message : String(err)]))
           return
         }
 
         try {
-          const reader = readable.getReader()
-          while (true) {
-            if (ctx.abortSignal.aborted) {
-              await reader.cancel().catch(() => undefined)
-              return
-            }
-            const { value: chunk, done } = await reader.read()
-            if (done) break
-            if (!chunk) continue
-            const { contentDelta } = accumulator.feed(chunk)
-            if (contentDelta.length > 0 && !proseStopped) {
-              // Once the buffered output shows any tool-call/reasoning marker, stop streaming prose;
-              // the authoritative clean message is persisted after the stream drains.
-              if (TEXT_MARKUP_MARKERS.some((m) => accumulator.content().includes(m))) {
-                proseStopped = true
-              } else {
-                streamedProse = true
-                helpers.reportMessage(streamId, contentDelta)
-              }
-            }
-          }
+          await (pipe as unknown as (m: unknown, k: unknown) => Promise<unknown>)(turnMessages, {
+            ...generateKwargs,
+            ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
+            streamer,
+          })
         } catch (err) {
           if (ctx.abortSignal.aborted) return
-          ctx.nack(new E_LITERT_LM_STREAM_ERROR([isError(err) ? err.message : String(err)]))
+          ctx.nack(new E_TRANSFORMERS_JS_STREAM_ERROR([isError(err) ? err.message : String(err)]))
           return
         }
-
+        if (ctx.abortSignal.aborted) return
         await finishFromText(accumulator.content(), streamId, streamedProse)
         return
       }
 
       // ── Non-streaming path ──
-      let final: LiteRtMessage
+      let output: unknown
       try {
-        final = (await conversation.sendMessage(turnMessages as never)) as LiteRtMessage
+        output = await (pipe as unknown as (m: unknown, k: unknown) => Promise<unknown>)(
+          turnMessages,
+          {
+            ...generateKwargs,
+            ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
+          }
+        )
       } catch (err) {
-        ctx.nack(new E_LITERT_LM_STREAM_ERROR([isError(err) ? err.message : String(err)]))
+        ctx.nack(new E_TRANSFORMERS_JS_STREAM_ERROR([isError(err) ? err.message : String(err)]))
         return
       }
-      const contentText =
-        typeof final.content === 'string'
-          ? final.content
-          : Array.isArray(final.content)
-            ? final.content
-                .filter((i) => i.type === 'text' && typeof i.text === 'string')
-                .map((i) => i.text)
-                .join('')
-            : ''
-      await finishFromText(contentText, uuidv6(), false)
+      if (ctx.abortSignal.aborted) return
+      await finishFromText(extractGeneratedText(output), uuidv6(), false)
     }
   }
 }
+
+/**
+ * Pull the newly-generated assistant text out of a transformers.js text-generation result.
+ *
+ * @remarks
+ * Chat input → `[{ generated_text: Message[] }]` (the last message is the new assistant turn);
+ * string input → `[{ generated_text: string }]`. We always send chat input, so we take the last
+ * message's content, falling back defensively to a string `generated_text`.
+ */
+const extractGeneratedText = (output: unknown): string => {
+  const first = Array.isArray(output) ? output[0] : output
+  const gen = (first as { generated_text?: unknown } | undefined)?.generated_text
+  if (typeof gen === 'string') return gen
+  if (Array.isArray(gen)) {
+    const last = gen[gen.length - 1] as { content?: unknown } | undefined
+    const content = last?.content
+    if (typeof content === 'string') return content
+    if (Array.isArray(content)) {
+      return content
+        .filter(
+          (i): i is { type: string; text: string } =>
+            isObject(i) && (i as { type?: unknown }).type === 'text'
+        )
+        .map((i) => i.text)
+        .join('')
+    }
+  }
+  return ''
+}
+
+export { extractGeneratedText as __extractGeneratedText }

@@ -15,6 +15,53 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-06-25
+
+### Added
+
+- **New opt-in LLM battery `@nhtio/adk/batteries/llm/transformers_js` — on-device ONNX text generation,
+  in Node AND the browser.** Ships `TransformersJsAdapter`, a one-line {@link DispatchExecutorFn} wrapping
+  [`@huggingface/transformers`](https://www.npmjs.com/package/@huggingface/transformers) (an optional peer,
+  already present for the media ASR engine). Unlike the WebLLM and LiteRT-LM batteries (WebGPU/browser-only),
+  transformers.js is **environment-neutral** — it auto-selects `onnxruntime-node` (native, plain Node, no GPU)
+  or `onnxruntime-web` (WASM + WebGPU) — so this battery runs server-side and client-side from one codepath
+  and does **not** gate on `navigator.gpu`. `device`/`dtype` pick the backend and quantization. `STASH_KEY`
+  is `'transformersJs'`.
+- **New opt-in embeddings battery `@nhtio/adk/batteries/embeddings/transformers_js`.** Ships
+  `TransformersJsEmbeddingsAdapter` — on-device `feature-extraction` embeddings with the same
+  `embed`/`embedMany`/`dimensions`/`preload`/`reset`/`isAvailable` surface and `number[]` return shape as the
+  OpenAI and WebLLM embedders, plus `pooling` (default `'mean'`) and `normalize` (default `true`). Being
+  environment-neutral, it is surfaced from the `@nhtio/adk/batteries/embeddings` aggregate barrel (alongside
+  OpenAI; WebLLM stays deep-import-only).
+- **New shared, configurable tool-call + reasoning text-parser layer** (re-exported from both
+  `transformers_js` and `litert_lm`). Text-only on-device runtimes inject tool definitions into the chat
+  template but emit tool calls and reasoning as **family-specific raw text**, not structured fields — so the
+  battery parses them out, the way vLLM/SGLang/Ollama do (post-hoc, per-family, flag-selected). Two options,
+  both defaulting to `'auto'` (try the bundled family parsers in priority order, first match wins):
+  - `toolCallParser`: `'auto'` · `'hermes'` · `'gemma'` (E2B/E4B) · `'gpt_oss'` (Harmony) · `'pythonic'` ·
+    `'llama3_json'` · `'mistral'` · `'qwen3_coder'` · `'none'` · a custom `ToolCallParserFn`.
+  - `reasoningParser`: `'auto'` · `'think_tag'` (`<think>…</think>`) · `'harmony_analysis'` · `'gemma_channel'`
+    · `'none'` · a custom `ReasoningParserFn`.
+  Marker-anchored families run first (no cross-family false positives); weak-signal JSON/pythonic forms are
+  gated on the callee being a real tool. Parsed reasoning becomes ADK Thoughts; cleaned prose is the assistant
+  Message; tool-call `arguments` are a plain object (no `JSON.parse`). Bundled defaults target the small ONNX /
+  Ollama-Cloud-tier open-weight families (Gemma 4 E2B/E4B, gpt-oss:20b, Qwen3-Instruct, Llama 3.2, SmolLM).
+  Gemma's tool-call + reasoning delimiters were verified byte-exact against the model's own
+  `tokenizer_config.json`; both batteries were validated end-to-end against real ONNX models (MiniLM embeddings,
+  SmolLM2-135M generation).
+
+### Fixed
+
+- **LiteRT-LM tool calling and reasoning extraction now actually work** (`@nhtio/adk/batteries/llm/litert_lm`).
+  The battery as first shipped (v1.20260625.0) read `Message.tool_calls` and `Message.channels` off model
+  output — but the `@litert-lm/core` v0.13.1 JS runtime is **text-in / text-out** and never populates those
+  fields on output (they are input-only wire fields; the package README confirms text-only I/O). So the prior
+  tool-calling and reasoning support was **non-functional against real models** (the mocked tests passed
+  because the fakes populated the fields). The adapter now parses tool calls and reasoning out of the model's
+  **text** via the new shared parser layer, with the same `toolCallParser` / `reasoningParser` options
+  (default `'auto'`). If you relied on LiteRT-LM tool calls or thoughts before, they begin functioning with
+  this release.
+
 ## 2026-06-24
 
 ### Added

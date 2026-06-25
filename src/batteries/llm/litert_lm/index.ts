@@ -64,9 +64,42 @@ export {
   defaultBuildLiteRtConversationInput,
   createLiteRtStreamAccumulator,
   defaultCreateLiteRtStreamAccumulator,
+  // shared tool-call parser layer (LiteRT-LM is text-only — calls arrive as text)
+  hermesToolCallParser,
+  gemmaToolCallParser,
+  gptOssToolCallParser,
+  pythonicToolCallParser,
+  llama3JsonToolCallParser,
+  mistralToolCallParser,
+  qwen3CoderToolCallParser,
+  noneToolCallParser,
+  createAutoToolCallParser,
+  resolveToolCallParser,
+  BUNDLED_TOOL_CALL_PARSERS,
+  DEFAULT_TOOL_CALL_PARSER_ORDER,
+  // shared reasoning parser layer
+  thinkTagReasoningParser,
+  harmonyAnalysisReasoningParser,
+  gemmaChannelReasoningParser,
+  noneReasoningParser,
+  createAutoReasoningParser,
+  resolveReasoningParser,
+  BUNDLED_REASONING_PARSERS,
+  DEFAULT_REASONING_PARSER_ORDER,
 } from './helpers'
 
 export type { LiteRtStreamAccumulator } from './helpers'
+
+export type {
+  ParsedToolCall,
+  ToolCallParseResult,
+  ToolCallParserContext,
+  ToolCallParserFn,
+  ToolCallParserName,
+  ReasoningParseResult,
+  ReasoningParserFn,
+  ReasoningParserName,
+} from './helpers'
 
 export type {
   // Adapter options + engine aliases

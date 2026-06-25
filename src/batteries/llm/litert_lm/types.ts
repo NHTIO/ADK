@@ -14,6 +14,12 @@
 import type { TokenEncoding } from '@nhtio/adk'
 import type { SpoolStore } from '@nhtio/adk/common'
 import type {
+  ToolCallParserName,
+  ToolCallParserFn,
+  ReasoningParserName,
+  ReasoningParserFn,
+} from '../chat_common'
+import type {
   ChatCompletionsBucketOrder,
   ChatCompletionsHelpers,
   DescriptionLike,
@@ -186,6 +192,18 @@ export interface LiteRtLmAdapterOptions {
   unsupportedMediaPolicy?: UnsupportedMediaPolicy
   /** Automatically `ctx.ack()` when generation completes with no tool calls (default `false`). */
   autoAck?: boolean
+  /**
+   * How to parse tool calls out of the model's text output. LiteRT-LM (v0.13.1) is text-in/text-out:
+   * the model emits tool calls as family-specific text, not a structured field. A family name,
+   * `'auto'` (try-all in priority order — the default), `'none'` (disable), or a custom
+   * {@link ToolCallParserFn}.
+   */
+  toolCallParser?: ToolCallParserName | ToolCallParserFn
+  /**
+   * How to parse reasoning/thinking out of the model's text output. A family name, `'auto'` (the
+   * default), `'none'`, or a custom {@link ReasoningParserFn}. Extracted reasoning becomes ADK Thoughts.
+   */
+  reasoningParser?: ReasoningParserName | ReasoningParserFn
 }
 
 /** Sampler-parameters option shape (the `type` field accepts the numeric {@link SamplerType} value). */

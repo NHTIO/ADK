@@ -1,14 +1,14 @@
 /**
- * Runtime validation schema and wrapper for LiteRT-LM adapter options.
+ * Runtime validation schema and wrapper for transformers.js LLM adapter options.
  *
- * @module @nhtio/adk/batteries/llm/litert_lm/validation
+ * @module @nhtio/adk/batteries/llm/transformers_js/validation
  */
 
 import { isError } from '@nhtio/adk/guards'
 import { byteStoreSchema } from '@nhtio/adk/common'
-import { E_INVALID_LITERT_LM_OPTIONS } from './exceptions'
 import { validator, ValidationError } from '@nhtio/validation'
-import type { LiteRtLmAdapterOptions } from './types'
+import { E_INVALID_TRANSFORMERS_JS_OPTIONS } from './exceptions'
+import type { TransformersJsAdapterOptions } from './types'
 
 const bucketLabelSchema = validator
   .string()
@@ -42,7 +42,6 @@ const tokenEncodingSchema = validator
         'llama2',
         'claude'
       ),
-    // OPTIONAL: a valid encoding string, explicit null, or absent (undefined = "no token counting").
     validator.any().valid(null).optional()
   )
   .default(null)
@@ -84,47 +83,58 @@ const unsupportedMediaPolicySchema = validator
   )
   .default('throw')
 
-// `model` accepts a URL string, a ReadableStream<Uint8Array>, or a Blob. The two object forms are
-// runtime instances Joi cannot introspect, so accept any non-string object and let `Engine.create`
-// reject a genuinely wrong shape — validating the *adapter* contract, not the provider's.
-const modelSchema = validator
-  .alternatives(validator.string().min(1), validator.object().unknown(true))
-  .required()
+const toolCallParserSchema = validator
+  .alternatives(
+    validator
+      .string()
+      .valid(
+        'auto',
+        'hermes',
+        'gemma',
+        'gpt_oss',
+        'pythonic',
+        'llama3_json',
+        'mistral',
+        'qwen3_coder',
+        'none'
+      ),
+    validator.function()
+  )
+  .default('auto')
 
-const samplerParamsSchema = validator
-  .object({
-    // 0=TYPE_UNSPECIFIED, 1=TOP_K, 2=TOP_P, 3=GREEDY
-    type: validator.number().integer().valid(0, 1, 2, 3).optional(),
-    k: validator.number().integer().min(1).optional(),
-    p: validator.number().min(0).max(1).optional(),
-    temperature: validator.number().min(0).optional(),
-    seed: validator.number().integer().optional(),
-  })
-  .unknown(false)
+const reasoningParserSchema = validator
+  .alternatives(
+    validator.string().valid('auto', 'think_tag', 'harmony_analysis', 'gemma_channel', 'none'),
+    validator.function()
+  )
+  .default('auto')
 
 /**
- * Validator schema for {@link LiteRtLmAdapterOptions}. Rejects unknown keys (`.unknown(false)`) so
- * typos and removed fields fail loud, and fills in defaults.
+ * Validator schema for {@link TransformersJsAdapterOptions}. Rejects unknown keys (`.unknown(false)`)
+ * and fills in defaults.
  */
-export const liteRtLmOptionsSchema = validator
-  .object<LiteRtLmAdapterOptions>({
+export const transformersJsOptionsSchema = validator
+  .object<TransformersJsAdapterOptions>({
     // ── Engine ──
-    model: modelSchema,
-    engine: validator.object().unknown(true).optional(),
-    createEngine: validator.function().optional(),
+    model: validator.string().min(1).required(),
+    // The transformers.js pipeline is a callable object — accept either a function or an object.
+    pipeline: validator
+      .alternatives(validator.function(), validator.object().unknown(true))
+      .optional(),
+    createPipeline: validator.function().optional(),
+    createStreamer: validator.function().optional(),
+    device: validator.string().optional(),
+    dtype: validator.string().optional(),
     onInitProgress: validator.function().optional(),
-    isWebGPUAvailable: validator.function().optional(),
-    inputPromptAsHint: validator.string().optional(),
-    // ── Generation (LiteRT-native) ──
-    samplerParams: samplerParamsSchema.optional(),
-    maxOutputTokens: validator.number().integer().min(1).optional(),
-    maxNumTokens: validator.number().integer().min(1).optional(),
-    // Backend enum: 0..6 (UNSPECIFIED, CPU_ARTISAN, GPU_ARTISAN, CPU, GPU, GOOGLE_TENSOR_ARTISAN, NPU)
-    backend: validator.number().integer().min(0).max(6).optional(),
-    audioModalityEnabled: validator.boolean().optional(),
-    visionModalityEnabled: validator.boolean().optional(),
-    enableConstrainedDecoding: validator.boolean().optional(),
-    filterChannelContentFromKvCache: validator.boolean().optional(),
+    isAvailable: validator.function().optional(),
+    // ── Generation ──
+    maxNewTokens: validator.number().integer().min(1).optional(),
+    doSample: validator.boolean().optional(),
+    temperature: validator.number().min(0).optional(),
+    topK: validator.number().integer().min(1).optional(),
+    topP: validator.number().min(0).max(1).optional(),
+    repetitionPenalty: validator.number().min(0).optional(),
+    stopStrings: validator.array().items(validator.string()).optional(),
     // ── ADK control ──
     stream: validator.boolean().default(true),
     bucketOrder: bucketOrderSchema,
@@ -141,30 +151,8 @@ export const liteRtLmOptionsSchema = validator
     spoolStore: byteStoreSchema.optional(),
     unsupportedMediaPolicy: unsupportedMediaPolicySchema,
     autoAck: validator.boolean().default(false),
-    toolCallParser: validator
-      .alternatives(
-        validator
-          .string()
-          .valid(
-            'auto',
-            'hermes',
-            'gemma',
-            'gpt_oss',
-            'pythonic',
-            'llama3_json',
-            'mistral',
-            'qwen3_coder',
-            'none'
-          ),
-        validator.function()
-      )
-      .default('auto'),
-    reasoningParser: validator
-      .alternatives(
-        validator.string().valid('auto', 'think_tag', 'harmony_analysis', 'gemma_channel', 'none'),
-        validator.function()
-      )
-      .default('auto'),
+    toolCallParser: toolCallParserSchema,
+    reasoningParser: reasoningParserSchema,
   })
   .unknown(false)
 
@@ -175,21 +163,19 @@ const formatValidationDetails = (err: ValidationError): string =>
   err.details.map((d) => d.message).join(' and ')
 
 /**
- * Validates raw adapter options against {@link liteRtLmOptionsSchema}, filling in defaults.
+ * Validates raw adapter options against {@link transformersJsOptionsSchema}, filling in defaults.
  *
  * @param input - The raw options object to validate.
  * @returns The resolved options object with defaults applied.
- * @throws {@link @nhtio/adk/batteries!E_INVALID_LITERT_LM_OPTIONS} when `input` is invalid.
+ * @throws {@link @nhtio/adk/batteries!E_INVALID_TRANSFORMERS_JS_OPTIONS} when `input` is invalid.
  */
-export const validateOptions = (input: unknown): LiteRtLmAdapterOptions => {
-  const { value, error } = liteRtLmOptionsSchema.validate(input, {
+export const validateOptions = (input: unknown): TransformersJsAdapterOptions => {
+  const { value, error } = transformersJsOptionsSchema.validate(input, {
     abortEarly: false,
     convert: false,
   })
   if (error && isValidationError(error)) {
-    throw new E_INVALID_LITERT_LM_OPTIONS([formatValidationDetails(error)], {
-      cause: error,
-    })
+    throw new E_INVALID_TRANSFORMERS_JS_OPTIONS([formatValidationDetails(error)], { cause: error })
   }
-  return value as LiteRtLmAdapterOptions
+  return value as TransformersJsAdapterOptions
 }
