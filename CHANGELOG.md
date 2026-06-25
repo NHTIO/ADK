@@ -19,6 +19,26 @@ upgrading.
 
 ### Added
 
+- **New opt-in LLM battery `@nhtio/adk/batteries/llm/litert_lm` — on-device WebGPU inference of Google's
+  `.litertlm` models.** Ships `LiteRtLmAdapter`, a one-line {@link DispatchExecutorFn} wrapping
+  [`@litert-lm/core`](https://www.npmjs.com/package/@litert-lm/core) (browser/WebGPU + a bundled wasm
+  runtime). Unlike the WebLLM battery it is **standalone, not an OpenAI-wire subclass**: it drives
+  LiteRT's native `Engine.create() → createConversation({ preface }) → sendMessageStreaming():
+  ReadableStream<Message>` API, takes tool-call `arguments` as a parsed object (no `JSON.parse`), and
+  surfaces "thinking" via `Message.channels` → ADK thoughts. Full parity with the other batteries: text,
+  streaming, thoughts, tool use, sampler/limit controls (`samplerParams`, `maxOutputTokens`,
+  `maxNumTokens`, `backend`), and the typed multimodal contract (`audioModalityEnabled` /
+  `visionModalityEnabled`). It reuses the format-agnostic render helpers; only the wire-shape mappers are
+  LiteRT-native (`buildLiteRtConversationInput`, `toolsToLiteRtTools`, `renderLiteRtToolResult`, the
+  streaming accumulator), each swappable via `helpers`. `STASH_KEY` is `'liteRtLm'`; exceptions are the
+  `E_LITERT_LM_*` family plus `E_INVALID_LITERT_LM_OPTIONS` and `E_UNSUPPORTED_MEDIA_MODALITY`.
+  - **`@litert-lm/core` is an optional peer dependency**, pinned exact (`0.13.1`) — it ships its own
+    ~19 MB wasm and is **not** bundled into `@nhtio/adk`. Install it yourself (`pnpm add @litert-lm/core`)
+    when you want this battery; it is never required for type-checking a consumer.
+  - **The published `@litert-lm/core` docs lag the library** — tool use, channels, sampler controls, and
+    multimodality are typed but undocumented. The adapter is mapped against the installed `.d.ts` (the
+    source of truth); re-verify on upgrade. Preview `.litertlm` models are text-in/text-out today, so the
+    native multimodal path is built-to-contract but not yet exercisable end-to-end.
 - **Serialization: the ADK primitives now round-trip through [`@nhtio/encoder`](https://encoder.nht.io).**
   Encode an entire conversation graph — `Message`s with nested `Identity`, `Tokenizable`, and `Media`;
   `ToolCall`s with their results; `Memory`, `Thought`, `Retrievable`, `Registry` — to a string with

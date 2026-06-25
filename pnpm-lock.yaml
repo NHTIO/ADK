@@ -114,6 +114,9 @@ importers:
       '@lancedb/lancedb':
         specifier: ^0.30.0
         version: 0.30.0(apache-arrow@18.1.0)
+      '@litert-lm/core':
+        specifier: 0.13.1
+        version: 0.13.1
       '@mlc-ai/web-llm':
         specifier: ^0.2.83
         version: 0.2.84
@@ -1958,6 +1961,12 @@ packages:
 
   '@lenml/tokenizers@3.7.2':
     resolution: {integrity: sha512-tuap9T7Q80Czor8NHzxjlLNvxEX8MgFINzsBTV+lq1v7G+78YR3ZvBhmLsPHtgqExB4Q4kCJH6dhXOYWSLdHLw==}
+
+  '@litert-lm/core@0.13.1':
+    resolution: {integrity: sha512-oIMW23dlc06d86iiMwgdQFiym5LyOHkVd+5k8irNQj2OJT+rIWj3+Q289z6FKUmqK86uHLx/3rG689PaGfTUQQ==}
+
+  '@litertjs/wasm-utils@2.5.0':
+    resolution: {integrity: sha512-zhMAqJRJ3ROi48flZxYx+K2MiMllJVuH7oeumpSIfQMBeOb6JyLV/7ltLbY6E+nERUAfNwzIBqjslWAeXcO6iQ==}
 
   '@mermaid-js/mermaid-mindmap@9.3.0':
     resolution: {integrity: sha512-IhtYSVBBRYviH1Ehu8gk69pMDF8DSRqXBRDMWrEfHoaMruHeaP2DXA3PBnuwsMaCdPQhlUUcy/7DBLAEIXvCAw==}
@@ -9185,6 +9194,12 @@ snapshots:
       '@lenml/tokenizers': 3.7.2
 
   '@lenml/tokenizers@3.7.2': {}
+
+  '@litert-lm/core@0.13.1':
+    dependencies:
+      '@litertjs/wasm-utils': 2.5.0
+
+  '@litertjs/wasm-utils@2.5.0': {}
 
   '@mermaid-js/mermaid-mindmap@9.3.0':
     dependencies:

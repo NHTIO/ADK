@@ -64,6 +64,7 @@
     "@elastic/elasticsearch": "^8.0.0 || ^9.0.0",
     "@huggingface/transformers": "^4.2.0",
     "@lancedb/lancedb": "^0.30.0",
+    "@litert-lm/core": "0.13.1",
     "@mlc-ai/web-llm": "^0.2.83",
     "@nhtio/encoder": "^1.20260624.0",
     "@opensearch-project/opensearch": "^3.6.0",
@@ -129,6 +130,9 @@
       "optional": true
     },
     "@lancedb/lancedb": {
+      "optional": true
+    },
+    "@litert-lm/core": {
       "optional": true
     },
     "@mlc-ai/web-llm": {
@@ -282,6 +286,7 @@
     "@huggingface/transformers": "^4.2.0",
     "@inquirer/prompts": "^8.4.2",
     "@lancedb/lancedb": "^0.30.0",
+    "@litert-lm/core": "0.13.1",
     "@mlc-ai/web-llm": "^0.2.83",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@nhtio/encoder": "^1.20260624.0",
