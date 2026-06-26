@@ -82,6 +82,10 @@ upgrading.
   (or the existing `--base-url` / `--api-key` flags), replacing internal-specific env-var names. Dev tool only;
   not part of the published runtime surface.
 
+### Fixed
+
+- Fixed the documentation release pipeline.
+
 ## 2026-06-25
 
 ### Added
