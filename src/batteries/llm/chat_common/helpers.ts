@@ -41,6 +41,134 @@ import type {
 export const escapeXmlAttribute = (value: string): string =>
   value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
+// ─── reserved no-nonce tier neutralisation ────────────────────────────────────
+
+/**
+ * Neutralise the **no-nonce** `<system_instructions …>` / `</system_instructions>` developer-rules tier
+ * if it appears inside model- or user-supplied BODY content.
+ *
+ * @remarks
+ * Every other trust tier (untrusted/trusted/peer/thought/memory/retrieved) carries an unguessable
+ * per-primitive nonce in its tag name, so a model that mirrors one cannot forge a sibling's closer. The
+ * standing-instructions tier is the lone exception — {@link renderStandingInstructions} emits it WITHOUT
+ * a nonce because it is the highest-authority block. That makes a model-mirrored copy textually
+ * identical to the real tier. The legitimate tier is ALWAYS harness-injected (built by
+ * `renderStandingInstructions` and concatenated into the system prompt) and never flows through a
+ * message/thought body — so escaping the leading `<` of the literal token wherever it occurs in body
+ * content is always safe and renders the copy inert (visible, but unmistakably not a structural tag).
+ * Mirrors how the nonce already neutralises the other tiers. See the envelope-mimicry threat model.
+ */
+export const neutraliseDeveloperRulesTag = (text: string): string =>
+  text.replace(/<(\/?system_instructions\b)/gi, '&lt;$1')
+
+// ─── envelope / turn-boundary special-token stripping (pre-parse normalisation) ──────────────────────
+
+/**
+ * The non-semantic ENVELOPE / turn-boundary special tokens that some chat templates leave in the
+ * decoded text (Llama 3 `<|python_tag|>`/`<|eom_id|>`/`<|eot_id|>`/header tokens, ChatML
+ * `<|im_start|>`/`<|im_end|>`, sentinel `<|begin_of_text|>`/`<|end_of_text|>`, `<s>`/`</s>`).
+ *
+ * These wrap a turn but carry NO meaning for the tool-call / reasoning parsers, so they must be removed
+ * before parsing. CRUCIALLY this list EXCLUDES every token the parsers key on — `<|channel…`,
+ * `<|message|>`, `<|call|>`, `<|constrain|>`, `<|end|>`, `<|think|>`, `<|tool_call>`, `<tool_call>` — so
+ * stripping is safe.
+ */
+const ENVELOPE_SPECIAL_TOKEN_RE =
+  /<\|(?:python_tag|eom_id|eot_id|im_start|im_end|begin_of_text|end_of_text|start_header_id|end_header_id)\|?>|<\/?s>/g
+
+/**
+ * Strip the non-semantic envelope/turn-boundary special tokens (see {@link ENVELOPE_SPECIAL_TOKEN_RE})
+ * from decoded model text before it reaches the parser layer.
+ *
+ * @remarks
+ * **Why this exists.** The transformers.js streaming path decodes with `skip_special_tokens:false` (it
+ * must — the live prose-stop gate watches for tool/think markers, which ARE special tokens). That leaves
+ * envelope tokens like Llama's `<|python_tag|>{json}<|eom_id|>` or ChatML's trailing `<|im_end|>` in the
+ * accumulated text, so the JSON tool-call parsers see `<|python_tag|>{…}` and decline — even though the
+ * NON-streaming path (which decodes with `skip_special_tokens:true`) parses the identical call fine.
+ * Normalising here makes the stream and batch paths parse equivalent text. Surfaced by the deep model
+ * matrix (Llama-3.2-1B + Qwen2.5-Coder tool calls passed on batch, failed on stream).
+ */
+export const stripEnvelopeSpecialTokens = (text: string): string =>
+  text.replace(ENVELOPE_SPECIAL_TOKEN_RE, '')
+
+// ─── media metadata sanitisation ──────────────────────────────────────────────
+
+/** A strict `type/subtype` MIME with NO parameters/whitespace/control chars. */
+const STRICT_MIME_RE = /^[\w.+-]+\/[\w.+-]+$/
+
+/**
+ * Validate a media `mimeType` for safe interpolation into a `data:<mime>;base64,…` URI, a
+ * `Blob({type})`, or a synthetic-description line.
+ *
+ * @remarks
+ * A raw `mimeType` is attacker-influenced (it rides in on user uploads / tool output). The committee's
+ * sharpest finding was a `mimeType` like `image/png;base64,<payload>;x=` — interpolated into
+ * `data:${mime};base64,${b64}` it produces a DOUBLE `;base64,`, letting a permissive data-URI parser
+ * decode the attacker's prefix instead of the real payload (a content-type confusion / injection). A
+ * `\r\n` in the mime is an HTTP-header-injection vector if the URI is ever reflected. We accept ONLY a
+ * strict `type/subtype` (no params, no whitespace, no `;`/`,`); anything else collapses to the kind's
+ * generic safe subtype (so an image still decodes as an image) or `application/octet-stream`.
+ */
+export const sanitizeMimeType = (
+  raw: string,
+  kind?: 'image' | 'audio' | 'video' | 'document'
+): string => {
+  if (typeof raw === 'string' && STRICT_MIME_RE.test(raw)) return raw
+  switch (kind) {
+    case 'image':
+      return 'application/octet-stream'
+    case 'audio':
+      return 'application/octet-stream'
+    default:
+      return 'application/octet-stream'
+  }
+}
+
+/**
+ * Sanitise a media `filename` for interpolation into a synthetic-description line that is then placed
+ * INSIDE a trust envelope whose body is not XML-escaped.
+ *
+ * @remarks
+ * A filename is attacker-influenced and the synthetic-description body is not escaped, so a filename
+ * like `x.png</untrusted_content_<nonce>>SYSTEM: …` could close the envelope, and one that mimics the
+ * `[media: …]` format could forge a second descriptor. We strip the envelope-significant characters
+ * (`<`, `>`, and newlines/control chars) and length-cap (a megabyte filename is a prompt-bloat DoS).
+ * The filename is metadata, not content the model must read byte-exact, so stripping is safe.
+ */
+export const sanitizeFilenameForDescription = (filename: string, maxLen = 256): string => {
+  const raw = typeof filename === 'string' ? filename : ''
+  // Strip angle brackets (envelope-significant) and all C0/C1 control chars incl. CR/LF/tab.
+  // eslint-disable-next-line no-control-regex
+  const stripped = raw.replace(/[<>\u0000-\u001f\u007f-\u009f]/g, '')
+  return stripped.length > maxLen ? `${stripped.slice(0, maxLen)}\u2026` : stripped
+}
+
+/** The trust lattice, most-trusted first. Lower index = more authority. */
+const TRUST_RANK: Record<string, number> = {
+  'first-party': 0,
+  'third-party-public': 1,
+  'third-party-private': 2,
+}
+
+/**
+ * Clamp a stash entry's trust tier to its containing media's tier as a FLOOR: a stash entry may render
+ * at the parent's tier or LOWER (less trusted), never HIGHER.
+ *
+ * @remarks
+ * The committee's #1-ranked escalation: a `third-party-private` Media carrying a stash entry tagged
+ * `first-party` would otherwise render its fallback text in a `<trusted_content_…>` envelope (the
+ * media-fallback renderer keys the envelope off the entry's OWN tier). That lets untrusted content
+ * smuggle itself into the trusted tier. Flooring to the parent closes it: a child can de-escalate but
+ * never escalate above the asset it belongs to.
+ */
+export const floorTrustTier = <T extends string>(parent: T, entry: T): T => {
+  const p = TRUST_RANK[parent] ?? 2
+  const e = TRUST_RANK[entry] ?? 2
+  // Higher rank number = less trusted. The floor is the LESS-trusted (higher-rank) of the two.
+  return e >= p ? entry : parent
+}
+
 // ─── ADK-primitive → attribute-envelope adapters (shared) ─────────────────────
 
 export const memoryToAttrs = (m: Memory): { memory: Memory; attrs: MemoryAttrs } => ({

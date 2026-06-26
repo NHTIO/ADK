@@ -28,6 +28,10 @@ import {
   renderTrustedContent,
   renderUntrustedContent,
   toolsToChatCompletionsTools,
+  neutraliseDeveloperRulesTag,
+  sanitizeMimeType,
+  sanitizeFilenameForDescription,
+  floorTrustTier,
 } from '../chat_common/helpers'
 import type { ChatHelpersCommon } from '../chat_common/types'
 import type {
@@ -169,7 +173,7 @@ const renderTextInEnvelope = (
 }
 
 const renderSyntheticMediaDescription = (media: Media, byteLen: number | undefined): string =>
-  `[media: ${media.filename}, ${media.mimeType}, ${formatBytesHumanReadable(byteLen)}]`
+  `[media: ${sanitizeFilenameForDescription(media.filename)}, ${sanitizeMimeType(media.mimeType, media.kind === 'image' || media.kind === 'audio' ? media.kind : undefined)}, ${formatBytesHumanReadable(byteLen)}]`
 
 /**
  * Render a single {@link Media} for the native Ollama wire. Images become a base64 entry pushed to
@@ -182,7 +186,8 @@ const renderSyntheticMediaDescription = (media: Media, byteLen: number | undefin
  * harness-controlled `Media.id`, rendered alongside each media so the model can reference it
  * by id in tool calls. Carries no authority; renders outside the untrusted envelope.
  */
-const renderMediaIdMarker = (media: Media): string => `[media id: ${media.id} | ${media.filename}]`
+const renderMediaIdMarker = (media: Media): string =>
+  `[media id: ${media.id} | ${sanitizeFilenameForDescription(media.filename)}]`
 
 const renderMediaForOllama = async (input: {
   media: Media
@@ -210,7 +215,9 @@ const renderMediaForOllama = async (input: {
     if (fallback) {
       return {
         text: renderTextInEnvelope(fallback.text, {
-          trustTier: fallback.entryTier,
+          // Floor the stash entry's tier to the parent media's (a stash entry may render less trusted
+          // than its asset, never more) — the committee's #1-ranked media escalation.
+          trustTier: floorTrustTier(media.trustTier, fallback.entryTier),
           modality,
           nonce,
           toolName,
@@ -276,7 +283,10 @@ export const renderOllamaTimelineMessage = async (input: {
       ? message.identity.representation.toString()
       : ''
   const representation = representationRaw.length > 0 ? representationRaw : identifier
-  const text = message.content !== undefined ? message.content.toString() : ''
+  // Neutralise a body-embedded no-nonce developer-rules tier (envelope-mimicry defense).
+  const text = neutraliseDeveloperRulesTag(
+    message.content !== undefined ? message.content.toString() : ''
+  )
   const createdAtStr = message.createdAt.toISO?.() ?? ''
   const createdAtAttr = createdAtStr ? ` createdAt="${escapeXmlAttribute(createdAtStr)}"` : ''
   const attachments = message.attachments

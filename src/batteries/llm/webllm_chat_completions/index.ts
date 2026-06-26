@@ -89,6 +89,11 @@ export type {
   WebLLMChatCompletionsRequestBody,
   DescriptionLike,
   ChatCompletionsHelpers,
+  BatteryLifecyclePhase,
+  BatteryLifecycleBattery,
+  BatteryLifecycleReport,
+  BatteryLifecycleCallback,
+  BatteryLifecycleHooks,
 } from './types'
 
 export { webLLMChatCompletionsOptionsSchema, validateOptions } from './validation'

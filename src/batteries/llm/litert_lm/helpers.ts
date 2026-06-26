@@ -19,6 +19,11 @@ import { ArtifactTool, Tool } from '@nhtio/adk'
 import { Tokenizable, SpooledArtifact } from '@nhtio/adk'
 import { E_UNSUPPORTED_MEDIA_MODALITY } from './exceptions'
 import {
+  neutraliseDeveloperRulesTag,
+  sanitizeMimeType,
+  sanitizeFilenameForDescription,
+} from '../chat_common/helpers'
+import {
   descriptionToChatCompletionsJsonSchema,
   renderUntrustedContent as commonRenderUntrustedContent,
   renderTrustedContent as commonRenderTrustedContent,
@@ -81,6 +86,8 @@ export {
 // LiteRT-LM (v0.13.1) is text-only: tool calls + reasoning arrive as text in `content`, parsed here.
 export * from '../chat_common/tool_parsers'
 export * from '../chat_common/reasoning_parsers'
+export * from '../chat_common/lifecycle'
+export * from '../chat_common/generation'
 
 // ── LiteRT-native mappers ─────────────────────────────────────────────────────────────────────────
 
@@ -121,6 +128,49 @@ export const toolsToLiteRtTools = (
 export const defaultToolsToLiteRtTools = toolsToLiteRtTools
 
 /**
+ * Render tool definitions as a SYSTEM-PROMPT text block (the prompt-injection tool-delivery path),
+ * rather than the native `preface.tools` field.
+ *
+ * @remarks
+ * **Why this exists.** LiteRT-LM applies the model's OWN bundled chat template; for the Gemma-4
+ * `.litertlm` preview builds, the template's tools branch is broken — passing `preface.tools` throws
+ * `Failed to apply template: undefined value` inside the wasm runtime (a known Gemma-4 chat-template
+ * bug, also seen in llama.cpp / mlx-lm / LM Studio when `tools[]` hits the native template). The
+ * portable fix every other browser runtime uses (WebLLM/MLC, Open WebUI's "default" mode) is to
+ * describe the tools as TEXT in the system prompt and parse the model's emitted call out of the output
+ * — which the shared {@link createAutoToolCallParser} already does (its `gemma` family handles the
+ * decoder-stripped `call:NAME{…}` runtime form, plus hermes/pythonic as fallbacks).
+ *
+ * The block lists each tool's name, description, and JSON-Schema parameters, then instructs the
+ * Gemma-documented pythonic call format `[func(arg=value)]`. The model's natural `call:NAME{…}` form is
+ * ALSO accepted by the `auto` parser, so compliance has two catch paths.
+ */
+export const renderToolsAsPromptText = (
+  tools: ReadonlyArray<Tool | ArtifactTool>,
+  deps: {
+    descriptionToChatCompletionsJsonSchema: (d: DescriptionLike) => JsonSchema
+  } = { descriptionToChatCompletionsJsonSchema }
+): string => {
+  const defs = toolsToLiteRtTools(tools, deps)
+  if (defs.length === 0) return ''
+  const lines = defs.map(
+    (d) =>
+      `- ${d.name}: ${d.description ?? ''}\n  parameters (JSON Schema): ${JSON.stringify(d.parameters)}`
+  )
+  return [
+    '<tool_definitions>',
+    'You have access to the following tools. When you decide to call one, emit the call as',
+    '`[func_name(param=value, ...)]` and nothing else on that line. Use only the tools listed.',
+    '',
+    ...lines,
+    '</tool_definitions>',
+  ].join('\n')
+}
+
+/** Default {@link renderToolsAsPromptText}. */
+export const defaultRenderToolsAsPromptText = renderToolsAsPromptText
+
+/**
  * Render a media kind/mime/filename into a LiteRT content item, or fall back per
  * `unsupportedMediaPolicy`.
  *
@@ -150,10 +200,11 @@ export const renderMediaToLiteRtContent = async (input: {
     const b64 = await media.asBase64()
     // LiteRT content items carry inline data via a data: URI in the `path` slot for the preview
     // builds; refine against the real multimodal model when one ships.
+    const safeMime = sanitizeMimeType(media.mimeType, kind)
     return [
       {
         type: kind,
-        path: `data:${media.mimeType};base64,${b64}`,
+        path: `data:${safeMime};base64,${b64}`,
       } as LiteRtMessageContentItem,
     ]
   }
@@ -182,7 +233,7 @@ const DEFAULT_STASH_FALLBACK_KEYS = ['text:transcript', 'text:caption', 'text:de
 
 /** Synthetic one-line description used when no stash text is available and the policy permits it. */
 const syntheticMediaDescription = (media: Media): string =>
-  `[media: ${media.filename}, kind=${media.kind}, mime=${media.mimeType}]`
+  `[media: ${sanitizeFilenameForDescription(media.filename)}, kind=${media.kind}, mime=${sanitizeMimeType(media.mimeType, media.kind === 'image' || media.kind === 'audio' ? media.kind : undefined)}]`
 
 /**
  * Resolve a media instance to fallback text per the policy.
@@ -325,7 +376,20 @@ export const buildLiteRtConversationInput = async (input: {
   selfIdentity: string
   thoughtSurfacing: 'all-self' | 'latest-self' | 'all'
   replayCompatibility: ReadonlyArray<string>
+  /**
+   * How tool definitions reach the model. `'prompt'` (default) renders them as system-prompt text (the
+   * portable path — the Gemma-4 `.litertlm` template throws on native `tools`); `'native'` uses
+   * `preface.tools` (the chat-template path — only for models whose template handles tools).
+   */
+  toolDelivery?: 'prompt' | 'native'
+  /**
+   * Whether the model's "thinking" mode is enabled. Passed EXPLICITLY into the chat template via
+   * `preface.extra_context.enable_thinking` so the template never decides for itself. Defaults to
+   * `false`.
+   */
+  enableThinking?: boolean
   toolsToLiteRtTools: typeof toolsToLiteRtTools
+  renderToolsAsPromptText?: typeof renderToolsAsPromptText
   renderThought: typeof renderThought
   filterThoughts: typeof filterThoughts
   renderUntrustedContent: typeof commonRenderUntrustedContent
@@ -338,6 +402,14 @@ export const buildLiteRtConversationInput = async (input: {
   renderFirstPartyRetrievables: typeof renderFirstPartyRetrievables
   renderThirdPartyPublicRetrievables: typeof renderThirdPartyPublicRetrievables
   renderThirdPartyPrivateRetrievables: typeof renderThirdPartyPrivateRetrievables
+  // Multimodal: the two SessionConfig modality flags + the policy + the media renderer. When a user
+  // message carries `attachments` and the matching flag is on, the message's `content` becomes a
+  // MessageContentItem[] ([text, image|audio, …]); otherwise media degrades via the policy. Off by
+  // default → text-only behavior byte-for-byte unchanged.
+  visionModalityEnabled?: boolean
+  audioModalityEnabled?: boolean
+  unsupportedMediaPolicy?: UnsupportedMediaPolicy
+  renderMediaToLiteRtContent?: typeof renderMediaToLiteRtContent
   warn?: (msg: string) => void
 }): Promise<{ preface: LiteRtPreface; messages: LiteRtMessage[] }> => {
   // Leading system content (system prompt + before-timeline buckets), reusing the shared renderer.
@@ -357,14 +429,29 @@ export const buildLiteRtConversationInput = async (input: {
     renderUntrustedContent: input.renderUntrustedContent,
   } as never)
 
+  // Tool delivery: 'prompt' (default) renders tool defs as system text (the portable path — the
+  // Gemma-4 .litertlm template throws on native `tools`); 'native' uses preface.tools.
+  const toolDelivery = input.toolDelivery ?? 'prompt'
+  const visibleTools = input.tools.visible()
+  const renderToolsText = input.renderToolsAsPromptText ?? renderToolsAsPromptText
+  const toolsPromptText =
+    toolDelivery === 'prompt' && visibleTools.length > 0 ? renderToolsText(visibleTools) : ''
+
   const prefaceMessages: LiteRtMessage[] = []
-  if (typeof systemText === 'string' && systemText.length > 0) {
-    prefaceMessages.push({ role: 'system', content: systemText })
+  const systemParts: string[] = []
+  if (typeof systemText === 'string' && systemText.length > 0) systemParts.push(systemText)
+  if (toolsPromptText.length > 0) systemParts.push(toolsPromptText)
+  if (systemParts.length > 0) {
+    prefaceMessages.push({ role: 'system', content: systemParts.join('\n\n') })
   }
-  const toolDefs = input.toolsToLiteRtTools(input.tools.visible())
+  const toolDefs = toolDelivery === 'native' ? input.toolsToLiteRtTools(visibleTools) : []
   const preface: LiteRtPreface = {
     messages: prefaceMessages,
     ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
+    // Always pass the thinking flag EXPLICITLY into the template's variable scope — the gemma-4
+    // template gates `<|think|>` on `enable_thinking is defined and enable_thinking`, so leaving it
+    // unset lets the runtime decide. Default off.
+    extra_context: { enable_thinking: input.enableThinking ?? false },
   }
 
   // Timeline: messages + surviving thoughts + tool calls, chronological.
@@ -392,8 +479,37 @@ export const buildLiteRtConversationInput = async (input: {
     if (item.kind === 'message') {
       const m = item.value
       const role = m.role === 'user' ? 'user' : 'assistant'
-      const text = m.content !== undefined ? m.content.toString() : ''
-      messages.push({ role, content: text })
+      // Neutralise a body-embedded no-nonce developer-rules tier (envelope-mimicry defense).
+      const text = neutraliseDeveloperRulesTag(m.content !== undefined ? m.content.toString() : '')
+      // Multimodal: a message with attachments + the renderer wired → emit a content-item array
+      // (text first, then one item per attachment via the shared media renderer, which honors the
+      // modality flags + degrades disabled/unsupported kinds through `unsupportedMediaPolicy`).
+      const renderMedia = input.renderMediaToLiteRtContent
+      if (renderMedia && m.attachments.length > 0) {
+        const contentItems: LiteRtMessageContentItem[] =
+          text.length > 0 ? [{ type: 'text', text }] : []
+        for (const media of m.attachments) {
+          const modalityEnabled =
+            media.kind === 'image'
+              ? (input.visionModalityEnabled ?? false)
+              : media.kind === 'audio'
+                ? (input.audioModalityEnabled ?? false)
+                : false
+          const rendered = await renderMedia({
+            media,
+            nonce: m.id,
+            unsupportedMediaPolicy: input.unsupportedMediaPolicy ?? 'throw',
+            modalityEnabled,
+            renderUntrustedContent: input.renderUntrustedContent,
+            renderTrustedContent: input.renderTrustedContent,
+            warn: input.warn,
+          })
+          contentItems.push(...rendered)
+        }
+        messages.push({ role, content: contentItems })
+      } else {
+        messages.push({ role, content: text })
+      }
     } else if (item.kind === 'thought') {
       const t = item.value
       const envelope = input.renderThought(t.content.toString(), {

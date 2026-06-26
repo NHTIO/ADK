@@ -137,6 +137,14 @@ export const webLLMChatCompletionsOptionsSchema = validator
     createEngine: validator.function().optional(),
     onInitProgress: validator.function().optional(),
     isWebGPUAvailable: validator.function().optional(),
+    // ── Lifecycle hooks (opt-in, normalized phase machine; additive over onInitProgress) ──
+    onLifecycle: validator.function().optional(),
+    onLoading: validator.function().optional(),
+    onCompiling: validator.function().optional(),
+    onReady: validator.function().optional(),
+    onGenerating: validator.function().optional(),
+    onComplete: validator.function().optional(),
+    onError: validator.function().optional(),
     engineConfig: validator.object().unknown(true).optional(),
     chatOptions: validator
       .alternatives(
@@ -146,7 +154,9 @@ export const webLLMChatCompletionsOptionsSchema = validator
       .optional(),
     stream: validator.boolean().default(true),
     bucketOrder: bucketOrderSchema,
-    contextWindow: validator.number().integer().min(1).optional(),
+    // Safe context budget (enforced only when `tokenEncoding` is non-null — counting is opt-in, but the
+    // ceiling is pinned so once enabled it never silently exceeds a small on-device model's window).
+    contextWindow: validator.number().integer().min(1).default(4096),
     selfIdentity: validator.string().min(1).default('assistant'),
     thoughtSurfacing: validator
       .string()
@@ -178,7 +188,9 @@ export const webLLMChatCompletionsOptionsSchema = validator
     frequency_penalty: validator.number().min(-2).max(2).optional(),
     logit_bias: validator.object().pattern(validator.string(), validator.number()).optional(),
     logprobs: validator.boolean().optional(),
-    max_tokens: validator.number().integer().min(1).optional(),
+    // Generation knobs are pinned with explicit deterministic-friendly defaults so the MLC engine never
+    // falls back to a model-config guess (the source of per-model surprises). temperature 0 = greedy.
+    max_tokens: validator.number().integer().min(1).default(1024),
     n: validator.number().integer().min(1).optional(),
     presence_penalty: validator.number().min(-2).max(2).optional(),
     response_format: responseFormatSchema.optional(),
@@ -187,15 +199,18 @@ export const webLLMChatCompletionsOptionsSchema = validator
       .alternatives(validator.string(), validator.array().items(validator.string()))
       .optional(),
     stream_options: validator.object().unknown(true).optional(),
-    temperature: validator.number().min(0).max(2).optional(),
+    temperature: validator.number().min(0).max(2).default(0),
     tool_choice: toolChoiceSchema.optional(),
     top_logprobs: validator.number().integer().min(0).optional(),
-    top_p: validator.number().min(0).max(1).optional(),
+    top_p: validator.number().min(0).max(1).default(0.95),
     user: validator.string().optional(),
     repetition_penalty: validator.number().optional(),
     ignore_eos: validator.boolean().optional(),
     extra_body: validator.object().unknown(true).optional(),
     max_completion_tokens: validator.number().integer().min(1).optional(),
+    // Explicit thinking flag (default OFF). Threaded into the request as extra_body.enable_thinking by
+    // the adapter so the underlying chat template never decides for itself (Qwen3/DeepSeek default ON).
+    enableThinking: validator.boolean().default(false),
   })
   .unknown(false)
 

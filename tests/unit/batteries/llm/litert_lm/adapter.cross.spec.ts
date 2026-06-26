@@ -13,10 +13,11 @@ import {
   SpooledArtifact,
   ToolRegistry,
   Registry,
+  inMemoryMediaReader,
 } from '@nhtio/adk/common'
 import type { DispatchContext } from '@nhtio/adk/types'
-import type { LiteRtMessage } from '@nhtio/adk/batteries/llm/litert_lm'
 import type { DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
+import type { LiteRtMessage, BatteryLifecycleReport } from '@nhtio/adk/batteries/llm/litert_lm'
 
 // ─── shared mock context / helpers (mirrors the webllm + openai battery specs) ──────────────────────
 
@@ -106,6 +107,7 @@ const makeCtx = (overrides: CtxOverrides = {}): MockCtx => {
     mutateToolCall: vi.fn(async (id: string, patch: unknown) => {
       stored.mutations.push({ id, patch })
     }),
+    storeMediaBytes: vi.fn(async (_id: string, bytes: Uint8Array) => inMemoryMediaReader(bytes)),
     _stored: stored,
   } as unknown as MockCtx
   return ctx
@@ -239,6 +241,19 @@ describe('LiteRtLmAdapter — validation', () => {
       E_INVALID_LITERT_LM_OPTIONS
     )
   })
+
+  it('rejects k>1 under the GREEDY sampler (the runtime requires k<=1 for greedy)', () => {
+    // Caught at validation, not at generation time inside the wasm runtime (`Top-K value N must be <=1`).
+    expect(() => new LiteRtLmAdapter({ model: 'm', samplerParams: { type: 3, k: 40 } })).toThrow(
+      E_INVALID_LITERT_LM_OPTIONS
+    )
+  })
+
+  it('allows k>1 under the TOP_K sampler', () => {
+    expect(
+      () => new LiteRtLmAdapter({ model: 'm', samplerParams: { type: 1, k: 64 } })
+    ).not.toThrow()
+  })
 })
 
 // ─── engine invocation ──────────────────────────────────────────────────────────────────────────────
@@ -260,6 +275,79 @@ describe('LiteRtLmAdapter — engine invocation', () => {
     expect(stored).toBeDefined()
     expect(stored?.content?.toString()).toBe('hello from litert')
     expect(ctx.ack).toHaveBeenCalledOnce()
+  })
+
+  it('passes EXPLICIT generation defaults to the runtime (never lets it guess)', async () => {
+    const h = makeEngine({ message: { content: 'ok' } })
+    // No generation options supplied → the validation defaults must be materialised and forwarded.
+    const adapter = new LiteRtLmAdapter({ model: 'm', stream: false, engine: h.engine as never })
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })] })
+    await adapter.executor()(ctx, makeHelpers())
+
+    const cfg = h.configs[0] as {
+      preface?: { extra_context?: { enable_thinking?: boolean } }
+      sessionConfig?: {
+        samplerParams?: { type?: number; k?: number; p?: number; temperature?: number }
+        maxOutputTokens?: number
+      }
+    }
+    // Thinking is explicitly OFF (not left to the template).
+    expect(cfg.preface?.extra_context?.enable_thinking).toBe(false)
+    // Sampler is explicitly GREEDY (3). GREEDY is argmax/top-1, so k is pinned to 1 (the LiteRT runtime
+    // requires k<=1 for GREEDY); p/temperature are still pinned so switching to TOP_K/TOP_P is complete.
+    expect(cfg.sessionConfig?.samplerParams?.type).toBe(3)
+    expect(cfg.sessionConfig?.samplerParams?.k).toBe(1)
+    expect(cfg.sessionConfig?.samplerParams?.p).toBeCloseTo(0.95)
+    expect(cfg.sessionConfig?.samplerParams?.temperature).toBeCloseTo(0.7)
+    expect(cfg.sessionConfig?.maxOutputTokens).toBe(1024)
+  })
+
+  it('maps the PORTABLE canonical contract → native samplerParams/maxOutputTokens', async () => {
+    const h = makeEngine({ message: { content: 'ok' } })
+    // Canonical (battery-agnostic) config — the same shape transformers.js accepts.
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      engine: h.engine as never,
+      maxTokens: 256,
+      sampler: 'top-k',
+      topK: 16,
+      topP: 0.8,
+      temperature: 0.3,
+    })
+    await adapter.executor()(
+      makeCtx({ turnMessages: [makeMessage({ content: 'hi' })] }),
+      makeHelpers()
+    )
+    const cfg = h.configs[0] as {
+      sessionConfig?: {
+        samplerParams?: { type?: number; k?: number; p?: number; temperature?: number }
+        maxOutputTokens?: number
+      }
+    }
+    // sampler:'top-k' → SamplerType.TOP_K (1); canonical knobs flow into samplerParams; maxTokens→maxOutputTokens.
+    expect(cfg.sessionConfig?.samplerParams?.type).toBe(1)
+    expect(cfg.sessionConfig?.samplerParams?.k).toBe(16)
+    expect(cfg.sessionConfig?.samplerParams?.p).toBeCloseTo(0.8)
+    expect(cfg.sessionConfig?.samplerParams?.temperature).toBeCloseTo(0.3)
+    expect(cfg.sessionConfig?.maxOutputTokens).toBe(256)
+  })
+
+  it('canonical `maxTokens` wins over native `maxOutputTokens` when both are set', async () => {
+    const h = makeEngine({ message: { content: 'ok' } })
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      engine: h.engine as never,
+      maxTokens: 128,
+      maxOutputTokens: 999,
+    })
+    await adapter.executor()(
+      makeCtx({ turnMessages: [makeMessage({ content: 'hi' })] }),
+      makeHelpers()
+    )
+    const cfg = h.configs[0] as { sessionConfig?: { maxOutputTokens?: number } }
+    expect(cfg.sessionConfig?.maxOutputTokens).toBe(128)
   })
 
   it('non-streaming: content as MessageContentItem[] is flattened to text', async () => {
@@ -400,9 +488,9 @@ describe('LiteRtLmAdapter — tool calls', () => {
   })
 
   it('unknown tool → stored as an error tool call', async () => {
-    // Use a custom parser to surface a call to a tool that isn't registered (the bundled 'auto'
-    // parsers guard llama3_json/pythonic on callee∈toolNames; a custom fn bypasses that to test the
-    // adapter's not-found handling directly).
+    // Use a custom parser to surface a call to a tool that isn't registered — exercises the adapter's
+    // not-found handling directly. (The bundled parsers also surface unknown callees now; authorization
+    // is the dispatch layer's job, which is exactly the not-found path asserted here.)
     const h = makeEngine({ message: { content: 'CALL nope' } })
     const adapter = new LiteRtLmAdapter({
       model: 'm',
@@ -502,5 +590,139 @@ describe('LiteRtLmAdapter — abort', () => {
     await adapter.executor()(ctx, makeHelpers())
     expect(h.cancelled).toBeGreaterThanOrEqual(1)
     expect(ctx._stored.messages).toHaveLength(0)
+  })
+})
+
+// ─── lifecycle hooks ────────────────────────────────────────────────────────────────────────────────
+
+describe('LiteRtLmAdapter — lifecycle hooks', () => {
+  it('fires loading → compiling → ready → generating → complete via createEngine (firehose + per-phase)', async () => {
+    const seen: string[] = []
+    const perPhase: string[] = []
+    const h = makeEngine({ message: { content: 'pong' } })
+    const adapter = new LiteRtLmAdapter({
+      model: 'https://example/model.litertlm',
+      stream: false,
+      autoAck: true,
+      isWebGPUAvailable: () => true,
+      createEngine: async () => h.engine as never,
+      onLifecycle: (r: BatteryLifecycleReport) => seen.push(r.phase),
+      onLoading: () => perPhase.push('loading'),
+      onCompiling: () => perPhase.push('compiling'),
+      onReady: () => perPhase.push('ready'),
+      onGenerating: () => perPhase.push('generating'),
+      onComplete: () => perPhase.push('complete'),
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    // `compiling` lands between `loading` (download start) and `ready` (engine resolved) — the
+    // otherwise-invisible WebGPU shader/graph build, the boundary the LiteRT chat demo marks.
+    expect(seen).toEqual(['loading', 'compiling', 'ready', 'generating', 'complete'])
+    expect(perPhase).toEqual(['loading', 'compiling', 'ready', 'generating', 'complete'])
+  })
+
+  it('reports battery=litert_lm + the model URL on every report', async () => {
+    const reports: BatteryLifecycleReport[] = []
+    const h = makeEngine({ message: { content: 'ok' } })
+    const adapter = new LiteRtLmAdapter({
+      model: 'https://example/m.litertlm',
+      stream: false,
+      autoAck: true,
+      isWebGPUAvailable: () => true,
+      createEngine: async () => h.engine as never,
+      onLifecycle: (r: BatteryLifecycleReport) => reports.push(r),
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    for (const r of reports) {
+      expect(r.battery).toBe('litert_lm')
+      expect(r.model).toBe('https://example/m.litertlm')
+    }
+  })
+
+  it('a pre-built engine skips loading/ready but still fires generating/complete', async () => {
+    const seen: string[] = []
+    const h = makeEngine({ message: { content: 'ok' } })
+    const adapter = new LiteRtLmAdapter({
+      model: 'https://example/m.litertlm',
+      stream: false,
+      autoAck: true,
+      engine: h.engine as never,
+      onLifecycle: (r: BatteryLifecycleReport) => seen.push(r.phase),
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    expect(seen).toEqual(['generating', 'complete'])
+  })
+
+  it('emits error (not complete) when engine creation fails', async () => {
+    const phases: string[] = []
+    const adapter = new LiteRtLmAdapter({
+      model: 'https://example/m.litertlm',
+      stream: false,
+      isWebGPUAvailable: () => true,
+      createEngine: async () => {
+        throw new Error('engine boom')
+      },
+      onLifecycle: (r: BatteryLifecycleReport) => phases.push(r.phase),
+    })
+    const ctx = makeCtx()
+    await adapter.executor()(ctx, makeHelpers())
+    expect(phases).toContain('loading')
+    expect(phases).toContain('error')
+    expect(phases).not.toContain('complete')
+    expect(ctx.nack).toHaveBeenCalled()
+  })
+
+  it('a throwing consumer hook does not break the dispatch', async () => {
+    const h = makeEngine({ message: { content: 'still works' } })
+    const adapter = new LiteRtLmAdapter({
+      model: 'https://example/m.litertlm',
+      stream: false,
+      autoAck: true,
+      engine: h.engine as never,
+      onLifecycle: () => {
+        throw new Error('hook blew up')
+      },
+    })
+    const ctx = makeCtx()
+    await adapter.executor()(ctx, makeHelpers())
+    expect(ctx._stored.messages[0]?.content?.toString()).toContain('still works')
+    expect(ctx.ack).toHaveBeenCalledOnce()
+  })
+})
+
+describe('LiteRtLmAdapter — media output (extractMediaOutputs seam)', () => {
+  const wavBytes = new Uint8Array([0x52, 0x49, 0x46, 0x46, 9, 8, 7, 6])
+
+  it('attaches generated media to the assistant message + persists via storeMediaBytes', async () => {
+    const h = makeEngine({ message: { content: 'here is your audio' } })
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      engine: h.engine as never,
+      extractMediaOutputs: () => [{ kind: 'audio', mimeType: 'audio/wav', bytes: wavBytes }],
+    })
+    const ctx = makeCtx()
+    await adapter.executor()(ctx, makeHelpers())
+    const msg = ctx._stored.messages[0]
+    expect(msg?.content?.toString()).toBe('here is your audio')
+    expect(msg?.attachments.length).toBe(1)
+    expect(msg?.attachments[0]?.kind).toBe('audio')
+    expect(msg?.attachments[0]?.trustTier).toBe('first-party')
+    expect(await msg!.attachments[0]!.asBytes()).toEqual(wavBytes)
+  })
+
+  it('DEFAULT (no hook) stores text-only with NO attachments — no regression', async () => {
+    const h = makeEngine({ message: { content: 'plain answer' } })
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      engine: h.engine as never,
+    })
+    const ctx = makeCtx()
+    await adapter.executor()(ctx, makeHelpers())
+    const msg = ctx._stored.messages[0]
+    expect(msg?.content?.toString()).toBe('plain answer')
+    expect(msg?.attachments.length).toBe(0)
   })
 })

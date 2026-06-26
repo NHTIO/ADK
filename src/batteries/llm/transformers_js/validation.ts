@@ -96,6 +96,7 @@ const toolCallParserSchema = validator
         'llama3_json',
         'mistral',
         'qwen3_coder',
+        'phi',
         'none'
       ),
     validator.function()
@@ -123,22 +124,51 @@ export const transformersJsOptionsSchema = validator
       .optional(),
     createPipeline: validator.function().optional(),
     createStreamer: validator.function().optional(),
-    device: validator.string().optional(),
-    dtype: validator.string().optional(),
+    // device/dtype: a scalar string OR a per-submodule Record (multimodal).
+    device: validator.alternatives(validator.string(), validator.object().unknown(true)).optional(),
+    dtype: validator.alternatives(validator.string(), validator.object().unknown(true)).optional(),
     onInitProgress: validator.function().optional(),
     isAvailable: validator.function().optional(),
-    // ── Generation ──
+    // ── Multimodal (opt-in) ──
+    multimodal: validator
+      .alternatives(
+        validator.boolean(),
+        validator.object({ image: validator.boolean(), audio: validator.boolean() }).unknown(false)
+      )
+      .optional(),
+    multimodalEngine: validator.object().unknown(true).optional(),
+    createMultimodal: validator.function().optional(),
+    modelSource: validator.function().optional(),
+    // ── Lifecycle hooks (opt-in, normalized phase machine; additive over onInitProgress) ──
+    onLifecycle: validator.function().optional(),
+    onLoading: validator.function().optional(),
+    onCompiling: validator.function().optional(),
+    onReady: validator.function().optional(),
+    onGenerating: validator.function().optional(),
+    onComplete: validator.function().optional(),
+    onError: validator.function().optional(),
+    // ── Generation: PORTABLE canonical contract (shared with LiteRT-LM) ──
+    // Optional (no defaults here) — the resolver fills defaults and applies canonical-wins precedence so
+    // the native fields below still work as escape hatches.
+    maxTokens: validator.number().integer().min(1).optional(),
+    sampler: validator.string().valid('greedy', 'top-k', 'top-p').optional(),
+    seed: validator.number().integer().optional(),
+    // ── Generation: transformers.js-NATIVE escape hatches ── (explicit defaults — never let `generate`
+    // guess; the resolver consults these only when the canonical field above is unset) ──
     maxNewTokens: validator.number().integer().min(1).optional(),
     doSample: validator.boolean().optional(),
-    temperature: validator.number().min(0).optional(),
-    topK: validator.number().integer().min(1).optional(),
-    topP: validator.number().min(0).max(1).optional(),
-    repetitionPenalty: validator.number().min(0).optional(),
+    temperature: validator.number().min(0).default(0.7),
+    topK: validator.number().integer().min(1).default(40),
+    topP: validator.number().min(0).max(1).default(0.95),
+    repetitionPenalty: validator.number().min(0).default(1.1),
     stopStrings: validator.array().items(validator.string()).optional(),
+    enableThinking: validator.boolean().default(false),
     // ── ADK control ──
     stream: validator.boolean().default(true),
     bucketOrder: bucketOrderSchema,
-    contextWindow: validator.number().integer().min(1).optional(),
+    // Safe context budget (enforced only when `tokenEncoding` is non-null — counting is opt-in, but the
+    // ceiling is pinned so once enabled it never silently exceeds a small on-device model's window).
+    contextWindow: validator.number().integer().min(1).default(4096),
     selfIdentity: validator.string().min(1).default('assistant'),
     thoughtSurfacing: validator
       .string()
@@ -153,6 +183,8 @@ export const transformersJsOptionsSchema = validator
     autoAck: validator.boolean().default(false),
     toolCallParser: toolCallParserSchema,
     reasoningParser: reasoningParserSchema,
+    reasoningOrphanRecovery: validator.boolean().default(true),
+    extractMediaOutputs: validator.function().optional(),
   })
   .unknown(false)
 

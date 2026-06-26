@@ -24,8 +24,12 @@ import { DateTime } from 'luxon'
 import { sha256 } from 'js-sha256'
 import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
+import { withModelSource } from './model_source'
+import { emitLifecycle } from '../chat_common/lifecycle'
+import { stripEnvelopeSpecialTokens } from '../chat_common/helpers'
 import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
 import { resolveToolCallParser } from '../chat_common/tool_parsers'
+import { resolveGenerationOptions } from '../chat_common/generation'
 import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { resolveReasoningParser } from '../chat_common/reasoning_parsers'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
@@ -61,13 +65,20 @@ import {
   defaultToolsToTransformersJsTools,
   defaultRenderTransformersJsToolResult,
   defaultBuildTransformersJsMessages,
+  defaultMediaToTransformersInput,
   defaultCreateTransformersJsStreamAccumulator,
 } from './helpers'
 import type { Tool } from '@nhtio/adk/common'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { ParsedToolCall } from '../chat_common/tool_parsers'
-import type { TransformersJsAdapterOptions, TransformersJsPipeline } from './types'
+import type { ChatSampler, ResolvedGenerationOptions } from '../chat_common/generation'
 import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
+import type {
+  TransformersJsAdapterOptions,
+  TransformersJsPipeline,
+  TransformersJsModel,
+  TransformersJsProcessor,
+} from './types'
 
 // ─── Option merging (constructor → executor overrides → stash) ────────────────────────────────────
 
@@ -190,6 +201,32 @@ const nowIso = (): string => DateTime.now().toISO() as string
 const computeChecksum = (tool: string, args: Record<string, unknown>): string =>
   sha256(canonicalStringify({ tool, args }))
 
+/**
+ * Wrap the consumer's `onInitProgress` so each transformers.js download event ALSO emits a normalized
+ * `loading` lifecycle report. The HF `progress` field is 0..100 → forwarded as `progress` 0..1, with the
+ * raw payload on `raw`. The original `onInitProgress` is still called verbatim (additive). Returns the
+ * original callback unchanged when no lifecycle hooks are configured (zero overhead on the text path).
+ */
+const wrapTransformersInitProgress = (
+  merged: TransformersJsAdapterOptions
+): TransformersJsAdapterOptions['onInitProgress'] => {
+  const hasLifecycle =
+    merged.onLifecycle ??
+    merged.onLoading ??
+    merged.onReady ??
+    merged.onGenerating ??
+    merged.onError
+  if (!hasLifecycle) return merged.onInitProgress
+  return (info: unknown) => {
+    const p = (info as { progress?: number } | undefined)?.progress
+    emitLifecycle(merged, 'transformers_js', merged.model, 'loading', {
+      ...(typeof p === 'number' ? { progress: p / 100 } : {}),
+      raw: info,
+    })
+    merged.onInitProgress?.(info as never)
+  }
+}
+
 /** Markers that signal the start of tool-call / reasoning markup — used to stop streaming prose. */
 const TEXT_MARKUP_MARKERS = [
   '<tool_call>',
@@ -223,6 +260,10 @@ export class TransformersJsAdapter {
   readonly #baseline: TransformersJsAdapterOptions
   #pipeline: TransformersJsPipeline | undefined
   #pipelinePromise: Promise<TransformersJsPipeline> | undefined
+  #mmEngine: { model: TransformersJsModel; processor: TransformersJsProcessor } | undefined
+  #mmEnginePromise:
+    | Promise<{ model: TransformersJsModel; processor: TransformersJsProcessor }>
+    | undefined
 
   /**
    * Whether this battery is available. transformers.js is environment-neutral (Node + browser), so this
@@ -259,10 +300,159 @@ export class TransformersJsAdapter {
     return this.#resolvePipeline(merged)
   }
 
-  /** Drop the cached pipeline and any in-flight load so the next dispatch re-resolves it. */
+  /** Drop the cached pipeline/engine and any in-flight load so the next dispatch re-resolves it. */
   reset(): void {
     this.#pipeline = undefined
     this.#pipelinePromise = undefined
+    this.#mmEngine = undefined
+    this.#mmEnginePromise = undefined
+  }
+
+  /**
+   * Release the loaded model's underlying ONNX sessions + GPU/wasm buffers, then drop all cached
+   * references (so the next dispatch re-resolves a fresh pipeline).
+   *
+   * @remarks
+   * `reset()` only nulls the JS references — it does NOT free the native ONNX Runtime sessions or the
+   * WebGPU/wasm device memory they hold. Those leak until GC, and in a browser session that loads many
+   * models back-to-back (e.g. a full matrix run) the accumulated sessions exhaust the heap, surfacing as
+   * `Can't create a session … Failed to load external data file … memory copy`. transformers.js exposes
+   * `PreTrainedModel.dispose()` ("disposes of all the ONNX sessions created during inference") and
+   * `Pipeline.dispose()` — this awaits them so the memory is actually reclaimed between loads. Settles any
+   * in-flight load first, swallows per-handle disposal errors (a half-loaded model must not throw out of
+   * teardown), and finishes with `reset()`. Idempotent and safe to call when nothing is loaded.
+   */
+  async dispose(): Promise<void> {
+    // Settle any in-flight load so we dispose the resolved handle rather than orphaning it.
+    const pipeline = this.#pipeline ?? (await this.#pipelinePromise?.catch(() => undefined))
+    const mmEngine = this.#mmEngine ?? (await this.#mmEnginePromise?.catch(() => undefined))
+    const disposables: Array<Promise<unknown>> = []
+    const pipeWithDispose = pipeline as { dispose?: () => Promise<unknown> } | undefined
+    if (typeof pipeWithDispose?.dispose === 'function') {
+      disposables.push(Promise.resolve(pipeWithDispose.dispose()).catch(() => undefined))
+    }
+    const mmModel = mmEngine?.model as { dispose?: () => Promise<unknown> } | undefined
+    if (typeof mmModel?.dispose === 'function') {
+      disposables.push(Promise.resolve(mmModel.dispose()).catch(() => undefined))
+    }
+    await Promise.all(disposables)
+    this.reset()
+  }
+
+  /**
+   * Resolve the PORTABLE generation contract (shared with LiteRT-LM) from the merged options. Canonical
+   * fields win; the transformers.js-native fields ({@link TransformersJsAdapterOptions.maxNewTokens},
+   * `doSample`, `multimodal`, …) are the fallback layer consulted only when the canonical one is unset.
+   */
+  #gen(merged: TransformersJsAdapterOptions): ResolvedGenerationOptions {
+    // Native `multimodal` is `boolean | {image,audio}` → normalise to the canonical `{image,audio}` shape.
+    const mm = merged.multimodal
+    const normalizedMultimodal: { image?: boolean; audio?: boolean } | undefined =
+      mm === undefined || mm === false
+        ? mm === false
+          ? { image: false, audio: false }
+          : undefined
+        : mm === true
+          ? { image: true, audio: true }
+          : mm
+    // Native `doSample` boolean → canonical sampler strategy. `true` becomes `'top-p'` (the common
+    // nucleus default); an explicit `sampler` canonical field overrides this entirely.
+    const nativeSampler: ChatSampler | undefined =
+      merged.doSample === undefined ? undefined : merged.doSample ? 'top-p' : 'greedy'
+    return resolveGenerationOptions(
+      {
+        maxTokens: merged.maxTokens,
+        sampler: merged.sampler,
+        temperature: merged.temperature,
+        topK: merged.topK,
+        topP: merged.topP,
+        seed: merged.seed,
+        enableThinking: merged.enableThinking,
+        // The canonical `multimodal` IS the native field here (transformers.js already used `{image,audio}`);
+        // pass it as both so canonical-wins is a no-op and the normalized shape flows through.
+        multimodal: normalizedMultimodal,
+      },
+      {
+        maxTokens: merged.maxNewTokens,
+        sampler: nativeSampler,
+        multimodal: normalizedMultimodal,
+      }
+    )
+  }
+
+  /** Normalise multimodal config to `{image,audio}` flags, or undefined when fully off. */
+  #multimodalFlags(
+    merged: TransformersJsAdapterOptions
+  ): { image: boolean; audio: boolean } | undefined {
+    const { multimodal } = this.#gen(merged)
+    return multimodal.image || multimodal.audio ? multimodal : undefined
+  }
+
+  /** Resolve (and cache, single-flight) the multimodal model+processor pair. */
+  async #resolveMultimodalEngine(
+    merged: TransformersJsAdapterOptions
+  ): Promise<{ model: TransformersJsModel; processor: TransformersJsProcessor }> {
+    if (merged.multimodalEngine) {
+      this.#mmEngine = merged.multimodalEngine
+      return merged.multimodalEngine
+    }
+    if (this.#mmEngine) return this.#mmEngine
+    this.#mmEnginePromise ??= (async () => {
+      emitLifecycle(merged, 'transformers_js', merged.model, 'loading', {
+        detail: 'loading multimodal model + processor',
+      })
+      // Forward each provider download event into a `loading` lifecycle report (normalized 0..1).
+      const forwardedInitProgress = wrapTransformersInitProgress(merged)
+      try {
+        const createMultimodal =
+          merged.createMultimodal ??
+          (async ({ model, device, dtype, onInitProgress }) => {
+            const transformers = await import('@huggingface/transformers')
+            const { AutoModelForImageTextToText, AutoProcessor, env } = transformers
+            const load = async () => {
+              const [m, processor] = await Promise.all([
+                AutoModelForImageTextToText.from_pretrained(model, {
+                  ...(device ? { device } : {}),
+                  ...(dtype ? { dtype } : {}),
+                  ...(onInitProgress ? { progress_callback: onInitProgress } : {}),
+                } as never) as unknown as Promise<TransformersJsModel>,
+                AutoProcessor.from_pretrained(model) as unknown as Promise<TransformersJsProcessor>,
+              ])
+              return { model: m, processor }
+            }
+            // When a custom model source is configured, serve files through it (OPFS / bundled / etc.)
+            // behind the global-`env` mutex; otherwise load straight from HF (unchanged path).
+            return merged.modelSource
+              ? withModelSource(env as never, merged.modelSource, load)
+              : load()
+          })
+        // `from_pretrained` covers both fetch (reported via progress_callback → `loading`) and the
+        // ONNX-graph / WebGPU-WASM warmup. Mark the latter as `compiling` — a COARSE upper-bound marker
+        // (fetch + compile overlap inside the call, so this is "now preparing the graph", not a strict
+        // post-download boundary).
+        emitLifecycle(merged, 'transformers_js', merged.model, 'compiling', {
+          detail: 'compiling multimodal model graph',
+        })
+        const engine = await createMultimodal({
+          model: merged.model,
+          device: merged.device,
+          dtype: merged.dtype,
+          onInitProgress: forwardedInitProgress,
+        })
+        this.#mmEngine = engine
+        emitLifecycle(merged, 'transformers_js', merged.model, 'ready', {
+          detail: 'multimodal model + processor ready',
+        })
+        return engine
+      } catch (err) {
+        this.#mmEnginePromise = undefined
+        emitLifecycle(merged, 'transformers_js', merged.model, 'error', { error: err })
+        throw new E_TRANSFORMERS_JS_STREAM_ERROR([
+          `could not load the transformers.js multimodal model: ${isError(err) ? err.message : String(err)} — install the peer dependency (pnpm add @huggingface/transformers)`,
+        ])
+      }
+    })()
+    return this.#mmEnginePromise
   }
 
   async #resolvePipeline(merged: TransformersJsAdapterOptions): Promise<TransformersJsPipeline> {
@@ -272,27 +462,47 @@ export class TransformersJsAdapter {
     }
     if (this.#pipeline) return this.#pipeline
     this.#pipelinePromise ??= (async () => {
+      emitLifecycle(merged, 'transformers_js', merged.model, 'loading', {
+        detail: 'loading text-generation pipeline',
+      })
+      const forwardedInitProgress = wrapTransformersInitProgress(merged)
       try {
         const createPipeline =
           merged.createPipeline ??
           (async ({ model, device, dtype, onInitProgress }) => {
-            const { pipeline } = await import('@huggingface/transformers')
-            return (await pipeline('text-generation', model, {
-              ...(device ? { device } : {}),
-              ...(dtype ? { dtype } : {}),
-              ...(onInitProgress ? { progress_callback: onInitProgress } : {}),
-            } as never)) as unknown as TransformersJsPipeline
+            const transformers = await import('@huggingface/transformers')
+            const { pipeline, env } = transformers
+            const load = async () =>
+              (await pipeline('text-generation', model, {
+                ...(device ? { device } : {}),
+                ...(dtype ? { dtype } : {}),
+                ...(onInitProgress ? { progress_callback: onInitProgress } : {}),
+              } as never)) as unknown as TransformersJsPipeline
+            return merged.modelSource
+              ? withModelSource(env as never, merged.modelSource, load)
+              : load()
           })
+        // `from_pretrained` covers both fetch (reported via progress_callback → `loading`) and the
+        // ONNX-graph / WebGPU-WASM warmup. Mark the latter as `compiling` — a COARSE upper-bound marker
+        // (fetch + compile overlap inside the call, so this is "now preparing the graph", not a strict
+        // post-download boundary).
+        emitLifecycle(merged, 'transformers_js', merged.model, 'compiling', {
+          detail: 'compiling text-generation graph',
+        })
         const pipe = await createPipeline({
           model: merged.model,
           device: merged.device,
           dtype: merged.dtype,
-          onInitProgress: merged.onInitProgress,
+          onInitProgress: forwardedInitProgress,
         })
         this.#pipeline = pipe
+        emitLifecycle(merged, 'transformers_js', merged.model, 'ready', {
+          detail: 'text-generation pipeline ready',
+        })
         return pipe
       } catch (err) {
         this.#pipelinePromise = undefined
+        emitLifecycle(merged, 'transformers_js', merged.model, 'error', { error: err })
         throw new E_TRANSFORMERS_JS_STREAM_ERROR([
           `could not load the transformers.js pipeline: ${isError(err) ? err.message : String(err)} — install the peer dependency (pnpm add @huggingface/transformers)`,
         ])
@@ -301,15 +511,33 @@ export class TransformersJsAdapter {
     return this.#pipelinePromise
   }
 
-  /** Build the transformers.js `generate` kwargs from the merged options (excluding tools/streamer). */
+  /**
+   * Build the transformers.js `generate` kwargs from the merged options (excluding tools/streamer).
+   *
+   * @remarks
+   * Every sampling/length knob is passed EXPLICITLY with a deterministic-friendly default (resolved via
+   * the shared {@link resolveGenerationOptions} from the portable contract) so the downstream `generate`
+   * never falls back to the model config's own guess — the source of per-model surprises. Greedy maps to
+   * `do_sample:false`; `'top-k'`/`'top-p'` map to `do_sample:true` + the matching cutoff.
+   */
   #generateKwargs(merged: TransformersJsAdapterOptions): Record<string, unknown> {
-    const kw: Record<string, unknown> = {}
-    if (merged.maxNewTokens !== undefined) kw.max_new_tokens = merged.maxNewTokens
-    if (merged.doSample !== undefined) kw.do_sample = merged.doSample
-    if (merged.temperature !== undefined) kw.temperature = merged.temperature
-    if (merged.topK !== undefined) kw.top_k = merged.topK
-    if (merged.topP !== undefined) kw.top_p = merged.topP
-    if (merged.repetitionPenalty !== undefined) kw.repetition_penalty = merged.repetitionPenalty
+    const gen = this.#gen(merged)
+    const doSample = gen.sampler !== 'greedy'
+    const kw: Record<string, unknown> = {
+      max_new_tokens: gen.maxTokens,
+      do_sample: doSample,
+      repetition_penalty: merged.repetitionPenalty ?? 1.1,
+    }
+    // Sampler knobs are meaningful ONLY when sampling. Greedy ignores them and transformers.js logs a
+    // warning if they're set — so send them only when sampling. We always send BOTH top_k and top_p (the
+    // generate() call accepts both regardless of strategy; the strategy just determines which dominates),
+    // keeping the sampler fully specified. seed is forwarded when provided.
+    if (doSample) {
+      kw.temperature = gen.temperature
+      kw.top_k = gen.topK
+      kw.top_p = gen.topP
+      if (gen.seed !== undefined) kw.seed = gen.seed
+    }
     if (merged.stopStrings !== undefined) kw.stop_strings = [...merged.stopStrings]
     return kw
   }
@@ -335,7 +563,9 @@ export class TransformersJsAdapter {
       const selfIdentity = merged.selfIdentity ?? 'assistant'
       const unsupportedMediaPolicy = merged.unsupportedMediaPolicy ?? 'throw'
       const toolCallParser = resolveToolCallParser(merged.toolCallParser)
-      const reasoningParser = resolveReasoningParser(merged.reasoningParser)
+      const reasoningParser = resolveReasoningParser(merged.reasoningParser, undefined, {
+        orphanRecovery: merged.reasoningOrphanRecovery,
+      })
 
       // 2. Forge artifact-query tools from prior turn's spooled artifacts; merge into ctx.tools.
       let mergedRegistry: ToolRegistry = ctx.tools
@@ -396,8 +626,14 @@ export class TransformersJsAdapter {
         }
       }
 
-      // 5. Build the transformers.js message array + tools.
-      const { messages: turnMessages, tools: toolDefs } = await h.buildTransformersJsMessages({
+      // 5. Build the transformers.js message array + tools (+ decoded media when multimodal).
+      const mmFlags = self.#multimodalFlags(merged)
+      const {
+        messages: turnMessages,
+        tools: toolDefs,
+        images: mmImages,
+        audio: mmAudio,
+      } = await h.buildTransformersJsMessages({
         systemPrompt: ctx.systemPrompt,
         standingInstructions: ctx.standingInstructions,
         memories: ctx.turnMemories,
@@ -429,13 +665,24 @@ export class TransformersJsAdapter {
         renderFirstPartyRetrievables: h.renderFirstPartyRetrievables,
         renderThirdPartyPublicRetrievables: h.renderThirdPartyPublicRetrievables,
         renderThirdPartyPrivateRetrievables: h.renderThirdPartyPrivateRetrievables,
+        multimodal: mmFlags,
+        decodeMedia: mmFlags ? (media) => defaultMediaToTransformersInput(media) : undefined,
+        unsupportedMediaPolicy,
         warn: (m) => helpers.log.warn({ kind: 'transformers-history-warning', message: m }),
       })
 
-      // 6. Resolve the pipeline.
-      let pipe: TransformersJsPipeline
+      const spoolStore = merged.spoolStore ?? new InMemorySpoolStore()
+      const stream = merged.stream ?? true
+      const gen = self.#gen(merged)
+      const generateKwargs = self.#generateKwargs(merged)
+      const toolNames = mergedRegistry.visible().map((t) => t.name)
+
+      // 6. Resolve the engine: multimodal model+processor, or the text-generation pipeline.
+      let pipe: TransformersJsPipeline | undefined
+      let mmEngine: { model: TransformersJsModel; processor: TransformersJsProcessor } | undefined
       try {
-        pipe = await self.#resolvePipeline(merged)
+        if (mmFlags) mmEngine = await self.#resolveMultimodalEngine(merged)
+        else pipe = await self.#resolvePipeline(merged)
       } catch (err) {
         ctx.nack(
           isInstanceOf(err, 'E_TRANSFORMERS_JS_STREAM_ERROR', E_TRANSFORMERS_JS_STREAM_ERROR)
@@ -446,11 +693,6 @@ export class TransformersJsAdapter {
       }
 
       if (ctx.abortSignal.aborted) return
-
-      const spoolStore = merged.spoolStore ?? new InMemorySpoolStore()
-      const stream = merged.stream ?? true
-      const generateKwargs = self.#generateKwargs(merged)
-      const toolNames = mergedRegistry.visible().map((t) => t.name)
 
       // ── Tool execution + persistence (args already an object — no JSON.parse) ──
       const executeAndPersistToolCall = async (call: AssembledToolCall): Promise<void> => {
@@ -575,17 +817,27 @@ export class TransformersJsAdapter {
 
       // Parse the full generated text → reasoning + clean prose + tool calls, then persist.
       const finishFromText = async (
-        fullText: string,
+        rawText: string,
         streamId: string,
-        streamedProse: boolean
+        streamedProse: boolean,
+        generatedMedia: Media[] = []
       ): Promise<void> => {
+        // Normalise away non-semantic envelope/turn-boundary special tokens (Llama `<|python_tag|>`/
+        // `<|eom_id|>`, ChatML `<|im_end|>`, …) before parsing. The streaming path decodes with
+        // skip_special_tokens:false (its live prose-stop gate needs the markers), so without this the
+        // parsers would see `<|python_tag|>{json}<|eom_id|>` on stream and decline — even though the
+        // batch path (skip_special_tokens:true) parses the identical call. Idempotent on batch text.
+        const fullText = stripEnvelopeSpecialTokens(rawText)
         const reasoned = reasoningParser(fullText)
         const afterReasoning = reasoned.cleanedText
         const parsed = toolCallParser(afterReasoning, { toolNames })
         const cleanText = parsed.cleanedText
 
-        // Persist reasoning as Thoughts.
+        // Persist reasoning as Thoughts. Drop any trace whose trimmed content is empty — an
+        // empty/whitespace thought (e.g. a model's `<think>\n\n</think>` no-think artifact) carries no
+        // information and is just a model quirk; there is no point surfacing it to the consumer.
         for (const trace of reasoned.reasoning) {
+          if (trace.trim().length === 0) continue
           const id = uuidv6()
           helpers.reportThought(id, trace, { isComplete: true })
           await ctx.storeThought(
@@ -599,18 +851,21 @@ export class TransformersJsAdapter {
           )
         }
 
-        // Persist the clean assistant message (if any).
-        if (cleanText.length > 0) {
+        // Persist the assistant message when there is clean prose OR generated media to carry. Media-only
+        // turns (empty text + an audio/image attachment) are legitimate; the contract requires at least one
+        // of `content`/`attachments`, so a turn with neither stores nothing (unchanged from before).
+        if (cleanText.length > 0 || generatedMedia.length > 0) {
           if (streamedProse) {
             helpers.reportMessage(streamId, '', { isComplete: true })
-          } else {
+          } else if (cleanText.length > 0) {
             helpers.reportMessage(streamId, cleanText, { isComplete: true })
           }
           await ctx.storeMessage(
             new Message({
               id: streamId,
               role: 'assistant',
-              content: cleanText,
+              ...(cleanText.length > 0 ? { content: cleanText } : {}),
+              ...(generatedMedia.length > 0 ? { attachments: generatedMedia } : {}),
               identity: selfIdentity,
               createdAt: nowIso(),
               updatedAt: nowIso(),
@@ -631,6 +886,94 @@ export class TransformersJsAdapter {
       }
 
       // ── Streaming path ──
+      // Unified generate: drives either the text-generation pipeline OR the multimodal model+processor.
+      // Returns the final decoded text for the non-streaming path; streaming text arrives via `streamer`.
+      // The raw generation object (model.generate / pipeline output) is captured here so the optional
+      // `extractMediaOutputs` hook can surface GENERATED media (audio/image) as assistant attachments.
+      let rawGenerationResult: unknown
+      const runGenerate = async (streamer: unknown): Promise<string> => {
+        if (mmEngine) {
+          const { model, processor } = mmEngine
+          const proc = processor as unknown as {
+            apply_chat_template: (m: unknown, o: unknown) => unknown
+            batch_decode: (t: unknown, o: unknown) => string[]
+          }
+          const callProc = processor as unknown as (
+            ...args: unknown[]
+          ) => Promise<Record<string, unknown>>
+          const prompt = proc.apply_chat_template(turnMessages, {
+            add_generation_prompt: true,
+            tokenize: false,
+            // Explicit thinking flag — never let the template default decide (Qwen3/DeepSeek default ON).
+            enable_thinking: gen.enableThinking,
+          })
+          // processor(text, images, audio, options) — positional (verified against the real Gemma-4
+          // `Gemma4Processor._call(text, images = null, audio = null, options)`). The audio slot is THIRD,
+          // so when audio is present the images slot MUST be filled positionally (with `null` when there
+          // is no image) — otherwise audio collapses into the images slot and the image processor throws
+          // `image.rgb is not a function`. `if (images)`/`if (audio)` in the processor treat `null` as absent.
+          const imageArg =
+            mmImages.length === 0 ? null : mmImages.length === 1 ? mmImages[0] : mmImages
+          const audioArg = mmAudio.length === 0 ? null : mmAudio.length === 1 ? mmAudio[0] : mmAudio
+          const procArgs: unknown[] =
+            mmAudio.length > 0
+              ? [prompt, imageArg, audioArg] // audio needs the 3rd slot → fill images (null if none)
+              : mmImages.length > 0
+                ? [prompt, imageArg]
+                : [prompt]
+          const inputs = await callProc(...procArgs)
+          const out = await (
+            model as unknown as { generate: (o: unknown) => Promise<unknown> }
+          ).generate({ ...inputs, ...generateKwargs, ...(streamer ? { streamer } : {}) })
+          rawGenerationResult = out
+          // Non-stream decode: slice the prompt tokens off, decode the new tail.
+          try {
+            const inputLen = (inputs.input_ids as { dims?: number[] } | undefined)?.dims?.[1] ?? 0
+            const seq = out as { slice?: (...a: unknown[]) => unknown }
+            const newTokens =
+              typeof seq.slice === 'function' ? seq.slice(null, [inputLen, null]) : out
+            const decoded = proc.batch_decode(newTokens, { skip_special_tokens: true })
+            return (decoded?.[0] ?? '').toString()
+          } catch {
+            return ''
+          }
+        }
+        const p = pipe as unknown as (m: unknown, k: unknown) => Promise<unknown>
+        const output = await p(turnMessages, {
+          ...generateKwargs,
+          // Explicit thinking flag forwarded to the pipeline's internal apply_chat_template — never let
+          // the template default decide (Qwen3/DeepSeek default thinking ON).
+          enable_thinking: gen.enableThinking,
+          ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
+          ...(streamer ? { streamer } : {}),
+        })
+        rawGenerationResult = output
+        return extractGeneratedText(output)
+      }
+
+      // Run the optional media-output extractor over the raw generation result, persisting each generated
+      // media via `ctx.storeMediaBytes` and building first-party `Media` attachments. Returns [] when no
+      // hook is configured or it yields nothing — the text-only path then attaches nothing (unchanged).
+      const collectGeneratedMedia = async (): Promise<Media[]> => {
+        if (!merged.extractMediaOutputs || rawGenerationResult === undefined) return []
+        const outputs = await merged.extractMediaOutputs(rawGenerationResult)
+        const media: Media[] = []
+        for (const o of outputs) {
+          const id = uuidv6()
+          const reader = await ctx.storeMediaBytes(id, o.bytes)
+          media.push(
+            Media.toolGenerated({
+              id,
+              kind: o.kind,
+              mimeType: o.mimeType,
+              filename: o.filename ?? `${id}.${o.kind}`,
+              reader,
+            })
+          )
+        }
+        return media
+      }
+
       if (stream) {
         const accumulator = h.createTransformersJsStreamAccumulator()
         const streamId = uuidv6()
@@ -654,13 +997,14 @@ export class TransformersJsAdapter {
 
         // Default streamer factory imports the peer's TextStreamer; `createStreamer` overrides it
         // (e.g. tests inject a lightweight sink to avoid importing the heavy peer in the browser env).
+        // The tokenizer comes from the multimodal processor when present, else the pipeline.
+        const tokenizerHost = (mmEngine?.processor ?? pipe) as unknown as { tokenizer: unknown }
         const createStreamer =
           merged.createStreamer ??
-          (async ({ pipeline: p, onText: cb }) => {
+          (async ({ onText: cb }) => {
             const { TextStreamer } = await import('@huggingface/transformers')
-            const tokenizer = (p as unknown as { tokenizer: unknown }).tokenizer
             return new TextStreamer(
-              tokenizer as never,
+              tokenizerHost.tokenizer as never,
               {
                 skip_prompt: true,
                 skip_special_tokens: false,
@@ -671,44 +1015,46 @@ export class TransformersJsAdapter {
 
         let streamer: unknown
         try {
-          streamer = await createStreamer({ pipeline: pipe, onText })
+          streamer = await createStreamer({
+            pipeline: pipe as TransformersJsPipeline,
+            onText,
+          })
         } catch (err) {
+          emitLifecycle(merged, 'transformers_js', merged.model, 'error', { error: err })
           ctx.nack(new E_TRANSFORMERS_JS_STREAM_ERROR([isError(err) ? err.message : String(err)]))
           return
         }
 
+        emitLifecycle(merged, 'transformers_js', merged.model, 'generating')
         try {
-          await (pipe as unknown as (m: unknown, k: unknown) => Promise<unknown>)(turnMessages, {
-            ...generateKwargs,
-            ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
-            streamer,
-          })
+          await runGenerate(streamer)
         } catch (err) {
           if (ctx.abortSignal.aborted) return
+          emitLifecycle(merged, 'transformers_js', merged.model, 'error', { error: err })
           ctx.nack(new E_TRANSFORMERS_JS_STREAM_ERROR([isError(err) ? err.message : String(err)]))
           return
         }
         if (ctx.abortSignal.aborted) return
-        await finishFromText(accumulator.content(), streamId, streamedProse)
+        const streamMedia = await collectGeneratedMedia()
+        await finishFromText(accumulator.content(), streamId, streamedProse, streamMedia)
+        emitLifecycle(merged, 'transformers_js', merged.model, 'complete')
         return
       }
 
       // ── Non-streaming path ──
-      let output: unknown
+      let finalText: string
+      emitLifecycle(merged, 'transformers_js', merged.model, 'generating')
       try {
-        output = await (pipe as unknown as (m: unknown, k: unknown) => Promise<unknown>)(
-          turnMessages,
-          {
-            ...generateKwargs,
-            ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
-          }
-        )
+        finalText = await runGenerate(undefined)
       } catch (err) {
+        emitLifecycle(merged, 'transformers_js', merged.model, 'error', { error: err })
         ctx.nack(new E_TRANSFORMERS_JS_STREAM_ERROR([isError(err) ? err.message : String(err)]))
         return
       }
       if (ctx.abortSignal.aborted) return
-      await finishFromText(extractGeneratedText(output), uuidv6(), false)
+      const nonStreamMedia = await collectGeneratedMedia()
+      await finishFromText(finalText, uuidv6(), false, nonStreamMedia)
+      emitLifecycle(merged, 'transformers_js', merged.model, 'complete')
     }
   }
 }

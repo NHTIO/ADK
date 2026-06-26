@@ -1,3 +1,4 @@
+import type { BatteryLifecycleHooks } from '../chat_common'
 import type {
   ChatOptions,
   InitProgressReport,
@@ -8,6 +9,14 @@ import type {
   OpenAIChatCompletionsAdapterOptions,
   OpenAIChatCompletionsRequestBody,
 } from '../openai_chat_completions/types'
+
+export type {
+  BatteryLifecyclePhase,
+  BatteryLifecycleBattery,
+  BatteryLifecycleReport,
+  BatteryLifecycleCallback,
+  BatteryLifecycleHooks,
+} from '../chat_common'
 
 export type {
   JsonSchema,
@@ -63,10 +72,13 @@ export type CreateWebLLMChatCompletionsEngine = (input: {
  * Configuration options for the in-browser WebLLM Chat Completions adapter — the OpenAI options
  * minus the network-transport fields (no HTTP is involved), plus WebLLM-specific engine controls.
  */
-export interface WebLLMChatCompletionsAdapterOptions extends Omit<
-  OpenAIChatCompletionsAdapterOptions,
-  'apiKey' | 'baseURL' | 'headers' | 'fetch' | 'retry' | 'requestTimeoutMs'
-> {
+export interface WebLLMChatCompletionsAdapterOptions
+  extends
+    Omit<
+      OpenAIChatCompletionsAdapterOptions,
+      'apiKey' | 'baseURL' | 'headers' | 'fetch' | 'retry' | 'requestTimeoutMs'
+    >,
+    BatteryLifecycleHooks {
   /** Penalty applied to repeated tokens (WebLLM/MLC sampling parameter). */
   repetition_penalty?: number
   /** When `true`, the model ignores end-of-sequence tokens and keeps generating. */
@@ -90,4 +102,12 @@ export interface WebLLMChatCompletionsAdapterOptions extends Omit<
   onInitProgress?: (report: InitProgressReport) => void
   /** Override for the WebGPU-availability probe (defaults to a real `navigator.gpu` check). */
   isWebGPUAvailable?: () => boolean
+  /**
+   * Whether to enable the model's "thinking"/reasoning mode, threaded EXPLICITLY into the request as
+   * `extra_body.enable_thinking`. Defaults to `false` — many reasoning chat templates (Qwen3,
+   * DeepSeek-R1) default thinking ON, which silently burns the token budget inside `<think>`. Pinned off
+   * unless you opt in. (Independent of `reasoningFieldPrecedence`/parsing, which only handle thinking
+   * that IS emitted.)
+   */
+  enableThinking?: boolean
 }

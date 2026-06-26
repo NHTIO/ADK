@@ -31,3 +31,5 @@ docs/.vitepress/config.mts.timestamp-*
 .claude/
 .DS_Store
 !.env.test.example
+# Tesseract language data downloaded at runtime by the multi-model-compose test (tesseractJsEngine)
+*.traineddata

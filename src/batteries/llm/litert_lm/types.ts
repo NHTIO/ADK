@@ -18,6 +18,9 @@ import type {
   ToolCallParserFn,
   ReasoningParserName,
   ReasoningParserFn,
+  BatteryLifecycleHooks,
+  ChatSampler,
+  MediaOutputExtractorFn,
 } from '../chat_common'
 import type {
   ChatCompletionsBucketOrder,
@@ -131,7 +134,7 @@ export type {
  * (LiteRT-native sampler/limits — NOT OpenAI sampling params), and **ADK-control** options shared with
  * the other LLM batteries (history shaping, trust, storage, media policy).
  */
-export interface LiteRtLmAdapterOptions {
+export interface LiteRtLmAdapterOptions extends BatteryLifecycleHooks {
   // ── Engine ──────────────────────────────────────────────────────────────────────────────────────
   /**
    * The `.litertlm` model to load: a URL string, a `ReadableStream<Uint8Array>`, or a `Blob`.
@@ -149,18 +152,58 @@ export interface LiteRtLmAdapterOptions {
   /** Optional hint prompt passed to `Engine.create(settings, inputPromptAsHint)` to warm the cache. */
   inputPromptAsHint?: string
 
-  // ── Generation (LiteRT-native) ────────────────────────────────────────────────────────────────────
-  /** Sampler configuration: `{ type, k, p, temperature, seed }`. Maps to `SessionConfig.samplerParams`. */
+  // ── Generation: PORTABLE canonical contract (shared with transformers.js) ──────────────────────────
+  // The cross-battery vocabulary (see {@link ChatGenerationOptions}). Prefer these for portable config;
+  // when a canonical field AND its LiteRT-native equivalent below are both set, the CANONICAL one wins.
+  /** Portable max generation length (canonical spelling of {@link maxOutputTokens}). Default `1024`. */
+  maxTokens?: number
+  /** Portable sampler strategy (`'greedy'` default). Maps to `samplerParams.type` (GREEDY/TOP_K/TOP_P);
+   * GREEDY is top-1 so `k` is forced to 1. Canonical spelling of {@link samplerParams}`.type`. */
+  sampler?: ChatSampler
+  /** Sampling temperature (used by `'top-k'`/`'top-p'`). Default `0.7`. */
+  temperature?: number
+  /** Top-K cutoff (used by `'top-k'`). Default `40`. */
+  topK?: number
+  /** Top-P (nucleus) cutoff (used by `'top-p'`). Default `0.95`. */
+  topP?: number
+  /** RNG seed for reproducible sampling. */
+  seed?: number
+  /** Enable multimodal input by kind (canonical spelling of {@link visionModalityEnabled} +
+   * {@link audioModalityEnabled}). */
+  multimodal?: { image?: boolean; audio?: boolean }
+
+  // ── Generation (LiteRT-NATIVE escape hatches) ───────────────────────────────────────────────────────
+  // Low-level overrides; a canonical field above takes precedence when both are set.
+  /** Native sampler config `{ type, k, p, temperature, seed }`. Prefer {@link sampler}/{@link temperature}/
+   * {@link topK}/{@link topP}. Maps to `SessionConfig.samplerParams`. */
   samplerParams?: LiteRtSamplerParametersOption
-  /** Maximum tokens to generate per turn. Maps to `SessionConfig.maxOutputTokens`. */
+  /** Native max tokens per turn. Prefer {@link maxTokens}. Maps to `SessionConfig.maxOutputTokens`. */
   maxOutputTokens?: number
-  /** Context length. Maps to `EngineSettings.mainExecutorSettings.maxNumTokens`. */
+  /** Context length (LiteRT-only). Maps to `EngineSettings.mainExecutorSettings.maxNumTokens`. Default `4096`. */
   maxNumTokens?: number
   /** Inference backend (`CPU` / `GPU` / …). Maps to `EngineSettings.backend`. */
   backend?: number
-  /** Enable audio input for models that support it. Maps to `SessionConfig.audioModalityEnabled`. */
+  /**
+   * Enable audio input. Maps to `SessionConfig.audioModalityEnabled`. When set, a user `Message`'s
+   * audio `attachments` map to LiteRT `{type:'audio', path:'data:…'}` content items; otherwise they
+   * degrade via `unsupportedMediaPolicy`.
+   *
+   * @remarks
+   * **This is the only multimodal knob the installed `@litert-lm/core` 0.13.1 exposes.** The build does
+   * NOT surface engine-level vision/audio backends (`EngineSettings` is `{model, backend?,
+   * mainExecutorSettings?}`; the WASM `createDefault` takes a single backend) — only this
+   * `SessionConfig` flag + `MessageContentItem.path` exist (`blob` is untyped). Whether the WASM
+   * runtime actually consumes the content items is **not yet runtime-verified in 0.13.1** (the
+   * published types over-promise — same shape as the `tool_calls` finding); the browser model matrix
+   * is the gate-on-proof. If the runtime ignores them, configure `unsupportedMediaPolicy` to degrade.
+   */
   audioModalityEnabled?: boolean
-  /** Enable vision input for models that support it. Maps to `SessionConfig.visionModalityEnabled`. */
+  /**
+   * Enable vision input. Maps to `SessionConfig.visionModalityEnabled`. When set, a user `Message`'s
+   * image `attachments` map to LiteRT `{type:'image', path:'data:…'}` content items; otherwise they
+   * degrade via `unsupportedMediaPolicy`. See {@link audioModalityEnabled} for the 0.13.1
+   * runtime-vs-types caveat (gated on a real-model proof).
+   */
   visionModalityEnabled?: boolean
   /** Enable constrained decoding (channels). Maps to `ConversationConfig.enableConstrainedDecoding`. */
   enableConstrainedDecoding?: boolean
@@ -200,10 +243,47 @@ export interface LiteRtLmAdapterOptions {
    */
   toolCallParser?: ToolCallParserName | ToolCallParserFn
   /**
+   * How tool definitions are delivered to the model. Defaults to `'prompt'`.
+   *
+   * - `'prompt'` — render the tool definitions as a text block in the system prompt and parse the
+   *   model's emitted call from its output (via `toolCallParser`). The portable path: LiteRT-LM applies
+   *   the model's OWN bundled chat template, and the Gemma-4 `.litertlm` template's tools branch is
+   *   broken (passing native `tools` throws `Failed to apply template: undefined value` in the wasm
+   *   runtime — a known Gemma-4 template bug). This mirrors how WebLLM/MLC and Open WebUI's default mode
+   *   give Gemma tools.
+   * - `'native'` — pass tool definitions via `preface.tools` (the chat-template path). Use ONLY for
+   *   models whose template correctly renders a tools section.
+   */
+  toolDelivery?: 'prompt' | 'native'
+  /**
+   * Whether to enable the model's "thinking"/reasoning mode, passed EXPLICITLY into the chat template
+   * via `preface.extra_context.enable_thinking`. Defaults to `false` — the gemma-4 `.litertlm` template
+   * gates `<|think|>` on `enable_thinking`, and leaving it unset lets the runtime decide (often ON),
+   * silently burning the output budget inside the thought channel. (Independent of `reasoningParser`,
+   * which only parses thinking that IS emitted.)
+   */
+  enableThinking?: boolean
+  /**
    * How to parse reasoning/thinking out of the model's text output. A family name, `'auto'` (the
    * default), `'none'`, or a custom {@link ReasoningParserFn}. Extracted reasoning becomes ADK Thoughts.
    */
   reasoningParser?: ReasoningParserName | ReasoningParserFn
+  /**
+   * Recover UNPAIRED reasoning markers (a lone `</think>`, a truncated `<think>`) by inferring the
+   * missing half from the pseudo-streaming order, instead of leaking the stray marker into the visible
+   * answer. Defaults to `true`. Set `false` for strict pair-only parsing. Ignored when `reasoningParser`
+   * is a custom function.
+   */
+  reasoningOrphanRecovery?: boolean
+  /**
+   * Extract GENERATED media (audio/image/…) from the raw LiteRT generation result and surface it as
+   * attachments on the assistant {@link @nhtio/adk!Message}. Default absent → text-only output, unchanged.
+   * Receives the raw final `LiteRtMessage` (whose `content` may be a structured `MessageContentItem[]`);
+   * each returned descriptor is persisted via `ctx.storeMediaBytes` and attached as `Media.toolGenerated`.
+   * The current `@litert-lm/core` runtime emits only `{type:'text'}` items, so this is a forward-looking
+   * seam for a model that emits media content items.
+   */
+  extractMediaOutputs?: MediaOutputExtractorFn
 }
 
 /** Sampler-parameters option shape (the `type` field accepts the numeric {@link SamplerType} value). */

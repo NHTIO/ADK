@@ -13,6 +13,7 @@
  * direct re-exports of the externalized peer.
  */
 
+import type { BatteryLifecycleHooks } from '../../llm/chat_common'
 import type { BaseEmbeddingsAdapterOptions } from '../openai/types'
 import type {
   FeatureExtractionPipeline,
@@ -25,6 +26,15 @@ import type {
 // this battery's barrel without reaching into the OpenAI battery.
 export type { EmbeddingKind, EmbedOptions, BaseEmbeddingsAdapterOptions } from '../openai/types'
 
+// Re-export the shared lifecycle/boot-progress contract so consumers import it from this barrel.
+export type {
+  BatteryLifecyclePhase,
+  BatteryLifecycleBattery,
+  BatteryLifecycleReport,
+  BatteryLifecycleCallback,
+  BatteryLifecycleHooks,
+} from '../../llm/chat_common'
+
 /** The transformers.js feature-extraction pipeline this battery drives. */
 export type TransformersJsEmbeddingsPipeline = FeatureExtractionPipeline
 /** Quantization/precision dtype: `'auto'|'fp32'|'fp16'|'q8'|'q4'|…`. */
@@ -36,6 +46,32 @@ export type TransformersJsEmbeddingsProgressCallback = ProgressCallback
 
 /** The pooling method applied to the model's per-token hidden states to produce one sentence vector. */
 export type TransformersJsPooling = 'none' | 'mean' | 'cls' | 'first_token' | 'eos' | 'last_token'
+
+/**
+ * Who applies pooling + L2-normalization:
+ * - `'engine'` (default) — the transformers.js pipeline pools internally (today's exact behavior). Each
+ *   runtime (node-ONNX vs web-ONNX/WebGPU) pools its own way, contributing to the node↔browser vector
+ *   gap.
+ * - `'battery'` — request raw `pooling:'none'` token states and pool + normalize in deterministic shared
+ *   JS (one implementation, identical across node + browser), removing post-processing variance and
+ *   leaving only the irreducible ORT-kernel floor. `pooling`/`normalize` then take effect in OUR code.
+ */
+export type TransformersJsPoolingOwner = 'engine' | 'battery'
+
+/**
+ * Custom model-source resolver — the dual-environment seam for serving model files from OPFS, a
+ * different source, or bundled bytes (see the LLM battery's `model_source` module). Called once per
+ * file; return bytes / a path-or-URL string / a `Response`, or `undefined` to fall through to HF.
+ */
+export type TransformersJsEmbeddingsModelSource = (req: {
+  repo: string
+  filename: string
+}) =>
+  | Promise<Uint8Array | string | Response | undefined>
+  | Uint8Array
+  | string
+  | Response
+  | undefined
 
 /**
  * Factory for lazily creating a feature-extraction pipeline. Defaults to a dynamic import of
@@ -57,7 +93,8 @@ export type CreateTransformersJsEmbeddingsPipeline = (input: {
  * transformers.js pipeline fields. `model` accepts any ONNX feature-extraction model id (e.g.
  * `onnx-community/all-MiniLM-L6-v2-ONNX`) — there is no default.
  */
-export interface TransformersJsEmbeddingsAdapterOptions extends BaseEmbeddingsAdapterOptions {
+export interface TransformersJsEmbeddingsAdapterOptions
+  extends BaseEmbeddingsAdapterOptions, BatteryLifecycleHooks {
   /** A pre-built pipeline. When provided, the battery uses it directly and skips lazy creation. */
   pipeline?: TransformersJsEmbeddingsPipeline
   /** Override the pipeline factory. Default: `pipeline('feature-extraction', …)` via dynamic import. */
@@ -70,6 +107,18 @@ export interface TransformersJsEmbeddingsAdapterOptions extends BaseEmbeddingsAd
   pooling?: TransformersJsPooling
   /** L2-normalise the embeddings (default `true`). */
   normalize?: boolean
+  /**
+   * Who pools + normalizes (default `'engine'` — today's behavior, byte-identical). Set `'battery'` to
+   * pool + L2-normalize in deterministic shared JS for tighter node↔browser parity. See
+   * {@link TransformersJsPoolingOwner}.
+   */
+  poolingOwner?: TransformersJsPoolingOwner
+  /**
+   * Custom model-source resolver (OPFS / separate source / bundled bytes). When set, model files load
+   * through it behind the global-`env` mutex; otherwise straight from HF (unchanged). See
+   * {@link TransformersJsEmbeddingsModelSource}.
+   */
+  modelSource?: TransformersJsEmbeddingsModelSource
   /** Called with model-load progress reports while weights download/compile. */
   onInitProgress?: TransformersJsEmbeddingsProgressCallback
   /** Override the availability probe. Default: `true` whenever the peer is importable (env-neutral). */

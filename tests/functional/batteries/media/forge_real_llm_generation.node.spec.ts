@@ -25,7 +25,7 @@
  * made, statements written, bytes produced), with `runUntil` absorbing "the model answered
  * in prose without picking up the tool" — model variance, not harness behavior.
  *
- * Model-variance notes (gpt-oss:20b via the llm-lb proxy, measured by wire-level probing):
+ * Model-variance notes (gpt-oss:20b via an OpenAI-compatible proxy, measured by wire-level probing):
  *
  * - At the model's DEFAULT reasoning effort, multi-step asks ("create then populate",
  *   "compose a patch envelope") routinely end with `finish_reason: "length"` — the entire
