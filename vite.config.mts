@@ -214,6 +214,33 @@ export default defineConfig(async ({ mode }) => {
             },
           },
         },
+        // ── browser-webgpu: HEADED real-GPU project for the on-device model matrix ──
+        // Only instantiated when TEST_MATRIX_BROWSER is set (via `pnpm run test:matrix:browser`), so it
+        // NEVER runs in normal CI/`test:browser` — shared runners have no GPU, and a headed Chromium
+        // can't launch there. Headed + `--enable-unsafe-webgpu` is what gives `navigator.gpu` a real
+        // adapter so LiteRT-LM / transformers.js-webgpu actually execute. Collects only `*.webgpu.spec.ts`.
+        ...(process.env.TEST_MATRIX_BROWSER
+          ? [
+              {
+                extends: true as const,
+                test: {
+                  name: { label: 'browser-webgpu', color: 'magenta' as const },
+                  include: ['tests/**/*.webgpu.spec.ts'],
+                  testTimeout: 900_000,
+                  browser: {
+                    enabled: true,
+                    provider: playwright({
+                      launchOptions: {
+                        args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan'],
+                      },
+                    }),
+                    headless: false,
+                    instances: [{ browser: 'chromium' }],
+                  },
+                },
+              },
+            ]
+          : []),
       ],
     },
   } as UserConfig

@@ -16,9 +16,11 @@ import {
   SpooledArtifact,
   ToolRegistry,
   Registry,
+  inMemoryMediaReader,
 } from '@nhtio/adk/common'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
+import type { BatteryLifecycleReport } from '@nhtio/adk/batteries/llm/transformers_js'
 
 // ─── shared mock context / helpers (mirrors the litert spec) ──────────────────────────────────────────
 
@@ -89,6 +91,9 @@ const makeCtx = (
       stored.toolCalls.push(tc)
     }),
     mutateToolCall: vi.fn(async () => undefined),
+    // The bound (id, bytes) form (the adapter calls ctx.storeMediaBytes(id, bytes)). Returns an in-memory
+    // reader over the given bytes so a generated Media round-trips back to the same bytes.
+    storeMediaBytes: vi.fn(async (_id: string, bytes: Uint8Array) => inMemoryMediaReader(bytes)),
     _stored: stored,
   } as unknown as MockCtx
   return ctx
@@ -245,6 +250,99 @@ describe('TransformersJsAdapter — text generation', () => {
     expect(Array.isArray(kwargs.tools)).toBe(true)
     expect((kwargs.tools as Array<{ function: { name: string } }>)[0].function.name).toBe('echo')
   })
+
+  it('passes EXPLICIT generation defaults to generate() (never lets it guess)', async () => {
+    const pipe = makeFakePipeline({ text: 'ok' })
+    // No generation options supplied → the validation defaults must be materialised + forwarded.
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      pipeline: pipe as never,
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    const kwargs = (pipe as unknown as { calls: Array<{ kwargs: Record<string, unknown> }> })
+      .calls[0].kwargs
+    expect(kwargs.max_new_tokens).toBe(1024)
+    expect(kwargs.do_sample).toBe(false)
+    expect(kwargs.repetition_penalty).toBeCloseTo(1.1)
+    // Greedy → sampler knobs are intentionally omitted (transformers.js warns if set under do_sample:false).
+    expect(kwargs.temperature).toBeUndefined()
+    expect(kwargs.top_k).toBeUndefined()
+    expect(kwargs.top_p).toBeUndefined()
+    // Thinking is explicitly disabled (forwarded to the pipeline's internal apply_chat_template).
+    expect(kwargs.enable_thinking).toBe(false)
+  })
+
+  it('sends pinned sampler knobs when sampling is enabled (doSample:true)', async () => {
+    const pipe = makeFakePipeline({ text: 'ok' })
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      pipeline: pipe as never,
+      doSample: true,
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    const kwargs = (pipe as unknown as { calls: Array<{ kwargs: Record<string, unknown> }> })
+      .calls[0].kwargs
+    expect(kwargs.do_sample).toBe(true)
+    expect(kwargs.temperature).toBeCloseTo(0.7)
+    expect(kwargs.top_k).toBe(40)
+    expect(kwargs.top_p).toBeCloseTo(0.95)
+  })
+
+  it('maps the PORTABLE canonical contract → native generate kwargs', async () => {
+    const pipe = makeFakePipeline({ text: 'ok' })
+    // Canonical (battery-agnostic) config — the same shape LiteRT accepts.
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      pipeline: pipe as never,
+      maxTokens: 256,
+      sampler: 'top-p',
+      topP: 0.8,
+      topK: 16,
+      temperature: 0.3,
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    const kwargs = (pipe as unknown as { calls: Array<{ kwargs: Record<string, unknown> }> })
+      .calls[0].kwargs
+    // sampler:'top-p' → do_sample:true; canonical knobs + maxTokens→max_new_tokens flow through.
+    expect(kwargs.do_sample).toBe(true)
+    expect(kwargs.max_new_tokens).toBe(256)
+    expect(kwargs.top_p).toBeCloseTo(0.8)
+    expect(kwargs.top_k).toBe(16)
+    expect(kwargs.temperature).toBeCloseTo(0.3)
+  })
+
+  it('canonical `sampler:"greedy"` wins over native `doSample:true` when both are set', async () => {
+    const pipe = makeFakePipeline({ text: 'ok' })
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      pipeline: pipe as never,
+      sampler: 'greedy',
+      doSample: true,
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    const kwargs = (pipe as unknown as { calls: Array<{ kwargs: Record<string, unknown> }> })
+      .calls[0].kwargs
+    expect(kwargs.do_sample).toBe(false) // canonical greedy wins
+  })
+
+  it('canonical `maxTokens` wins over native `maxNewTokens` when both are set', async () => {
+    const pipe = makeFakePipeline({ text: 'ok' })
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      pipeline: pipe as never,
+      maxTokens: 128,
+      maxNewTokens: 999,
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    const kwargs = (pipe as unknown as { calls: Array<{ kwargs: Record<string, unknown> }> })
+      .calls[0].kwargs
+    expect(kwargs.max_new_tokens).toBe(128)
+  })
 })
 
 // ─── reasoning extraction ─────────────────────────────────────────────────────────────────────────────
@@ -381,5 +479,245 @@ describe('TransformersJsAdapter — abort', () => {
     const ctx = makeCtx({ abortSignal: ac.signal })
     await adapter.executor()(ctx, makeHelpers())
     expect(ctx._stored.messages).toHaveLength(0)
+  })
+})
+
+// ─── lifecycle hooks ────────────────────────────────────────────────────────────────────────────────
+
+describe('TransformersJsAdapter — lifecycle hooks', () => {
+  it('fires loading → compiling → ready → generating → complete in order (firehose + per-phase)', async () => {
+    const seen: string[] = []
+    const perPhase: string[] = []
+    // Use `createPipeline` (the lazy load path) so loading/compiling/ready fire — a pre-built `pipeline`
+    // short-circuits #resolvePipeline (nothing loaded → no loading/compiling/ready, by design).
+    const adapter = new TransformersJsAdapter({
+      model: 'fam/model',
+      stream: false,
+      autoAck: true,
+      createPipeline: async () => makeFakePipeline({ text: 'hello world' }) as never,
+      onLifecycle: (r: BatteryLifecycleReport) => seen.push(r.phase),
+      onLoading: () => perPhase.push('loading'),
+      onCompiling: () => perPhase.push('compiling'),
+      onReady: () => perPhase.push('ready'),
+      onGenerating: () => perPhase.push('generating'),
+      onComplete: () => perPhase.push('complete'),
+    })
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })] })
+    await adapter.executor()(ctx, makeHelpers())
+
+    // `compiling` (coarse "now preparing the graph" marker) lands between the download `loading` reports
+    // and `ready`.
+    expect(seen).toEqual(['loading', 'compiling', 'ready', 'generating', 'complete'])
+    expect(perPhase).toEqual(['loading', 'compiling', 'ready', 'generating', 'complete'])
+  })
+
+  it('a pre-built pipeline skips loading/ready (nothing loaded) but still fires generating/complete', async () => {
+    const seen: string[] = []
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      pipeline: makeFakePipeline({ text: 'ok' }) as never,
+      onLifecycle: (r: BatteryLifecycleReport) => seen.push(r.phase),
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    expect(seen).toEqual(['generating', 'complete'])
+  })
+
+  it('reports the right battery + model on every report', async () => {
+    const reports: BatteryLifecycleReport[] = []
+    const adapter = new TransformersJsAdapter({
+      model: 'fam/model',
+      stream: false,
+      autoAck: true,
+      createPipeline: async () => makeFakePipeline({ text: 'ok' }) as never,
+      onLifecycle: (r: BatteryLifecycleReport) => reports.push(r),
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    expect(reports.length).toBeGreaterThanOrEqual(4)
+    for (const r of reports) {
+      expect(r.battery).toBe('transformers_js')
+      expect(r.model).toBe('fam/model')
+      expect(typeof r.at).toBe('string')
+    }
+  })
+
+  it('emits error (not complete) when generation throws', async () => {
+    const phases: string[] = []
+    const failing = vi.fn(async () => {
+      throw new Error('generate boom')
+    })
+    ;(failing as unknown as { tokenizer: unknown }).tokenizer = { all_special_ids: [] }
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      pipeline: failing as never,
+      onLifecycle: (r: BatteryLifecycleReport) => phases.push(r.phase),
+    })
+    const ctx = makeCtx()
+    await adapter.executor()(ctx, makeHelpers())
+    expect(phases).toContain('error')
+    expect(phases).not.toContain('complete')
+    expect(ctx.nack).toHaveBeenCalled()
+  })
+
+  it('forwards onInitProgress download events into a normalized loading report', async () => {
+    const loadingReports: BatteryLifecycleReport[] = []
+    const initSeen: unknown[] = []
+    // A createPipeline that drives the provided onInitProgress with a fake HF progress event.
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      onInitProgress: (info: unknown) => initSeen.push(info),
+      onLoading: (r: BatteryLifecycleReport) => loadingReports.push(r),
+      createPipeline: async (input: { onInitProgress?: (info: unknown) => void }) => {
+        input.onInitProgress?.({ status: 'progress', file: 'model.onnx', progress: 42 })
+        const p = makeFakePipeline({ text: 'done' })
+        return p as never
+      },
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    // Original onInitProgress still called verbatim (additive).
+    expect(initSeen).toHaveLength(1)
+    // AND a normalized loading report with progress 0.42.
+    const withProgress = loadingReports.find((r) => typeof r.progress === 'number')
+    expect(withProgress?.progress).toBeCloseTo(0.42, 5)
+    expect((withProgress?.raw as { file?: string })?.file).toBe('model.onnx')
+  })
+
+  it('a throwing consumer hook does not break the dispatch', async () => {
+    const pipe = makeFakePipeline({ text: 'still works' })
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      pipeline: pipe as never,
+      onLifecycle: () => {
+        throw new Error('consumer hook blew up')
+      },
+    })
+    const ctx = makeCtx()
+    await adapter.executor()(ctx, makeHelpers())
+    expect(ctx._stored.messages[0]?.content?.toString()).toContain('still works')
+    expect(ctx.ack).toHaveBeenCalledOnce()
+  })
+})
+
+describe('TransformersJsAdapter — dispose (release ONNX sessions)', () => {
+  it('awaits the loaded pipeline.dispose() to free ONNX sessions, then forces a fresh re-load', async () => {
+    let loads = 0
+    const dispose = vi.fn(async () => [])
+    const createPipeline = vi.fn(async () => {
+      loads += 1
+      const pipe = makeFakePipeline({ text: 'ok' })
+      ;(pipe as unknown as { dispose: () => Promise<unknown> }).dispose = dispose
+      return pipe as never
+    })
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      createPipeline,
+    })
+    // First turn loads the pipeline; dispose() must free it (await the model's dispose).
+    await adapter.executor()(makeCtx(), makeHelpers())
+    expect(loads).toBe(1)
+    await adapter.dispose()
+    expect(dispose).toHaveBeenCalledOnce()
+
+    // The cached handle was dropped → the next dispatch re-resolves a FRESH pipeline (a 2nd load), not the
+    // disposed one. This is what lets a long browser run reclaim GPU/wasm memory between cells.
+    await adapter.executor()(makeCtx(), makeHelpers())
+    expect(loads).toBe(2)
+  })
+
+  it('is a no-op (no throw) when nothing has been loaded', async () => {
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      createPipeline: vi.fn(),
+    })
+    await expect(adapter.dispose()).resolves.toBeUndefined()
+  })
+
+  it('swallows a throwing dispose() — teardown must never throw', async () => {
+    const pipe = makeFakePipeline({ text: 'ok' })
+    ;(pipe as unknown as { dispose: () => Promise<unknown> }).dispose = vi.fn(async () => {
+      throw new Error('dispose boom')
+    })
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      pipeline: pipe as never,
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    await expect(adapter.dispose()).resolves.toBeUndefined()
+  })
+})
+
+describe('TransformersJsAdapter — media output (extractMediaOutputs seam)', () => {
+  const wavBytes = new Uint8Array([0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4]) // 'RIFF' + payload
+
+  it('attaches generated media to the assistant message + persists via storeMediaBytes', async () => {
+    const pipe = makeFakePipeline({ text: 'here is your audio' })
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      pipeline: pipe as never,
+      extractMediaOutputs: () => [{ kind: 'audio', mimeType: 'audio/wav', bytes: wavBytes }],
+    })
+    const ctx = makeCtx()
+    await adapter.executor()(ctx, makeHelpers())
+    const msg = ctx._stored.messages[0]
+    expect(msg?.content?.toString()).toBe('here is your audio')
+    expect(msg?.attachments.length).toBe(1)
+    expect(msg?.attachments[0]?.kind).toBe('audio')
+    expect(msg?.attachments[0]?.mimeType).toBe('audio/wav')
+    expect(msg?.attachments[0]?.trustTier).toBe('first-party')
+    expect(
+      (ctx as never as { storeMediaBytes: ReturnType<typeof vi.fn> }).storeMediaBytes
+    ).toHaveBeenCalledOnce()
+    // bytes round-trip through the stored reader
+    expect(await msg!.attachments[0]!.asBytes()).toEqual(wavBytes)
+  })
+
+  it('media-only turn (empty text) still stores an assistant message carrying the attachment', async () => {
+    const pipe = makeFakePipeline({ text: '' })
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      pipeline: pipe as never,
+      extractMediaOutputs: () => [
+        { kind: 'image', mimeType: 'image/png', bytes: wavBytes, filename: 'x.png' },
+      ],
+    })
+    const ctx = makeCtx()
+    await adapter.executor()(ctx, makeHelpers())
+    const msg = ctx._stored.messages[0]
+    expect(msg).toBeDefined()
+    expect(msg?.attachments[0]?.kind).toBe('image')
+    expect(msg?.attachments[0]?.filename).toBe('x.png')
+  })
+
+  it('DEFAULT (no hook) stores a text-only message with NO attachments — no regression', async () => {
+    const pipe = makeFakePipeline({ text: 'plain text answer' })
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      pipeline: pipe as never,
+    })
+    const ctx = makeCtx()
+    await adapter.executor()(ctx, makeHelpers())
+    const msg = ctx._stored.messages[0]
+    expect(msg?.content?.toString()).toBe('plain text answer')
+    expect(msg?.attachments.length).toBe(0)
+    expect(
+      (ctx as never as { storeMediaBytes: ReturnType<typeof vi.fn> }).storeMediaBytes
+    ).not.toHaveBeenCalled()
   })
 })

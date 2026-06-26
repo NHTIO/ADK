@@ -45,6 +45,22 @@ export type ReasoningParserName =
   | 'gemma_channel'
   | 'none'
 
+/**
+ * Options shared by the bundled reasoning parsers.
+ *
+ * @remarks
+ * `orphanRecovery` (default `true`) controls whether an **unpaired** reasoning marker is recovered by
+ * inferring the missing half from the pseudo-streaming order, rather than being left to leak into the
+ * visible answer. A real-world gemma-4-E4B WebGPU quant "randomly emits `</think>`" with no matching
+ * open; because generation is start→end, a lone close implies the block opened at the previous close
+ * (or start-of-output), and a lone open with no close implies reasoning ran to end-of-stream. Turn this
+ * off for strict pair-only behaviour (markers without a matching partner are left verbatim).
+ */
+export interface ReasoningParserOptions {
+  /** Recover unpaired markers by inferring the missing half (default `true`). */
+  orphanRecovery?: boolean
+}
+
 // ─── Shared ───────────────────────────────────────────────────────────────────────────────────────
 
 const NO_MATCH = (rawText: string): ReasoningParseResult => ({
@@ -60,46 +76,160 @@ const removeSpans = (text: string, spans: Array<[number, number]>): string => {
   return out.replace(/\n{3,}/g, '\n\n').trim()
 }
 
-const collect = (rawText: string, re: RegExp): ReasoningParseResult => {
+/**
+ * A literal open/close marker pair for a reasoning family. `openRe` is a `g`-flagged regex (so the open
+ * marker can carry trailing attributes, e.g. gemma's `<|channel>thought\n`); `close` is a literal
+ * string. After each match the captured trace is the text strictly between the open match's end and the
+ * close.
+ */
+interface ReasoningMarkers {
+  /** Global-flagged regex matching the OPEN marker (its full match is consumed). */
+  openRe: RegExp
+  /** Literal CLOSE marker string. */
+  close: string
+}
+
+/**
+ * Collect reasoning spans, recovering UNPAIRED markers by inferring the missing half from the
+ * pseudo-streaming order (see {@link ReasoningParserOptions}). Algorithm, in precedence:
+ *
+ * 1. **Paired** spans first — each OPEN whose following text contains a CLOSE forms a complete span
+ *    `[openStart, closeEnd]`; the trace is the text between. (Unchanged from the strict path.)
+ * 2. **Lone closes** — in the text NOT covered by a pair, scan left-to-right for CLOSE markers that
+ *    have no preceding OPEN. Each spans `[cursor, closeEnd]` where `cursor` starts at start-of-text and
+ *    advances to each consumed close, so `A </c> B </c> C` → traces `A`, `B` and answer `C` (the second
+ *    orphan-close opens at the first close, not back at 0).
+ * 3. **Lone open** — a final OPEN with no following CLOSE spans `[openStart, end-of-text]` (truncated
+ *    stream).
+ *
+ * When `orphanRecovery` is false this collapses to strict paired-only behaviour (identical to the old
+ * `collect`). Returns NO_MATCH only when nothing — no pair, no orphan — was found.
+ */
+const collectWithOrphans = (
+  rawText: string,
+  markers: ReasoningMarkers,
+  orphanRecovery: boolean
+): ReasoningParseResult => {
+  const { openRe, close } = markers
   const reasoning: string[] = []
   const spans: Array<[number, number]> = []
-  for (const m of rawText.matchAll(re)) {
-    const trace = m[1].trim()
-    if (trace.length > 0) reasoning.push(trace)
-    spans.push([m.index ?? 0, (m.index ?? 0) + m[0].length])
+
+  // Reset lastIndex defensively (these regexes are module-level and `g`-flagged).
+  openRe.lastIndex = 0
+
+  // Walk the text once. At each step, find the next OPEN and the next CLOSE from the cursor.
+  // `cursor` is the start of the not-yet-consumed remainder.
+  let cursor = 0
+  // Track whether we are currently "inside" an implied/explicit open. For strict pairing we only
+  // consume an open when a close follows it.
+  while (cursor <= rawText.length) {
+    openRe.lastIndex = cursor
+    const openMatch = openRe.exec(rawText)
+    const openStart = openMatch ? openMatch.index : -1
+    const openEnd = openMatch ? openMatch.index + openMatch[0].length : -1
+    const closeStart = rawText.indexOf(close, cursor)
+
+    if (closeStart !== -1 && (openStart === -1 || closeStart < openStart)) {
+      // A CLOSE appears before the next OPEN (or there is no further OPEN). This is an ORPHAN close:
+      // the implied open is the cursor (start-of-remainder == previous close position).
+      if (!orphanRecovery) {
+        // Strict mode: an unpaired close is not consumed — advance past it untouched.
+        cursor = closeStart + close.length
+        continue
+      }
+      const trace = rawText.slice(cursor, closeStart).trim()
+      if (trace.length > 0) reasoning.push(trace)
+      spans.push([cursor, closeStart + close.length])
+      cursor = closeStart + close.length
+      continue
+    }
+
+    if (openStart !== -1) {
+      // We have an OPEN. Look for its matching CLOSE after the open.
+      const pairedClose = rawText.indexOf(close, openEnd)
+      if (pairedClose !== -1) {
+        // Complete pair.
+        const trace = rawText.slice(openEnd, pairedClose).trim()
+        if (trace.length > 0) reasoning.push(trace)
+        spans.push([openStart, pairedClose + close.length])
+        cursor = pairedClose + close.length
+        continue
+      }
+      // Lone OPEN with no following CLOSE → truncated stream: reasoning runs to end-of-text.
+      if (!orphanRecovery) break
+      const trace = rawText.slice(openEnd).trim()
+      if (trace.length > 0) reasoning.push(trace)
+      spans.push([openStart, rawText.length])
+      break
+    }
+
+    // No further OPEN and no further CLOSE — done.
+    break
   }
-  // Strip the reasoning markup whenever the delimiters matched — even if the captured trace was empty
-  // (e.g. an empty thought channel when thinking was disabled), so the markers never leak into prose.
+
   return spans.length > 0
     ? { reasoning, cleanedText: removeSpans(rawText, spans) }
     : NO_MATCH(rawText)
 }
 
 // ─── think_tag: <think>…</think> (Qwen3, DeepSeek-R1 — the dominant convention) ───────────────────────
+// Two delimiter shapes share this family: `<think>`/`</think>` and the `<thinking>`/`</thinking>`
+// variant. They are processed independently (a `<think>` never pairs with a `</thinking>`).
 
-const THINK_TAG_RE = /<think(?:ing)?>\s*([\s\S]*?)\s*<\/think(?:ing)?>/g
+const THINK_OPEN_RE = /<think>/g
+const THINKING_OPEN_RE = /<thinking>/g
 
 /**
  * Parse `<think>…</think>` (and the `<thinking>…</thinking>` variant) reasoning blocks — the dominant
- * convention, used by Qwen3, DeepSeek-R1, and most distilled reasoning models.
+ * convention, used by Qwen3, DeepSeek-R1, and most distilled reasoning models. Unpaired markers (a lone
+ * `</think>` or a truncated `<think>`) are recovered by default — see {@link ReasoningParserOptions}.
  */
-export const thinkTagReasoningParser: ReasoningParserFn = (rawText) =>
-  collect(rawText, THINK_TAG_RE)
+export const makeThinkTagReasoningParser =
+  (opts: ReasoningParserOptions = {}): ReasoningParserFn =>
+  (rawText) => {
+    const orphan = opts.orphanRecovery ?? true
+    // Run the two delimiter shapes in sequence over the running cleaned text so spans from one don't
+    // collide with the other. `<think>` first (the common form), then `<thinking>`.
+    const first = collectWithOrphans(rawText, { openRe: THINK_OPEN_RE, close: '</think>' }, orphan)
+    const second = collectWithOrphans(
+      first.cleanedText,
+      { openRe: THINKING_OPEN_RE, close: '</thinking>' },
+      orphan
+    )
+    const reasoning = [...first.reasoning, ...second.reasoning]
+    return reasoning.length > 0 || second.cleanedText !== rawText
+      ? { reasoning, cleanedText: second.cleanedText }
+      : NO_MATCH(rawText)
+  }
+
+/** Default {@link makeThinkTagReasoningParser} (orphan recovery on). */
+export const thinkTagReasoningParser: ReasoningParserFn = makeThinkTagReasoningParser()
 
 /** Default {@link thinkTagReasoningParser}. */
 export const defaultThinkTagReasoningParser = thinkTagReasoningParser
 
 // ─── harmony_analysis: gpt-oss Harmony analysis channel ───────────────────────────────────────────────
 
-const HARMONY_ANALYSIS_RE = /<\|channel\|>analysis\s*<\|message\|>\s*([\s\S]*?)\s*<\|end\|>/g
+const HARMONY_OPEN_RE = /<\|channel\|>analysis\s*<\|message\|>/g
 
 /**
  * Parse gpt-oss Harmony chain-of-thought on the `analysis` channel:
  * `<|channel|>analysis<|message|>…<|end|>`. (The user-visible answer is the separate `final` channel;
- * tool calls are `commentary` — handled by the tool-call parser.)
+ * tool calls are `commentary` — handled by the tool-call parser.) Unpaired markers are recovered by
+ * default — see {@link ReasoningParserOptions}.
  */
-export const harmonyAnalysisReasoningParser: ReasoningParserFn = (rawText) =>
-  collect(rawText, HARMONY_ANALYSIS_RE)
+export const makeHarmonyAnalysisReasoningParser =
+  (opts: ReasoningParserOptions = {}): ReasoningParserFn =>
+  (rawText) =>
+    collectWithOrphans(
+      rawText,
+      { openRe: HARMONY_OPEN_RE, close: '<|end|>' },
+      opts.orphanRecovery ?? true
+    )
+
+/** Default {@link makeHarmonyAnalysisReasoningParser} (orphan recovery on). */
+export const harmonyAnalysisReasoningParser: ReasoningParserFn =
+  makeHarmonyAnalysisReasoningParser()
 
 /** Default {@link harmonyAnalysisReasoningParser}. */
 export const defaultHarmonyAnalysisReasoningParser = harmonyAnalysisReasoningParser
@@ -108,15 +238,25 @@ export const defaultHarmonyAnalysisReasoningParser = harmonyAnalysisReasoningPar
 // Verified byte-exact against onnx-community/gemma-4-E2B-it-ONNX tokenizer_config.json. NOTE the
 // asymmetric markers: open `<|channel>thought` (no closing pipe before `>`), close `<channel|>`.
 
-const GEMMA_CHANNEL_RE = /<\|channel>thought\b[^\n]*\n?([\s\S]*?)<channel\|>/g
+const GEMMA_OPEN_RE = /<\|channel>thought\b[^\n]*\n?/g
 
 /**
  * Parse Gemma E2B/E4B reasoning emitted on the thought channel:
  * `<|channel>thought\n…<channel|>`. Targets the E2B/E4B delimited form (the transformers.js-runnable
- * one). Reasoning is only emitted when `<|think|>` is injected into the system prompt.
+ * one). Reasoning is only emitted when `<|think|>` is injected into the system prompt. Unpaired markers
+ * are recovered by default — see {@link ReasoningParserOptions}.
  */
-export const gemmaChannelReasoningParser: ReasoningParserFn = (rawText) =>
-  collect(rawText, GEMMA_CHANNEL_RE)
+export const makeGemmaChannelReasoningParser =
+  (opts: ReasoningParserOptions = {}): ReasoningParserFn =>
+  (rawText) =>
+    collectWithOrphans(
+      rawText,
+      { openRe: GEMMA_OPEN_RE, close: '<channel|>' },
+      opts.orphanRecovery ?? true
+    )
+
+/** Default {@link makeGemmaChannelReasoningParser} (orphan recovery on). */
+export const gemmaChannelReasoningParser: ReasoningParserFn = makeGemmaChannelReasoningParser()
 
 /** Default {@link gemmaChannelReasoningParser}. */
 export const defaultGemmaChannelReasoningParser = gemmaChannelReasoningParser
@@ -131,7 +271,7 @@ export const defaultNoneReasoningParser = noneReasoningParser
 
 // ─── auto ─────────────────────────────────────────────────────────────────────────────────────────
 
-/** The bundled reasoning parsers keyed by name (excluding `'auto'`/`'none'`). */
+/** The bundled reasoning parsers keyed by name (excluding `'auto'`/`'none'`), orphan recovery ON. */
 export const BUNDLED_REASONING_PARSERS: Readonly<
   Record<Exclude<ReasoningParserName, 'auto' | 'none'>, ReasoningParserFn>
 > = {
@@ -139,6 +279,15 @@ export const BUNDLED_REASONING_PARSERS: Readonly<
   harmony_analysis: harmonyAnalysisReasoningParser,
   gemma_channel: gemmaChannelReasoningParser,
 }
+
+/** Build the bundled family parsers honouring {@link ReasoningParserOptions} (e.g. orphan recovery). */
+export const buildBundledReasoningParsers = (
+  opts: ReasoningParserOptions = {}
+): Record<Exclude<ReasoningParserName, 'auto' | 'none'>, ReasoningParserFn> => ({
+  think_tag: makeThinkTagReasoningParser(opts),
+  harmony_analysis: makeHarmonyAnalysisReasoningParser(opts),
+  gemma_channel: makeGemmaChannelReasoningParser(opts),
+})
 
 /** The default `'auto'` precedence. All three are literal-marker-anchored, so order is collision-free. */
 export const DEFAULT_REASONING_PARSER_ORDER: ReadonlyArray<
@@ -178,19 +327,28 @@ export const defaultCreateAutoReasoningParser = createAutoReasoningParser
  * {@link ReasoningParserFn}.
  *
  * @param option - The option value. Defaults to `'auto'` when undefined.
- * @param parsers - Override the bundled parsers.
+ * @param parsers - Override the bundled parsers. Ignored when `opts.orphanRecovery` is set (the bundled
+ *   family parsers are rebuilt with that setting); pass a custom `option` fn for full control.
+ * @param opts - {@link ReasoningParserOptions}; `orphanRecovery` defaults to `true`. When `false`, the
+ *   named/auto bundled parsers are rebuilt in strict pair-only mode.
  */
 export const resolveReasoningParser = (
   option: ReasoningParserName | ReasoningParserFn | undefined,
   parsers: Partial<
     Record<Exclude<ReasoningParserName, 'auto' | 'none'>, ReasoningParserFn>
-  > = BUNDLED_REASONING_PARSERS
+  > = BUNDLED_REASONING_PARSERS,
+  opts: ReasoningParserOptions = {}
 ): ReasoningParserFn => {
   if (typeof option === 'function') return option
-  if (option === undefined || option === 'auto') return createAutoReasoningParser(parsers)
   if (option === 'none') return noneReasoningParser
-  const parser = parsers[option] ?? BUNDLED_REASONING_PARSERS[option]
-  return parser ?? noneReasoningParser
+  // When orphan recovery is explicitly disabled, rebuild the bundled parsers in strict mode (and ignore
+  // a `parsers` override, which would otherwise carry the default orphan-on instances).
+  const resolved =
+    opts.orphanRecovery === false
+      ? buildBundledReasoningParsers(opts)
+      : { ...BUNDLED_REASONING_PARSERS, ...parsers }
+  if (option === undefined || option === 'auto') return createAutoReasoningParser(resolved)
+  return resolved[option] ?? noneReasoningParser
 }
 
 /** Default {@link resolveReasoningParser}. */

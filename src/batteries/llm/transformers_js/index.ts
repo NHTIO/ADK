@@ -57,6 +57,8 @@ export {
   defaultRenderTransformersJsToolResult,
   buildTransformersJsMessages,
   defaultBuildTransformersJsMessages,
+  mediaToTransformersInput,
+  defaultMediaToTransformersInput,
   createTransformersJsStreamAccumulator,
   defaultCreateTransformersJsStreamAccumulator,
   // shared tool-call parser layer
@@ -74,6 +76,8 @@ export {
   defaultMistralToolCallParser,
   qwen3CoderToolCallParser,
   defaultQwen3CoderToolCallParser,
+  phiToolCallParser,
+  defaultPhiToolCallParser,
   noneToolCallParser,
   defaultNoneToolCallParser,
   createAutoToolCallParser,
@@ -89,6 +93,10 @@ export {
   defaultHarmonyAnalysisReasoningParser,
   gemmaChannelReasoningParser,
   defaultGemmaChannelReasoningParser,
+  makeThinkTagReasoningParser,
+  makeHarmonyAnalysisReasoningParser,
+  makeGemmaChannelReasoningParser,
+  buildBundledReasoningParsers,
   noneReasoningParser,
   defaultNoneReasoningParser,
   createAutoReasoningParser,
@@ -97,9 +105,26 @@ export {
   defaultResolveReasoningParser,
   BUNDLED_REASONING_PARSERS,
   DEFAULT_REASONING_PARSER_ORDER,
+  // shared lifecycle/boot-progress contract
+  emitLifecycle,
+  defaultEmitLifecycle,
+  // shared portable generation contract
+  resolveGenerationOptions,
+  defaultResolveGenerationOptions,
+  GENERATION_DEFAULTS,
 } from './helpers'
 
 export type { TransformersJsStreamAccumulator, TransformersJsTool } from './helpers'
+
+export type { ChatGenerationOptions, ChatSampler, ResolvedGenerationOptions } from './helpers'
+
+export type {
+  BatteryLifecyclePhase,
+  BatteryLifecycleBattery,
+  BatteryLifecycleReport,
+  BatteryLifecycleCallback,
+  BatteryLifecycleHooks,
+} from './helpers'
 
 export type {
   ParsedToolCall,
@@ -110,18 +135,28 @@ export type {
   ReasoningParseResult,
   ReasoningParserFn,
   ReasoningParserName,
+  ReasoningParserOptions,
   JsonValue,
 } from './helpers'
+
+// Media-output seam types (shared, defined in chat_common/types).
+export type { GeneratedMediaOutput, MediaOutputExtractorFn } from '../chat_common'
 
 export type {
   TransformersJsAdapterOptions,
   CreateTransformersJsPipeline,
   CreateTransformersJsStreamer,
+  CreateTransformersJsMultimodal,
   TransformersJsMessage,
   TransformersJsPipeline,
   TransformersJsTextStreamer,
+  TransformersJsProcessor,
+  TransformersJsModel,
+  TransformersJsModelSource,
   TransformersJsDataType,
   TransformersJsDeviceType,
+  TransformersJsDevice,
+  TransformersJsDtype,
   TransformersJsProgressCallback,
   TransformersJsHelpers,
   TransformersJsBucketOrder,
@@ -131,6 +166,13 @@ export type {
   DescriptionLike,
   UnsupportedMediaPolicy,
 } from './types'
+
+export {
+  installModelSource,
+  withModelSource,
+  modelSourceToCache,
+  parseResourceKey,
+} from './model_source'
 
 export { transformersJsOptionsSchema, validateOptions } from './validation'
 

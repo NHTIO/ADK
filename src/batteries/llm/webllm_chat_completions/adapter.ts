@@ -51,6 +51,7 @@ import { DateTime } from 'luxon'
 import { sha256 } from 'js-sha256'
 import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
+import { emitLifecycle } from '../chat_common/lifecycle'
 import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
 import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
@@ -93,6 +94,7 @@ import {
 } from './helpers'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { Tool, Memory, TokenEncoding } from '@nhtio/adk/common'
+import type { BatteryLifecyclePhase } from '../chat_common/lifecycle'
 import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
 import type {
   WebLLMChatCompletionsAdapterOptions,
@@ -105,6 +107,12 @@ import type {
   WebLLMEngine,
   ReasoningField,
 } from './types'
+
+// MLC init-progress `text` markers that indicate the COMPILE sub-phase (WebGPU pipeline / shader build
+// / loading-from-cache), as opposed to network fetch. Best-effort: a miss just routes to `loading`, and
+// the coarse `compiling` marker before engine-create fires regardless.
+const COMPILE_PROGRESS_RE =
+  /shader|compil|from cache|gpu pipeline|finish loading|loading model from/i
 
 // ─── ADK-control keys (stripped before sending the request body) ──────────
 
@@ -127,6 +135,7 @@ const ADK_CONTROL_KEYS: ReadonlySet<string> = new Set([
   'onInitProgress',
   'isWebGPUAvailable',
   'autoAck',
+  'enableThinking',
 ])
 
 // ─── Option merging ───────────────────────────────────────────────────────────
@@ -314,24 +323,65 @@ export class WebLLMChatCompletionsAdapter {
       ])
     }
     this.#enginePromise ??= (async () => {
-      const createEngine =
-        merged.createEngine ??
-        (async ({ model, engineConfig, chatOptions, onInitProgress }) => {
-          const { CreateMLCEngine } = await import('@mlc-ai/web-llm')
-          return (await CreateMLCEngine(
-            model,
-            { ...(engineConfig ?? {}), initProgressCallback: onInitProgress },
-            chatOptions
-          )) as WebLLMEngine
-        })
-      const engine = await createEngine({
-        model: merged.model,
-        engineConfig: merged.engineConfig,
-        chatOptions: merged.chatOptions,
-        onInitProgress: merged.onInitProgress,
+      emitLifecycle(merged, 'webllm', merged.model, 'loading', {
+        detail: 'loading model + booting WebGPU runtime',
       })
-      this.#engine = engine
-      return engine
+      // Forward each MLC init-progress report ({progress 0..1, text, timeElapsed}) into a normalized
+      // `loading` lifecycle report, while still calling the consumer's onInitProgress verbatim.
+      const hasLifecycle =
+        merged.onLifecycle ??
+        merged.onLoading ??
+        merged.onReady ??
+        merged.onGenerating ??
+        merged.onError
+      const forwardedInitProgress = hasLifecycle
+        ? (report: { progress?: number; text?: string }) => {
+            // MLC's init reports cover BOTH fetch and shader/graph compilation; the text distinguishes
+            // them ("Loading model from cache" / "shader" / "GPU" → the compile sub-phase). Route a
+            // compile-flavored report to `compiling`, everything else to `loading`. Any miss falls back
+            // to `loading` (no regression — the coarse `compiling` emit below still fires before create).
+            const phase: BatteryLifecyclePhase = COMPILE_PROGRESS_RE.test(report?.text ?? '')
+              ? 'compiling'
+              : 'loading'
+            emitLifecycle(merged, 'webllm', merged.model, phase, {
+              ...(typeof report?.progress === 'number' ? { progress: report.progress } : {}),
+              ...(report?.text ? { detail: report.text } : {}),
+              raw: report,
+            })
+            merged.onInitProgress?.(report as never)
+          }
+        : merged.onInitProgress
+      try {
+        const createEngine =
+          merged.createEngine ??
+          (async ({ model, engineConfig, chatOptions, onInitProgress }) => {
+            const { CreateMLCEngine } = await import('@mlc-ai/web-llm')
+            return (await CreateMLCEngine(
+              model,
+              { ...(engineConfig ?? {}), initProgressCallback: onInitProgress },
+              chatOptions
+            )) as WebLLMEngine
+          })
+        // Coarse `compiling` marker: by the time MLC has the weights and is building the WebGPU pipeline,
+        // this fires even if no init-report text matched COMPILE_PROGRESS_RE (the boundary the LiteRT chat
+        // demo marks). Per-report `compiling` above refines it when MLC's text is granular enough.
+        emitLifecycle(merged, 'webllm', merged.model, 'compiling', {
+          detail: 'compiling model + WebGPU shaders',
+        })
+        const engine = await createEngine({
+          model: merged.model,
+          engineConfig: merged.engineConfig,
+          chatOptions: merged.chatOptions,
+          onInitProgress: forwardedInitProgress,
+        })
+        this.#engine = engine
+        emitLifecycle(merged, 'webllm', merged.model, 'ready', { detail: 'engine ready' })
+        return engine
+      } catch (err) {
+        this.#enginePromise = undefined
+        emitLifecycle(merged, 'webllm', merged.model, 'error', { error: err })
+        throw err
+      }
     })()
     return this.#enginePromise
   }
@@ -586,6 +636,13 @@ export class WebLLMChatCompletionsAdapter {
         if (v === undefined) continue
         ;(body as Record<string, unknown>)[k] = v
       }
+      // Thread the explicit thinking flag into extra_body.enable_thinking so the underlying chat
+      // template never decides for itself (Qwen3/DeepSeek default thinking ON). Default OFF; merged with
+      // any caller-supplied extra_body without clobbering it.
+      body.extra_body = {
+        ...(body.extra_body ?? {}),
+        enable_thinking: merged.enableThinking ?? false,
+      }
       const toolsArr = mergedRegistry.visible()
       if (toolsArr.length > 0) {
         body.tools = resolvedHelpers.toolsToChatCompletionsTools(toolsArr, {
@@ -601,6 +658,7 @@ export class WebLLMChatCompletionsAdapter {
       let completion: ChatCompletionsResponse | AsyncIterable<ChatCompletionsChunk>
       try {
         const engine = await this.#resolveEngine(merged)
+        emitLifecycle(merged, 'webllm', merged.model, 'generating')
         completion = (await engine.chat.completions.create(body as never)) as
           | ChatCompletionsResponse
           | AsyncIterable<ChatCompletionsChunk>
@@ -610,6 +668,7 @@ export class WebLLMChatCompletionsAdapter {
           message: `WebLLM engine failure: ${isError(err) ? err.message : String(err)}`,
           payload: { detail: isError(err) ? err.message : String(err) },
         })
+        emitLifecycle(merged, 'webllm', merged.model, 'error', { error: err })
         ctx.nack(
           new E_WEBLLM_CHAT_COMPLETIONS_STREAM_ERROR([isError(err) ? err.message : String(err)])
         )
@@ -931,11 +990,13 @@ export class WebLLMChatCompletionsAdapter {
             message: `WebLLM stream failed: ${isError(err) ? err.message : String(err)}`,
             payload: { detail: isError(err) ? err.message : String(err) },
           })
+          emitLifecycle(merged, 'webllm', merged.model, 'error', { error: err })
           ctx.nack(
             new E_WEBLLM_CHAT_COMPLETIONS_STREAM_ERROR([isError(err) ? err.message : String(err)])
           )
           return
         }
+        emitLifecycle(merged, 'webllm', merged.model, 'complete')
         return
       }
 
@@ -944,6 +1005,7 @@ export class WebLLMChatCompletionsAdapter {
       const choice = parsed.choices?.[0]
       if (!choice) {
         // Empty response, no tool calls — terminal. Self-ack only when opted in.
+        emitLifecycle(merged, 'webllm', merged.model, 'complete')
         if (merged.autoAck) ctx.ack()
         return
       }
@@ -987,6 +1049,7 @@ export class WebLLMChatCompletionsAdapter {
       if (rawCalls.length === 0) {
         // No tool calls — terminal text answer. Self-ack only when opted in;
         // otherwise the implementor's output pipeline owns completion.
+        emitLifecycle(merged, 'webllm', merged.model, 'complete')
         if (merged.autoAck) ctx.ack()
         return
       }
@@ -1001,6 +1064,7 @@ export class WebLLMChatCompletionsAdapter {
         await executeAndPersistToolCall(call)
       }
       // Tool calls produced — do NOT ack; the runner will iterate again.
+      emitLifecycle(merged, 'webllm', merged.model, 'complete')
     }
   }
 

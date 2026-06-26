@@ -51,6 +51,7 @@ import {
   defaultBuildChatCompletionsHistory,
   createChatCompletionsToolCallDeltaAccumulator,
   defaultCreateChatCompletionsToolCallDeltaAccumulator,
+  extractReasoningFields,
 } from '@nhtio/adk/batteries/llm/openai_chat_completions'
 import type { JsonSchema } from '@nhtio/adk/batteries/llm/openai_chat_completions'
 
@@ -1463,5 +1464,28 @@ describe('default-prefixed re-exports are identity-equal to the unprefixed helpe
     expect(defaultCreateChatCompletionsToolCallDeltaAccumulator).toBe(
       createChatCompletionsToolCallDeltaAccumulator
     )
+  })
+})
+
+describe('extractReasoningFields — empty-thought carve-out', () => {
+  const precedence = ['reasoning', 'reasoning_content'] as const
+
+  it('extracts a non-empty reasoning field', () => {
+    const out = extractReasoningFields({ reasoning: 'I considered the options.' }, precedence)
+    expect(out).toEqual([{ field: 'reasoning', content: 'I considered the options.' }])
+  })
+
+  it('drops a whitespace-only field (model no-think artifact — never surface it)', () => {
+    expect(extractReasoningFields({ reasoning: '   \n\n  ' }, precedence)).toEqual([])
+    expect(extractReasoningFields({ reasoning: '' }, precedence)).toEqual([])
+    expect(extractReasoningFields({ reasoning: undefined }, precedence)).toEqual([])
+  })
+
+  it('falls through precedence past a blank field to a populated one', () => {
+    const out = extractReasoningFields(
+      { reasoning: '  ', reasoning_content: 'the real trace' },
+      precedence
+    )
+    expect(out).toEqual([{ field: 'reasoning_content', content: 'the real trace' }])
   })
 })

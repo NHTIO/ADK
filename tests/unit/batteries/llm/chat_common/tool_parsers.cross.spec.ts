@@ -7,6 +7,7 @@ import {
   llama3JsonToolCallParser,
   mistralToolCallParser,
   qwen3CoderToolCallParser,
+  phiToolCallParser,
   noneToolCallParser,
   createAutoToolCallParser,
   resolveToolCallParser,
@@ -34,11 +35,25 @@ describe('tool parsers — per-family extraction', () => {
     expect(r.calls[1]).toEqual({ name: 'get_time', arguments: {} })
   })
 
-  it('gemma: <|tool_call>call:NAME{key:<|"|>val<|"|>}<tool_call|>', () => {
+  it('gemma: <|tool_call>call:NAME{key:<|"|>val<|"|>}<tool_call|> (template form)', () => {
     const raw = 'Sure.<|tool_call>call:get_weather{city:<|"|>Bern<|"|>}<tool_call|>'
     const r = gemmaToolCallParser(raw, CTX)
     expect(r.calls).toEqual([{ name: 'get_weather', arguments: { city: 'Bern' } }])
     expect(r.cleanedText).toBe('Sure.')
+  })
+
+  it('gemma: bare call:NAME{key:value} (decoder-STRIPPED runtime form — real E2B output)', () => {
+    // What a real onnx-community/gemma-4-E2B-it-ONNX run emits (special tokens removed, value unquoted).
+    const raw = 'call:get_weather{city:Paris}'
+    const r = gemmaToolCallParser(raw, CTX)
+    expect(r.calls).toEqual([{ name: 'get_weather', arguments: { city: 'Paris' } }])
+    expect(r.cleanedText).toBe('')
+  })
+
+  it('gemma: stripped form preserves numeric + boolean scalars as JSON types', () => {
+    const raw = 'call:set_temp{value:21, active:true}'
+    const r = gemmaToolCallParser(raw, { toolNames: ['set_temp'] })
+    expect(r.calls).toEqual([{ name: 'set_temp', arguments: { value: 21, active: true } }])
   })
 
   it('gpt_oss: harmony commentary channel', () => {
@@ -58,21 +73,36 @@ describe('tool parsers — per-family extraction', () => {
     expect(r.cleanedText).toBe('')
   })
 
-  it('pythonic: rejects unknown callee (false-positive guard)', () => {
+  it('pythonic: surfaces an unknown callee (authorization is downstream, not the parser)', () => {
+    // The `[fn(args)]` whole-output shape disambiguates structurally; it is NOT an allowlist. Whether a
+    // tool is permitted is the consumer/dispatch decision, so an unknown callee is reported, not dropped.
     const raw = "[not_a_real_tool(x='y')]"
-    expect(pythonicToolCallParser(raw, CTX).calls).toHaveLength(0)
+    expect(pythonicToolCallParser(raw, CTX).calls).toEqual([
+      { name: 'not_a_real_tool', arguments: { x: 'y' } },
+    ])
   })
 
-  it('llama3_json: bare {name, parameters} with callee guard', () => {
+  it('llama3_json: bare {name, parameters}', () => {
     const raw = '{"name": "search", "parameters": {"q": "hello"}}'
     const r = llama3JsonToolCallParser(raw, CTX)
     expect(r.calls).toEqual([{ name: 'search', arguments: { q: 'hello' } }])
     expect(r.cleanedText).toBe('')
   })
 
-  it('llama3_json: rejects JSON whose name is not a real tool', () => {
+  it('llama3_json: surfaces JSON whose name is not a registered tool (authorization is downstream)', () => {
+    // Structural disambiguation only — a whole-output object with a string `name` is a call. Allowing or
+    // rejecting an unknown tool is the dispatch layer's job (it replies "Tool not found: …").
     const raw = '{"name": "totally_fake", "parameters": {}}'
-    expect(llama3JsonToolCallParser(raw, CTX).calls).toHaveLength(0)
+    expect(llama3JsonToolCallParser(raw, CTX).calls).toEqual([
+      { name: 'totally_fake', arguments: {} },
+    ])
+  })
+
+  it('llama3_json: un-fences a ```json {name, arguments} ``` block (real Qwen2.5-Coder-0.5B form)', () => {
+    const raw =
+      '```json\n{\n  "name": "get_weather",\n  "arguments": {\n    "city": "Oslo"\n  }\n}\n```'
+    const r = llama3JsonToolCallParser(raw, CTX)
+    expect(r.calls).toEqual([{ name: 'get_weather', arguments: { city: 'Oslo' } }])
   })
 
   it('mistral: [TOOL_CALLS] + JSON array', () => {
@@ -86,6 +116,28 @@ describe('tool parsers — per-family extraction', () => {
       '<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>'
     const r = qwen3CoderToolCallParser(raw, CTX)
     expect(r.calls).toEqual([{ name: 'get_weather', arguments: { city: 'Tokyo' } }])
+  })
+
+  it('phi: functools[{name, arguments}] (Phi-4-mini)', () => {
+    const raw = 'functools[{"name": "get_weather", "arguments": {"city": "Paris"}}]'
+    const r = phiToolCallParser(raw, CTX)
+    expect(r.calls).toEqual([{ name: 'get_weather', arguments: { city: 'Paris' } }])
+    expect(r.cleanedText).toBe('')
+  })
+
+  it('phi: parallel calls + leading/trailing prose', () => {
+    const raw =
+      'Sure thing. functools[{"name":"get_weather","arguments":{"city":"NYC"}}, {"name":"get_time","arguments":{}}] done'
+    const r = phiToolCallParser(raw, CTX)
+    expect(r.calls).toHaveLength(2)
+    expect(r.calls[1]).toEqual({ name: 'get_time', arguments: {} })
+    expect(r.cleanedText).toBe('Sure thing.  done')
+  })
+
+  it('phi: tolerates a bracket inside a string argument (balanced scan)', () => {
+    const raw = 'functools[{"name":"search","arguments":{"q":"a [bracket] in text"}}]'
+    const r = phiToolCallParser(raw, CTX)
+    expect(r.calls).toEqual([{ name: 'search', arguments: { q: 'a [bracket] in text' } }])
   })
 
   it('none: never matches', () => {
@@ -107,6 +159,7 @@ describe('tool parsers — no-match contract', () => {
       llama3JsonToolCallParser,
       mistralToolCallParser,
       qwen3CoderToolCallParser,
+      phiToolCallParser,
     ]) {
       const r = p(raw, CTX)
       expect(r.calls).toHaveLength(0)
@@ -145,6 +198,18 @@ describe('tool parsers — cross-family isolation', () => {
     // Hermes greedily matches <tool_call>…</tool_call> but the body is not JSON → declines.
     expect(hermesToolCallParser(qwen, CTX).calls).toHaveLength(0)
   })
+
+  it('phi output (functools[...]) does NOT match hermes / mistral / pythonic', () => {
+    const phi = 'functools[{"name":"get_weather","arguments":{"city":"NYC"}}]'
+    expect(hermesToolCallParser(phi, CTX).calls).toHaveLength(0)
+    expect(mistralToolCallParser(phi, CTX).calls).toHaveLength(0) // requires [TOOL_CALLS], absent
+    expect(pythonicToolCallParser(phi, CTX).calls).toHaveLength(0)
+  })
+
+  it('phi does NOT claim mistral output (no functools token)', () => {
+    const mistral = '[TOOL_CALLS] [{"name":"get_time","arguments":{}}]'
+    expect(phiToolCallParser(mistral, CTX).calls).toHaveLength(0)
+  })
 })
 
 // ─── auto driver precedence ──────────────────────────────────────────────────────────────────────────
@@ -164,6 +229,9 @@ describe('tool parsers — auto driver', () => {
     })
     expect(auto('[get_time()]', CTX).calls[0].name).toBe('get_time')
     expect(auto('{"name":"search","parameters":{"q":"x"}}', CTX).calls[0].name).toBe('search')
+    expect(
+      auto('functools[{"name":"get_weather","arguments":{"city":"NYC"}}]', CTX).calls[0].name
+    ).toBe('get_weather')
   })
 
   it('returns no-match on plain prose', () => {

@@ -16,6 +16,7 @@ import {
 } from '@nhtio/adk/batteries/llm/webllm_chat_completions'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
+import type { BatteryLifecycleReport } from '@nhtio/adk/batteries/llm/webllm_chat_completions'
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -190,6 +191,18 @@ describe('WebLLMChatCompletionsAdapter — engine invocation', () => {
     expect(request?.model).toBe('model-a')
     expect(request?.stream).toBe(false)
     expect(Array.isArray(request?.messages)).toBe(true)
+    // EXPLICIT generation defaults must be materialised on the body (never left for the MLC engine to
+    // guess): greedy (temperature 0), pinned top_p + max_tokens, and thinking explicitly off.
+    const body = request as unknown as {
+      temperature?: number
+      top_p?: number
+      max_tokens?: number
+      extra_body?: { enable_thinking?: boolean }
+    }
+    expect(body.temperature).toBe(0)
+    expect(body.top_p).toBeCloseTo(0.95)
+    expect(body.max_tokens).toBe(1024)
+    expect(body.extra_body?.enable_thinking).toBe(false)
     const stored = ctx._stored.messages[0]
     expect(ctx.ack).toHaveBeenCalledOnce()
     expect(stored).toBeDefined()
@@ -313,3 +326,134 @@ const makeStreamingEngine = (parts: string[]) => {
     },
   }
 }
+
+// ─── lifecycle hooks ────────────────────────────────────────────────────────────────────────────────
+
+describe('WebLLMChatCompletionsAdapter — lifecycle hooks', () => {
+  it('fires loading → compiling → ready → generating → complete via createEngine (firehose + per-phase)', async () => {
+    const seen: string[] = []
+    const perPhase: string[] = []
+    const engine = makeEngine({ content: 'pong' })
+    const adapter = new WebLLMChatCompletionsAdapter({
+      model: 'fam/model',
+      stream: false,
+      autoAck: true,
+      isWebGPUAvailable: () => true,
+      createEngine: async () => engine as never,
+      onLifecycle: (r: BatteryLifecycleReport) => seen.push(r.phase),
+      onLoading: () => perPhase.push('loading'),
+      onCompiling: () => perPhase.push('compiling'),
+      onReady: () => perPhase.push('ready'),
+      onGenerating: () => perPhase.push('generating'),
+      onComplete: () => perPhase.push('complete'),
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    // The coarse `compiling` marker fires before engine-create (this stub createEngine never calls
+    // onInitProgress, so only the coarse marker lands — the per-report compile refinement is exercised
+    // by the COMPILE_PROGRESS_RE test below).
+    expect(seen).toEqual(['loading', 'compiling', 'ready', 'generating', 'complete'])
+    expect(perPhase).toEqual(['loading', 'compiling', 'ready', 'generating', 'complete'])
+  })
+
+  it('routes a fetch init-report to loading and a shader/compile init-report to compiling', async () => {
+    const reports: BatteryLifecycleReport[] = []
+    const engine = makeEngine({ content: 'pong' })
+    // A createEngine that drives onInitProgress with a fetch-stage then a compile-stage report — the
+    // way MLC's real initProgressCallback streams text. The adapter must route them to distinct phases.
+    const adapter = new WebLLMChatCompletionsAdapter({
+      model: 'fam/model',
+      stream: false,
+      autoAck: true,
+      isWebGPUAvailable: () => true,
+      createEngine: async ({
+        onInitProgress,
+      }: {
+        onInitProgress?: (r: { progress?: number; text?: string }) => void
+      }) => {
+        onInitProgress?.({ progress: 0.4, text: 'Fetching param cache[3/22]: 120MB fetched' })
+        onInitProgress?.({ progress: 0.9, text: 'Loading model from cache[20/22]' })
+        return engine as never
+      },
+      onLifecycle: (r: BatteryLifecycleReport) => reports.push(r),
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    const fetchReport = reports.find((r) => /Fetching param cache/.test(r.detail ?? ''))
+    const cacheReport = reports.find((r) => /Loading model from cache/.test(r.detail ?? ''))
+    expect(fetchReport?.phase).toBe('loading')
+    // "Loading model from cache" matches COMPILE_PROGRESS_RE → refined to the compiling phase.
+    expect(cacheReport?.phase).toBe('compiling')
+  })
+
+  it('reports battery=webllm + model on every report', async () => {
+    const reports: BatteryLifecycleReport[] = []
+    const engine = makeEngine({ content: 'ok' })
+    const adapter = new WebLLMChatCompletionsAdapter({
+      model: 'fam/model',
+      stream: false,
+      autoAck: true,
+      isWebGPUAvailable: () => true,
+      createEngine: async () => engine as never,
+      onLifecycle: (r: BatteryLifecycleReport) => reports.push(r),
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    for (const r of reports) {
+      expect(r.battery).toBe('webllm')
+      expect(r.model).toBe('fam/model')
+    }
+  })
+
+  it('a pre-built engine skips loading/ready but still fires generating/complete', async () => {
+    const seen: string[] = []
+    const engine = makeEngine({ content: 'ok' })
+    const adapter = new WebLLMChatCompletionsAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      engine: engine as never,
+      onLifecycle: (r: BatteryLifecycleReport) => seen.push(r.phase),
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    expect(seen).toEqual(['generating', 'complete'])
+  })
+
+  it('emits error (not complete) when engine creation fails', async () => {
+    const phases: string[] = []
+    const adapter = new WebLLMChatCompletionsAdapter({
+      model: 'm',
+      stream: false,
+      isWebGPUAvailable: () => true,
+      createEngine: async () => {
+        throw new Error('engine boom')
+      },
+      onLifecycle: (r: BatteryLifecycleReport) => phases.push(r.phase),
+    })
+    const ctx = makeCtx()
+    await adapter.executor()(ctx, makeHelpers())
+    expect(phases).toContain('loading')
+    expect(phases).toContain('error')
+    expect(phases).not.toContain('complete')
+    expect(ctx.nack).toHaveBeenCalled()
+  })
+
+  it('forwards MLC initProgressCallback into a normalized loading report', async () => {
+    const loading: BatteryLifecycleReport[] = []
+    const engine = makeEngine({ content: 'ok' })
+    const adapter = new WebLLMChatCompletionsAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      isWebGPUAvailable: () => true,
+      onLoading: (r: BatteryLifecycleReport) => loading.push(r),
+      createEngine: async (input: {
+        onInitProgress?: (report: { progress?: number; text?: string }) => void
+      }) => {
+        input.onInitProgress?.({ progress: 0.5, text: 'Fetching param cache[3/12]' })
+        return engine as never
+      },
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    const withProgress = loading.find((r) => typeof r.progress === 'number')
+    expect(withProgress?.progress).toBeCloseTo(0.5, 5)
+    expect(withProgress?.detail).toContain('Fetching param cache')
+  })
+})

@@ -15,6 +15,10 @@ export { TransformersJsEmbeddingsAdapter } from './adapter'
 
 export { transformersJsEmbeddingsOptionsSchema, validateOptions } from './validation'
 
+export { poolAndNormalize, defaultPoolAndNormalize, l2Normalize } from './pooling'
+
+export type { TokenStates3D, Pooled2D } from './pooling'
+
 export type {
   EmbeddingKind,
   EmbedOptions,
@@ -25,7 +29,14 @@ export type {
   TransformersJsEmbeddingsDeviceType,
   TransformersJsEmbeddingsProgressCallback,
   TransformersJsPooling,
+  TransformersJsPoolingOwner,
+  TransformersJsEmbeddingsModelSource,
   CreateTransformersJsEmbeddingsPipeline,
+  BatteryLifecyclePhase,
+  BatteryLifecycleBattery,
+  BatteryLifecycleReport,
+  BatteryLifecycleCallback,
+  BatteryLifecycleHooks,
 } from './types'
 
 export {

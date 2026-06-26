@@ -15,11 +15,14 @@
 
 import type { TokenEncoding } from '@nhtio/adk'
 import type { SpoolStore } from '@nhtio/adk/common'
+import type { BatteryLifecycleHooks } from '../chat_common'
 import type {
   ToolCallParserName,
   ToolCallParserFn,
   ReasoningParserName,
   ReasoningParserFn,
+  ChatSampler,
+  MediaOutputExtractorFn,
 } from '../chat_common'
 import type {
   ChatCompletionsBucketOrder,
@@ -36,6 +39,8 @@ import type {
   TextGenerationPipeline,
   TextStreamer,
   ProgressCallback,
+  Processor,
+  PreTrainedModel,
 } from '@huggingface/transformers'
 
 // ── transformers.js wire shapes (local aliases — the source of truth) ─────────────────────────────────
@@ -52,14 +57,36 @@ export type TransformersJsDataType = TransformersDataType
 export type TransformersJsDeviceType = TransformersDeviceType
 /** Model-load progress callback. */
 export type TransformersJsProgressCallback = ProgressCallback
+/** A loaded multimodal model instance (`AutoModelForImageTextToText` output). */
+export type TransformersJsModel = PreTrainedModel
+/** A loaded multimodal processor instance (`AutoProcessor` output). */
+export type TransformersJsProcessor = Processor
 
-/** Re-export the parser option types so consumers import everything from this battery's barrel. */
-export type {
-  ToolCallParserName,
-  ToolCallParserFn,
-  ReasoningParserName,
-  ReasoningParserFn,
-} from '../chat_common'
+/**
+ * `device`/`dtype` for a multimodal model: a single value (all submodules) OR a `Record` keyed by ONNX
+ * submodule filename (`vision_encoder` / `audio_encoder` / `embed_tokens` / `decoder_model_merged`) —
+ * the way to configure each modality's precision/backend separately.
+ */
+export type TransformersJsDevice =
+  | TransformersJsDeviceType
+  | Record<string, TransformersJsDeviceType>
+/** Per-submodule dtype override (see {@link TransformersJsDevice}). */
+export type TransformersJsDtype = TransformersJsDataType | Record<string, TransformersJsDataType>
+
+/**
+ * Custom model-source resolver — the seam for OPFS / separate-source / per-submodule loading. Called
+ * once per model file (`req.filename` distinguishes `vision_encoder.onnx` from `decoder_model_merged.onnx`).
+ * Return bytes, a path/URL string, a `Response`, or `undefined` to fall through to the default HF fetch.
+ */
+export type TransformersJsModelSource = (req: {
+  repo: string
+  filename: string
+}) =>
+  | Promise<Uint8Array | string | Response | undefined>
+  | Uint8Array
+  | string
+  | Response
+  | undefined
 
 /** Re-export shared format-agnostic helper/policy types. */
 export type {
@@ -80,8 +107,8 @@ export type {
  */
 export type CreateTransformersJsPipeline = (input: {
   model: string
-  device?: TransformersJsDeviceType
-  dtype?: TransformersJsDataType
+  device?: TransformersJsDevice
+  dtype?: TransformersJsDtype
   onInitProgress?: TransformersJsProgressCallback
 }) => Promise<TransformersJsPipeline>
 
@@ -99,6 +126,18 @@ export type CreateTransformersJsStreamer = (input: {
   onText: (text: string) => void
 }) => Promise<unknown> | unknown
 
+/**
+ * Factory for the multimodal model+processor pair (used when `multimodal` is enabled instead of the
+ * text-generation pipeline). Default: `AutoModelForImageTextToText.from_pretrained(model, {device,dtype})`
+ * + `AutoProcessor.from_pretrained(model)`. Override to inject pre-built instances or mock in tests.
+ */
+export type CreateTransformersJsMultimodal = (input: {
+  model: string
+  device?: TransformersJsDevice
+  dtype?: TransformersJsDtype
+  onInitProgress?: TransformersJsProgressCallback
+}) => Promise<{ model: TransformersJsModel; processor: TransformersJsProcessor }>
+
 // ── Adapter options ───────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -111,7 +150,7 @@ export type CreateTransformersJsStreamer = (input: {
  * reasoning — the model emits them as family-specific text, and `toolCallParser` / `reasoningParser`
  * choose how that text is parsed.
  */
-export interface TransformersJsAdapterOptions {
+export interface TransformersJsAdapterOptions extends BatteryLifecycleHooks {
   // ── Engine ──────────────────────────────────────────────────────────────────────────────────────
   /** The model id (e.g. `onnx-community/gemma-4-E2B-it-ONNX`). Required; no default. */
   model: string
@@ -121,30 +160,74 @@ export interface TransformersJsAdapterOptions {
   createPipeline?: CreateTransformersJsPipeline
   /** Custom streaming-sink factory; overrides the default `TextStreamer` (avoids importing the peer). */
   createStreamer?: CreateTransformersJsStreamer
-  /** Inference device forwarded to `pipeline()`. Default: transformers.js environment default. */
-  device?: TransformersJsDeviceType
-  /** Quantization/precision dtype forwarded to `pipeline()` (e.g. `'q4f16'`). */
-  dtype?: TransformersJsDataType
+  /**
+   * Inference device. A single value, or — for a multimodal model — a `Record` keyed by submodule
+   * filename (`vision_encoder`/`audio_encoder`/`embed_tokens`/`decoder_model_merged`) to configure each
+   * separately. Default: transformers.js environment default.
+   */
+  device?: TransformersJsDevice
+  /** Quantization/precision dtype (e.g. `'q4f16'`), or a per-submodule `Record` (see {@link device}). */
+  dtype?: TransformersJsDtype
   /** Called with model-load progress reports while weights download/compile. */
   onInitProgress?: TransformersJsProgressCallback
+  /**
+   * Enable multimodal (image/audio) input. Default off → the text-only path is byte-for-byte unchanged.
+   * When on, the model loads via `AutoModelForImageTextToText` + `AutoProcessor` (not the text-generation
+   * pipeline), and `Media` attachments on a `Message` are fed to the model. `true` = both modalities the
+   * model supports; `{image?,audio?}` restricts which `Media` kinds are sent natively (others degrade via
+   * `unsupportedMediaPolicy`). Output is still text → the tool-call/reasoning parsers are unaffected.
+   */
+  multimodal?: boolean | { image?: boolean; audio?: boolean }
+  /** A pre-built multimodal model+processor pair; mutually exclusive with `createMultimodal`. */
+  multimodalEngine?: { model: TransformersJsModel; processor: TransformersJsProcessor }
+  /** Custom multimodal model+processor factory; overrides the default Auto* loaders. */
+  createMultimodal?: CreateTransformersJsMultimodal
+  /**
+   * Custom model-source resolver (OPFS / separate-source / per-submodule loading). Wraps transformers.js's
+   * `env.customCache`; serves each model file from any source. Dual-environment (Node + browser).
+   */
+  modelSource?: TransformersJsModelSource
   /** Override the availability probe. Default: `true` whenever the peer is importable (env-neutral). */
   isAvailable?: () => boolean
 
-  // ── Generation (transformers.js `generate` kwargs) ──────────────────────────────────────────────
-  /** Max tokens to generate this turn (`max_new_tokens`). */
+  // ── Generation: PORTABLE canonical contract (shared with LiteRT-LM) ──────────────────────────────
+  // The cross-battery vocabulary (see {@link ChatGenerationOptions}). Prefer these for portable config:
+  // `maxTokens`, `sampler`, `temperature`, `topK`, `topP`, `seed`, `enableThinking`, `multimodal`. When a
+  // canonical field AND its transformers.js-native equivalent below are both set, the CANONICAL one wins.
+  /** Portable max generation length (canonical spelling of {@link maxNewTokens}). Default `1024`. */
+  maxTokens?: number
+  /** Portable sampler strategy (`'greedy'` default). `'greedy'`→`do_sample:false`; `'top-k'`/`'top-p'`→
+   * `do_sample:true`+the matching cutoff. Canonical spelling of {@link doSample}. */
+  sampler?: ChatSampler
+  /** RNG seed for reproducible sampling (best-effort). */
+  seed?: number
+
+  // ── Generation (transformers.js-NATIVE escape hatches) ───────────────────────────────────────────
+  // Every knob is ALWAYS passed to `generate` with an explicit, deterministic-friendly default — the
+  // library never falls back to its own guess. These remain as low-level overrides; a canonical field
+  // above takes precedence when both are set.
+  /** Native max tokens (`max_new_tokens`). Prefer {@link maxTokens}. Default `1024`. */
   maxNewTokens?: number
-  /** Whether to sample (`do_sample`); `false` = greedy/deterministic. */
+  /** Native sample flag (`do_sample`); `false` = greedy. Prefer {@link sampler}. */
   doSample?: boolean
-  /** Sampling temperature. */
+  /** Sampling temperature. Default `0.7`. */
   temperature?: number
-  /** Top-K cutoff. */
+  /** Top-K cutoff. Default `40`. */
   topK?: number
-  /** Top-P (nucleus) cutoff. */
+  /** Top-P (nucleus) cutoff. Default `0.95`. */
   topP?: number
-  /** Repetition penalty. */
+  /** Repetition penalty (always sent). Default `1.1`. */
   repetitionPenalty?: number
   /** Stop strings that halt generation. */
   stopStrings?: ReadonlyArray<string>
+  /**
+   * Whether to enable the model's "thinking"/reasoning mode, passed EXPLICITLY to the chat template as
+   * `enable_thinking`. Defaults to `false` — many reasoning templates (Qwen3, DeepSeek-R1) default
+   * thinking ON, which silently burns the token budget inside `<think>` and leaves empty prose. We pin
+   * it off unless you opt in. (Independent of `reasoningParser`, which only parses thinking that IS
+   * emitted.) Part of the shared {@link ChatGenerationOptions} contract.
+   */
+  enableThinking?: boolean
 
   // ── ADK control (shared with the other LLM batteries) ──────────────────────────────────────────
   /** Stream tokens (default `true`). When `false`, a single completed message is returned. */
@@ -182,6 +265,22 @@ export interface TransformersJsAdapterOptions {
    * default), `'none'`, or a custom {@link ReasoningParserFn}. Extracted reasoning becomes ADK Thoughts.
    */
   reasoningParser?: ReasoningParserName | ReasoningParserFn
+  /**
+   * Recover UNPAIRED reasoning markers (a lone `</think>`, a truncated `<think>`) by inferring the
+   * missing half from the pseudo-streaming order, instead of leaking the stray marker into the visible
+   * answer. Defaults to `true`. Set `false` for strict pair-only parsing. Ignored when `reasoningParser`
+   * is a custom function. Motivated by real gemma-4-E4B WebGPU "randomly emits `</think>`" drift.
+   */
+  reasoningOrphanRecovery?: boolean
+  /**
+   * Extract GENERATED media (audio/image/…) from the raw generation result and surface it as
+   * attachments on the assistant {@link @nhtio/adk!Message}. Default absent → text-only output, byte-for-byte
+   * unchanged. The tested open-weight chat checkpoints emit only text; supply this when wrapping a
+   * media-emitting model. Receives the raw transformers.js generation object (the `model.generate` /
+   * pipeline output); each returned {@link MediaOutputExtractorFn} descriptor is persisted via
+   * `ctx.storeMediaBytes` and attached as a `Media.toolGenerated(...)`.
+   */
+  extractMediaOutputs?: MediaOutputExtractorFn
 }
 
 /** The JSON-schema-shaped value used for a tool's `parameters` field (re-export for convenience). */

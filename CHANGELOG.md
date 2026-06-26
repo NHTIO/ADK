@@ -15,6 +15,73 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-06-26
+
+### Added
+
+- **Portable generation vocabulary shared by the two text-out on-device batteries** (`transformers_js`,
+  `litert_lm`). Both now accept one canonical {@link ChatGenerationOptions} surface — `maxTokens`, `sampler`
+  (`'greedy'`|`'top-k'`|`'top-p'`), `temperature`, `topK`, `topP`, `seed`, `enableThinking`,
+  `multimodal: { image, audio }` — and each adapter maps it onto its own runtime API. Precedence is
+  **canonical-wins**: the canonical field is honored and the battery's native field (transformers.js
+  `maxNewTokens`, LiteRT `maxOutputTokens` / `samplerParams`) is the fallback consulted only when the canonical
+  one is absent, so existing native-field config keeps working. Defaults are identical across both batteries
+  and chosen for reproducibility (`sampler: 'greedy'`, `enableThinking: false` — many reasoning templates
+  default thinking *on* and burn the token budget before the answer; this turns it off unless asked).
+- **Normalized lifecycle hook surface across all on-device batteries** (`transformers_js`, `litert_lm`,
+  `webllm_chat_completions`, and the transformers.js embeddings battery). A new opt-in {@link BatteryLifecycleHooks}
+  block: an `onLifecycle` firehose plus per-phase hooks `onLoading` → `onCompiling` → `onReady` →
+  `onGenerating` → `onComplete` (or `onError`), each handed a normalized `BatteryLifecycleReport`
+  (`{ phase, battery, model, at, detail?, progress?, raw?, error? }`). `progress` is normalized to `0..1`
+  during `loading` when the provider reports it; the `compiling` phase marks the WebGPU/wasm shader/graph
+  build between download and first token — often the slowest part of a cold start, and previously invisible.
+  Purely additive — omit the hooks and behavior is byte-for-byte unchanged; a throwing consumer hook can never
+  abort a load or a turn. The existing per-provider `onInitProgress` is untouched.
+- **Multimodal INPUT for the transformers.js battery.** Image and audio flow through the model's processor
+  (called positionally, `_call(text, images, audio)`); a multimodal model genuinely perceives them. For the
+  common audio case — uncompressed PCM WAV — the battery decodes the RIFF itself with a `DataView`,
+  dependency-free and **env-neutral**, *before* importing the heavy peer (transformers.js's own `read_audio`
+  needs the Web Audio API's `AudioContext`, which does not exist in Node; compressed containers still fall
+  back to it, browser-only). Enable per kind via the canonical `multimodal: { image, audio }`.
+- **Opt-in media-OUTPUT seam (`extractMediaOutputs`) on the `transformers_js` and `litert_lm` batteries.**
+  Default absent → text-out, byte-for-byte unchanged. Supply the hook and a wrapped media-emitting model's
+  generated audio/image is persisted via `ctx.storeMediaBytes`, wrapped as a first-party `Media.toolGenerated(...)`,
+  and surfaced as an assistant `Message.attachments` entry (a media-only turn — empty text + attachment — is
+  legitimate). The batteries remain multimodal-in / text-out by default; this is for an LLM turn that produces
+  media alongside or instead of text.
+- **`'phi'` tool-call parser** added to the shared parser layer's `toolCallParser` set and the `'auto'`
+  priority order (`hermes → gemma → gpt_oss → phi → pythonic → llama3_json → mistral → qwen3_coder`). Anchored
+  on the literal `functools` token (verified against vLLM's `phi4_mini_json` parser), so it runs with the
+  other marker-anchored families ahead of the weak-signal JSON/pythonic forms.
+- **`EmbeddingGemma 300M`** (`onnx-community/embeddinggemma-300m-ONNX`) verified through the
+  `transformers_js` embeddings battery — 768-dim, unit-norm, deterministic — alongside the existing
+  MiniLM / BGE-small / Arctic-S entries.
+- **The real-model test matrix** (`tests/_fixtures/model_matrix.ts`, gated on `TEST_MODEL_MATRIX=1`): loads
+  each real ONNX / `.litertlm` model, drives one dispatch turn, and asserts the expected parser family or
+  multimodal grounding is extracted — because a small model may not emit the format its chat template implies
+  (Gemma 4 E2B emits the decoder-stripped `call:NAME{k:v}`, not the template's `<|tool_call>…`). A Node half
+  (`pnpm run test:matrix`) and a headed-WebGPU browser half (`pnpm run test:matrix:browser`, local-only — CI
+  runners have no GPU). `bin/capture_tool_outputs.ts` (`pnpm run capture:tools`) captures real raw output from
+  hosted big-only families (`qwen3_coder`, `gpt_oss`, `mistral`) via any OpenAI-compatible proxy into committed
+  parser fixtures — configured with `--base-url`/`--api-key` or the generic `CAPTURE_BASE_URL` /
+  `CAPTURE_API_KEY` env vars; never run in CI.
+- **Documentation: a dedicated "LLM Batteries" section** under Featured Batteries — an overview hub, a
+  "Shared Contract" page (the three `chat_common` pillars: parser layer, portable generation vocabulary,
+  lifecycle hooks), and a reference page per battery (OpenAI, Ollama, WebLLM, LiteRT-LM, Transformers.js) each
+  carrying a tested-model table grounded in the matrix. Plus a showcase, "Building the On-Device Batteries,"
+  documenting the parser archaeology, the false-green fixtures, and the one wall we could not engineer around:
+  **LiteRT-LM in the browser runs Gemma and only Gemma**, proven at the file-format level
+  (`tf_lite_prefill_decode` vs `tf_lite_artisan_text_decoder`) — converting a non-Gemma model to a
+  browser-runnable `.litertlm` is a dead end with the public toolchain. The dead `convert_model` / `deploy_model`
+  scripts (which described a fictional CLI) were removed and the conversion doc rewritten as "The Real-Model
+  Matrix." Docs are bundled in the npm package and served by the ADK Assembly MCP, so this ships with the release.
+
+### Changed
+
+- **`bin/capture_tool_outputs.ts` now reads its proxy URL/key from `CAPTURE_BASE_URL` / `CAPTURE_API_KEY`**
+  (or the existing `--base-url` / `--api-key` flags), replacing internal-specific env-var names. Dev tool only;
+  not part of the published runtime surface.
+
 ## 2026-06-25
 
 ### Added

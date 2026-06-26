@@ -24,8 +24,11 @@ import { DateTime } from 'luxon'
 import { sha256 } from 'js-sha256'
 import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
+import { emitLifecycle } from '../chat_common/lifecycle'
+import { stripEnvelopeSpecialTokens } from '../chat_common/helpers'
 import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
 import { resolveToolCallParser } from '../chat_common/tool_parsers'
+import { resolveGenerationOptions } from '../chat_common/generation'
 import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { resolveReasoningParser } from '../chat_common/reasoning_parsers'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
@@ -60,13 +63,16 @@ import {
   defaultFilterThoughts,
   defaultRenderChatCompletionsSystemPrompt,
   defaultToolsToLiteRtTools,
+  defaultRenderToolsAsPromptText,
   defaultRenderLiteRtToolResult,
   defaultBuildLiteRtConversationInput,
   defaultCreateLiteRtStreamAccumulator,
+  renderMediaToLiteRtContent,
 } from './helpers'
 import type { Tool } from '@nhtio/adk/common'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { ParsedToolCall } from '../chat_common/tool_parsers'
+import type { ChatSampler, ResolvedGenerationOptions } from '../chat_common/generation'
 import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
 import type {
   LiteRtLmAdapterOptions,
@@ -77,6 +83,7 @@ import type {
   LiteRtEngineSettings,
   LiteRtConversationConfig,
   LiteRtSessionConfig,
+  LiteRtSamplerParametersOption,
 } from './types'
 
 /** Markers that signal the start of tool-call / reasoning markup — used to stop streaming prose. */
@@ -138,6 +145,7 @@ interface ResolvedHelpers {
   filterThoughts: typeof defaultFilterThoughts
   renderChatCompletionsSystemPrompt: typeof defaultRenderChatCompletionsSystemPrompt
   toolsToLiteRtTools: typeof defaultToolsToLiteRtTools
+  renderToolsAsPromptText: typeof defaultRenderToolsAsPromptText
   renderLiteRtToolResult: typeof defaultRenderLiteRtToolResult
   buildLiteRtConversationInput: typeof defaultBuildLiteRtConversationInput
   createLiteRtStreamAccumulator: typeof defaultCreateLiteRtStreamAccumulator
@@ -186,6 +194,9 @@ const resolveHelpers = (
     toolsToLiteRtTools:
       (src.toolsToLiteRtTools as ResolvedHelpers['toolsToLiteRtTools']) ??
       defaultToolsToLiteRtTools,
+    renderToolsAsPromptText:
+      (src.renderToolsAsPromptText as ResolvedHelpers['renderToolsAsPromptText']) ??
+      defaultRenderToolsAsPromptText,
     renderLiteRtToolResult:
       (src.renderLiteRtToolResult as ResolvedHelpers['renderLiteRtToolResult']) ??
       defaultRenderLiteRtToolResult,
@@ -199,6 +210,16 @@ const resolveHelpers = (
 }
 
 const nowIso = (): string => DateTime.now().toISO() as string
+
+/** Best-effort lifecycle `model` label: the URL string, else a `<blob>`/`<stream>`/`<model>` marker. */
+const litertModelLabel = (model: unknown): string =>
+  typeof model === 'string'
+    ? model
+    : isInstanceOf(model, 'Blob', typeof Blob !== 'undefined' ? Blob : (undefined as never))
+      ? '<blob>'
+      : model && typeof (model as { getReader?: unknown }).getReader === 'function'
+        ? '<stream>'
+        : '<model>'
 
 const computeChecksum = (tool: string, args: Record<string, unknown>): string =>
   sha256(canonicalStringify({ tool, args }))
@@ -269,6 +290,29 @@ export class LiteRtLmAdapter {
     this.#enginePromise = undefined
   }
 
+  /**
+   * Release the loaded engine's native resources (`Engine.delete()`), then drop the cached reference.
+   *
+   * @remarks
+   * `reset()` only nulls the JS reference; the LiteRT engine holds a WebGPU device + compiled graph that
+   * stay alive until GC. Loading many `.litertlm` engines back-to-back in one browser session accumulates
+   * those until the GPU heap is exhausted. `@litert-lm/core`'s `Engine` exposes `delete()` — this settles
+   * any in-flight load, awaits `delete()`, swallows a teardown error (teardown must not throw), and
+   * finishes with `reset()`. Idempotent and safe when nothing is loaded.
+   */
+  async dispose(): Promise<void> {
+    const engine = this.#engine ?? (await this.#enginePromise?.catch(() => undefined))
+    const withDelete = engine as { delete?: () => unknown } | undefined
+    if (typeof withDelete?.delete === 'function') {
+      try {
+        await Promise.resolve(withDelete.delete())
+      } catch {
+        // teardown must not throw
+      }
+    }
+    this.reset()
+  }
+
   /** Build the LiteRT `EngineSettings` from the merged adapter options. */
   #engineSettings(merged: LiteRtLmAdapterOptions): LiteRtEngineSettings {
     const settings: LiteRtEngineSettings = {
@@ -293,37 +337,123 @@ export class LiteRtLmAdapter {
         'LiteRT-LM requires a browser/runtime with WebGPU support',
       ])
     }
+    const modelLabel = litertModelLabel(merged.model)
     this.#enginePromise ??= (async () => {
-      const engineSettings = this.#engineSettings(merged)
-      const createEngine =
-        merged.createEngine ??
-        (async ({ engineSettings: settings }) => {
-          const { Engine } = await import('@litert-lm/core')
-          return (await Engine.create(
-            settings as never,
-            merged.inputPromptAsHint
-          )) as LiteRtLmEngine
-        })
-      const engine = await createEngine({
-        engineSettings,
-        onInitProgress: merged.onInitProgress,
+      // LiteRT 0.13.1 reports no granular download progress (Engine.create takes no callback), so
+      // `loading` is a coarse start marker — the WebGPU/wasm boot happens inside Engine.create.
+      emitLifecycle(merged, 'litert_lm', modelLabel, 'loading', {
+        detail: 'loading model + booting WebGPU runtime',
       })
-      this.#engine = engine
-      return engine
+      try {
+        const engineSettings = this.#engineSettings(merged)
+        const createEngine =
+          merged.createEngine ??
+          (async ({ engineSettings: settings }) => {
+            const { Engine } = await import('@litert-lm/core')
+            return (await Engine.create(
+              settings as never,
+              merged.inputPromptAsHint
+            )) as LiteRtLmEngine
+          })
+        // `Engine.create` is one opaque call covering both the (stream-fed) download and the WebGPU
+        // shader/graph compilation. The compile span is the slow, otherwise-invisible part — mark it as
+        // `compiling` here (the boundary the official LiteRT chat demo's "Compiling Model…" status marks).
+        emitLifecycle(merged, 'litert_lm', modelLabel, 'compiling', {
+          detail: 'compiling model + WebGPU shaders',
+        })
+        const engine = await createEngine({
+          engineSettings,
+          onInitProgress: merged.onInitProgress,
+        })
+        this.#engine = engine
+        emitLifecycle(merged, 'litert_lm', modelLabel, 'ready', { detail: 'engine ready' })
+        return engine
+      } catch (err) {
+        this.#enginePromise = undefined
+        emitLifecycle(merged, 'litert_lm', modelLabel, 'error', { error: err })
+        throw err
+      }
     })()
     return this.#enginePromise
   }
 
-  /** Build the per-dispatch session config from the merged options. */
+  /**
+   * Resolve the PORTABLE generation contract (shared with transformers.js) from the merged options.
+   * Canonical fields win; the LiteRT-native fields ({@link LiteRtLmAdapterOptions.samplerParams},
+   * `maxOutputTokens`, `visionModalityEnabled`/`audioModalityEnabled`) are the fallback layer consulted
+   * only when the canonical one is unset.
+   */
+  #gen(merged: LiteRtLmAdapterOptions): ResolvedGenerationOptions {
+    const sp = merged.samplerParams
+    // Native samplerParams.type (1=TOP_K, 2=TOP_P, 3=GREEDY) → canonical sampler strategy.
+    const nativeSampler: ChatSampler | undefined =
+      sp?.type === 1 ? 'top-k' : sp?.type === 2 ? 'top-p' : sp?.type === 3 ? 'greedy' : undefined
+    return resolveGenerationOptions(
+      {
+        maxTokens: merged.maxTokens,
+        sampler: merged.sampler,
+        temperature: merged.temperature,
+        topK: merged.topK,
+        topP: merged.topP,
+        seed: merged.seed,
+        enableThinking: merged.enableThinking,
+        multimodal: merged.multimodal,
+      },
+      {
+        maxTokens: merged.maxOutputTokens,
+        sampler: nativeSampler,
+        temperature: sp?.temperature,
+        topK: sp?.k,
+        topP: sp?.p,
+        seed: sp?.seed,
+        multimodal: {
+          image: merged.visionModalityEnabled,
+          audio: merged.audioModalityEnabled,
+        },
+      }
+    )
+  }
+
+  /** Map the resolved canonical sampler → LiteRT `samplerParams` (`type` enum + k/p/temperature). */
+  #samplerParams(gen: ResolvedGenerationOptions): LiteRtSamplerParametersOption {
+    // SamplerType: 1=TOP_K, 2=TOP_P, 3=GREEDY. GREEDY is argmax/top-1 → k MUST be 1 (runtime invariant).
+    if (gen.sampler === 'top-k') {
+      return {
+        type: 1,
+        k: gen.topK,
+        p: gen.topP,
+        temperature: gen.temperature,
+        ...(gen.seed !== undefined ? { seed: gen.seed } : {}),
+      }
+    }
+    if (gen.sampler === 'top-p') {
+      return {
+        type: 2,
+        k: gen.topK,
+        p: gen.topP,
+        temperature: gen.temperature,
+        ...(gen.seed !== undefined ? { seed: gen.seed } : {}),
+      }
+    }
+    return {
+      type: 3,
+      k: 1,
+      p: gen.topP,
+      temperature: gen.temperature,
+      ...(gen.seed !== undefined ? { seed: gen.seed } : {}),
+    }
+  }
+
+  /** Build the per-dispatch session config from the resolved portable generation contract. */
   #sessionConfig(merged: LiteRtLmAdapterOptions): LiteRtSessionConfig | undefined {
-    const cfg: LiteRtSessionConfig = {}
-    if (merged.samplerParams !== undefined) cfg.samplerParams = merged.samplerParams as never
-    if (merged.maxOutputTokens !== undefined) cfg.maxOutputTokens = merged.maxOutputTokens
-    if (merged.audioModalityEnabled !== undefined)
-      cfg.audioModalityEnabled = merged.audioModalityEnabled
-    if (merged.visionModalityEnabled !== undefined)
-      cfg.visionModalityEnabled = merged.visionModalityEnabled
-    return Object.keys(cfg).length > 0 ? cfg : undefined
+    const gen = this.#gen(merged)
+    const cfg: LiteRtSessionConfig = {
+      samplerParams: this.#samplerParams(gen) as never,
+      maxOutputTokens: gen.maxTokens,
+    }
+    if (gen.multimodal.audio) cfg.audioModalityEnabled = true
+    if (gen.multimodal.image) cfg.visionModalityEnabled = true
+    return cfg
   }
 
   /**
@@ -347,7 +477,9 @@ export class LiteRtLmAdapter {
       const selfIdentity = merged.selfIdentity ?? 'assistant'
       const unsupportedMediaPolicy = merged.unsupportedMediaPolicy ?? 'throw'
       const toolCallParser = resolveToolCallParser(merged.toolCallParser)
-      const reasoningParser = resolveReasoningParser(merged.reasoningParser)
+      const reasoningParser = resolveReasoningParser(merged.reasoningParser, undefined, {
+        orphanRecovery: merged.reasoningOrphanRecovery,
+      })
 
       // 2. Forge artifact-query tools from prior turn's spooled artifacts; merge into ctx.tools.
       let mergedRegistry: ToolRegistry = ctx.tools
@@ -412,6 +544,9 @@ export class LiteRtLmAdapter {
       }
 
       // 5. Build LiteRT conversation input (preface + per-turn messages).
+      // Resolve the portable generation contract once so thinking + modality flags are consistent with
+      // what #sessionConfig sends to the runtime (canonical-wins over the native flags).
+      const gen = self.#gen(merged)
       const { preface, messages: turnMessages } = await h.buildLiteRtConversationInput({
         systemPrompt: ctx.systemPrompt,
         standingInstructions: ctx.standingInstructions,
@@ -431,7 +566,10 @@ export class LiteRtLmAdapter {
         selfIdentity,
         thoughtSurfacing: merged.thoughtSurfacing ?? 'all-self',
         replayCompatibility: merged.replayCompatibility ?? [],
+        toolDelivery: merged.toolDelivery,
+        enableThinking: gen.enableThinking,
         toolsToLiteRtTools: h.toolsToLiteRtTools,
+        renderToolsAsPromptText: h.renderToolsAsPromptText,
         renderThought: h.renderThought,
         filterThoughts: h.filterThoughts,
         renderUntrustedContent: h.renderUntrustedContent,
@@ -444,6 +582,13 @@ export class LiteRtLmAdapter {
         renderFirstPartyRetrievables: h.renderFirstPartyRetrievables,
         renderThirdPartyPublicRetrievables: h.renderThirdPartyPublicRetrievables,
         renderThirdPartyPrivateRetrievables: h.renderThirdPartyPrivateRetrievables,
+        // Multimodal (opt-in): thread the two modality flags + policy + the media renderer so user
+        // messages with attachments map to LiteRT content items. NO EngineSettings change — only the
+        // existing SessionConfig flags gate it. GATED ON A REAL-MODEL PROOF (browser matrix).
+        visionModalityEnabled: gen.multimodal.image,
+        audioModalityEnabled: gen.multimodal.audio,
+        unsupportedMediaPolicy,
+        renderMediaToLiteRtContent,
         warn: (m) => helpers.log.warn({ kind: 'litert-history-warning', message: m }),
       })
 
@@ -614,16 +759,46 @@ export class LiteRtLmAdapter {
       // LiteRT-LM (v0.13.1) is text-only: tool calls + reasoning arrive as text in `content`, in the
       // model family's format, parsed here via the shared parser layer.
       const toolNames = mergedRegistry.visible().map((t) => t.name)
+      // Run the optional media-output extractor over the raw LiteRT generation result, persisting each
+      // generated media via `ctx.storeMediaBytes` and building first-party `Media`. Returns [] when no hook
+      // is configured (today's text-only output, unchanged).
+      const collectGeneratedMedia = async (raw: unknown): Promise<Media[]> => {
+        if (!merged.extractMediaOutputs || raw === undefined) return []
+        const outputs = await merged.extractMediaOutputs(raw)
+        const media: Media[] = []
+        for (const o of outputs) {
+          const id = uuidv6()
+          const reader = await ctx.storeMediaBytes(id, o.bytes)
+          media.push(
+            Media.toolGenerated({
+              id,
+              kind: o.kind,
+              mimeType: o.mimeType,
+              filename: o.filename ?? `${id}.${o.kind}`,
+              reader,
+            })
+          )
+        }
+        return media
+      }
+
       const finishFromText = async (
-        fullText: string,
+        rawText: string,
         streamId: string,
-        streamedProse: boolean
+        streamedProse: boolean,
+        generatedMedia: Media[] = []
       ): Promise<void> => {
+        // Strip non-semantic envelope/turn-boundary special tokens (Llama/ChatML wrappers) before
+        // parsing — the streamed text can retain them, and they'd make the JSON parsers decline a valid
+        // call. Excludes every token the parsers key on. Idempotent when none are present.
+        const fullText = stripEnvelopeSpecialTokens(rawText)
         const reasoned = reasoningParser(fullText)
         const parsed = toolCallParser(reasoned.cleanedText, { toolNames })
         const cleanText = parsed.cleanedText
 
+        // Drop empty/whitespace traces — a model's no-think artifact carries no information.
         for (const trace of reasoned.reasoning) {
+          if (trace.trim().length === 0) continue
           const id = uuidv6()
           helpers.reportThought(id, trace, { isComplete: true })
           await ctx.storeThought(
@@ -637,14 +812,18 @@ export class LiteRtLmAdapter {
           )
         }
 
-        if (cleanText.length > 0) {
+        // Persist the assistant message when there is clean prose OR generated media. A media-only turn
+        // (empty text + attachment) is legitimate; a turn with neither stores nothing (unchanged).
+        if (cleanText.length > 0 || generatedMedia.length > 0) {
           if (streamedProse) helpers.reportMessage(streamId, '', { isComplete: true })
-          else helpers.reportMessage(streamId, cleanText, { isComplete: true })
+          else if (cleanText.length > 0)
+            helpers.reportMessage(streamId, cleanText, { isComplete: true })
           await ctx.storeMessage(
             new Message({
               id: streamId,
               role: 'assistant',
-              content: cleanText,
+              ...(cleanText.length > 0 ? { content: cleanText } : {}),
+              ...(generatedMedia.length > 0 ? { attachments: generatedMedia } : {}),
               identity: selfIdentity,
               createdAt: nowIso(),
               updatedAt: nowIso(),
@@ -663,6 +842,9 @@ export class LiteRtLmAdapter {
         }
       }
 
+      const lifecycleModel = litertModelLabel(merged.model)
+      emitLifecycle(merged, 'litert_lm', lifecycleModel, 'generating')
+
       // ── Streaming path ──
       if (stream) {
         const accumulator = h.createLiteRtStreamAccumulator()
@@ -676,10 +858,12 @@ export class LiteRtLmAdapter {
             turnMessages as never
           ) as ReadableStream<LiteRtMessage>
         } catch (err) {
+          emitLifecycle(merged, 'litert_lm', lifecycleModel, 'error', { error: err })
           ctx.nack(new E_LITERT_LM_STREAM_ERROR([isError(err) ? err.message : String(err)]))
           return
         }
 
+        let lastChunk: LiteRtMessage | undefined
         try {
           const reader = readable.getReader()
           while (true) {
@@ -690,6 +874,7 @@ export class LiteRtLmAdapter {
             const { value: chunk, done } = await reader.read()
             if (done) break
             if (!chunk) continue
+            lastChunk = chunk
             const { contentDelta } = accumulator.feed(chunk)
             if (contentDelta.length > 0 && !proseStopped) {
               // Once the buffered output shows any tool-call/reasoning marker, stop streaming prose;
@@ -704,11 +889,14 @@ export class LiteRtLmAdapter {
           }
         } catch (err) {
           if (ctx.abortSignal.aborted) return
+          emitLifecycle(merged, 'litert_lm', lifecycleModel, 'error', { error: err })
           ctx.nack(new E_LITERT_LM_STREAM_ERROR([isError(err) ? err.message : String(err)]))
           return
         }
 
-        await finishFromText(accumulator.content(), streamId, streamedProse)
+        const streamMedia = await collectGeneratedMedia(lastChunk)
+        await finishFromText(accumulator.content(), streamId, streamedProse, streamMedia)
+        emitLifecycle(merged, 'litert_lm', lifecycleModel, 'complete')
         return
       }
 
@@ -717,6 +905,7 @@ export class LiteRtLmAdapter {
       try {
         final = (await conversation.sendMessage(turnMessages as never)) as LiteRtMessage
       } catch (err) {
+        emitLifecycle(merged, 'litert_lm', lifecycleModel, 'error', { error: err })
         ctx.nack(new E_LITERT_LM_STREAM_ERROR([isError(err) ? err.message : String(err)]))
         return
       }
@@ -729,7 +918,9 @@ export class LiteRtLmAdapter {
                 .map((i) => i.text)
                 .join('')
             : ''
-      await finishFromText(contentText, uuidv6(), false)
+      const nonStreamMedia = await collectGeneratedMedia(final)
+      await finishFromText(contentText, uuidv6(), false, nonStreamMedia)
+      emitLifecycle(merged, 'litert_lm', lifecycleModel, 'complete')
     }
   }
 }

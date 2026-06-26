@@ -29,6 +29,10 @@ import {
   retrievableToAttrs,
   renderTrustedContent,
   renderUntrustedContent,
+  neutraliseDeveloperRulesTag,
+  sanitizeMimeType,
+  sanitizeFilenameForDescription,
+  floorTrustTier,
 } from '../chat_common/helpers'
 import type { ChatHelpersCommon } from '../chat_common/types'
 import type {
@@ -74,6 +78,11 @@ export {
   defaultRenderTrustedContent,
   renderStandingInstructions,
   defaultRenderStandingInstructions,
+  neutraliseDeveloperRulesTag,
+  stripEnvelopeSpecialTokens,
+  sanitizeMimeType,
+  sanitizeFilenameForDescription,
+  floorTrustTier,
   renderMemories,
   defaultRenderMemories,
   renderRetrievableSafetyDirective,
@@ -124,7 +133,9 @@ export const extractReasoningFields = (
   const out: ReasoningExtract[] = []
   for (const field of precedence) {
     const value = src?.[field]
-    if (typeof value !== 'string' || value.length === 0) continue
+    // Skip empty OR whitespace-only fields — a blank reasoning field carries no information and is just
+    // a provider/model quirk; there's no point surfacing it as a Thought.
+    if (typeof value !== 'string' || value.trim().length === 0) continue
     if (out.some((e) => e.content === value)) continue
     out.push({ field, content: value })
   }
@@ -207,7 +218,7 @@ const renderTextInEnvelope = (
 }
 
 const renderSyntheticMediaDescription = (media: Media, byteLen: number | undefined): string =>
-  `[media: ${media.filename}, ${media.mimeType}, ${formatBytesHumanReadable(byteLen)}]`
+  `[media: ${sanitizeFilenameForDescription(media.filename)}, ${sanitizeMimeType(media.mimeType, media.kind === 'image' || media.kind === 'audio' ? media.kind : undefined)}, ${formatBytesHumanReadable(byteLen)}]`
 
 /**
  * The inline media id-marker: a harness-authored text block rendered immediately BEFORE each
@@ -220,7 +231,8 @@ const renderSyntheticMediaDescription = (media: Media, byteLen: number | undefin
  * fixed, non-instruction phrasing. This is a documented cross-battery convention: every LLM
  * battery that renders media emits the same marker shape.
  */
-const renderMediaIdMarker = (media: Media): string => `[media id: ${media.id} | ${media.filename}]`
+const renderMediaIdMarker = (media: Media): string =>
+  `[media id: ${media.id} | ${sanitizeFilenameForDescription(media.filename)}]`
 
 const renderMediaToContentBlocks = async (input: {
   media: Media
@@ -255,7 +267,9 @@ const renderMediaBodyBlocks = async (input: {
     const fallback = resolveFallbackStash(media, keys)
     if (fallback) {
       const text = renderTextInEnvelope(fallback.text, {
-        trustTier: fallback.entryTier,
+        // Floor the stash entry's tier to the parent media's tier: a stash entry may render LESS
+        // trusted than its asset but never MORE (the committee's #1-ranked escalation).
+        trustTier: floorTrustTier(media.trustTier, fallback.entryTier),
         modality,
         nonce,
         toolName,
@@ -284,10 +298,11 @@ const renderMediaBodyBlocks = async (input: {
 
   if (kind === 'image') {
     const b64 = await media.asBase64()
+    const safeMime = sanitizeMimeType(media.mimeType, 'image')
     return [
       {
         type: 'image_url',
-        image_url: { url: `data:${media.mimeType};base64,${b64}` },
+        image_url: { url: `data:${safeMime};base64,${b64}` },
       },
     ]
   }
@@ -323,12 +338,13 @@ const renderMediaBodyBlocks = async (input: {
 
   if (kind === 'document') {
     const b64 = await media.asBase64()
+    const safeMime = sanitizeMimeType(media.mimeType)
     return [
       {
         type: 'file',
         file: {
           filename: media.filename,
-          file_data: `data:${media.mimeType};base64,${b64}`,
+          file_data: `data:${safeMime};base64,${b64}`,
         },
       },
     ]
@@ -377,7 +393,11 @@ export const renderTimelineMessage = async (input: {
   // structural `messages[].name` reads `identifier`. Fall back to `identifier`
   // when `representation` is empty so a bare-string identity still renders.
   const representation = representationRaw.length > 0 ? representationRaw : identifier
-  const text = message.content !== undefined ? message.content.toString() : ''
+  // Neutralise a body-embedded no-nonce developer-rules tier (envelope-mimicry defense): the legitimate
+  // tier is harness-injected, never carried in a message body, so a mirrored copy here is always inert.
+  const text = neutraliseDeveloperRulesTag(
+    message.content !== undefined ? message.content.toString() : ''
+  )
   const createdAtStr = message.createdAt.toISO?.() ?? ''
   const createdAtAttr = createdAtStr ? ` createdAt="${escapeXmlAttribute(createdAtStr)}"` : ''
   const attachments = message.attachments

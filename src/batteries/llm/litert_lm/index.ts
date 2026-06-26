@@ -57,6 +57,8 @@ export {
   // LiteRT-native mappers
   toolsToLiteRtTools,
   defaultToolsToLiteRtTools,
+  renderToolsAsPromptText,
+  defaultRenderToolsAsPromptText,
   renderMediaToLiteRtContent,
   renderLiteRtToolResult,
   defaultRenderLiteRtToolResult,
@@ -72,6 +74,7 @@ export {
   llama3JsonToolCallParser,
   mistralToolCallParser,
   qwen3CoderToolCallParser,
+  phiToolCallParser,
   noneToolCallParser,
   createAutoToolCallParser,
   resolveToolCallParser,
@@ -81,14 +84,30 @@ export {
   thinkTagReasoningParser,
   harmonyAnalysisReasoningParser,
   gemmaChannelReasoningParser,
+  makeThinkTagReasoningParser,
+  makeHarmonyAnalysisReasoningParser,
+  makeGemmaChannelReasoningParser,
+  buildBundledReasoningParsers,
   noneReasoningParser,
   createAutoReasoningParser,
   resolveReasoningParser,
   BUNDLED_REASONING_PARSERS,
   DEFAULT_REASONING_PARSER_ORDER,
+  // shared lifecycle/boot-progress contract
+  emitLifecycle,
+  defaultEmitLifecycle,
+  // shared portable generation contract
+  resolveGenerationOptions,
+  defaultResolveGenerationOptions,
+  GENERATION_DEFAULTS,
 } from './helpers'
 
 export type { LiteRtStreamAccumulator } from './helpers'
+
+export type { ChatGenerationOptions, ChatSampler, ResolvedGenerationOptions } from './helpers'
+
+// Media-output seam types (shared, defined in chat_common/types).
+export type { GeneratedMediaOutput, MediaOutputExtractorFn } from '../chat_common'
 
 export type {
   ParsedToolCall,
@@ -99,6 +118,12 @@ export type {
   ReasoningParseResult,
   ReasoningParserFn,
   ReasoningParserName,
+  ReasoningParserOptions,
+  BatteryLifecyclePhase,
+  BatteryLifecycleBattery,
+  BatteryLifecycleReport,
+  BatteryLifecycleCallback,
+  BatteryLifecycleHooks,
 } from './helpers'
 
 export type {

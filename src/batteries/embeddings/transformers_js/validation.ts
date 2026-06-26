@@ -34,8 +34,18 @@ export const transformersJsEmbeddingsOptionsSchema = validator
       .valid('none', 'mean', 'cls', 'first_token', 'eos', 'last_token')
       .default('mean'),
     normalize: validator.boolean().default(true),
+    poolingOwner: validator.string().valid('engine', 'battery').default('engine'),
+    modelSource: validator.function().optional(),
     onInitProgress: validator.function().optional(),
     isAvailable: validator.function().optional(),
+    // ── Lifecycle hooks (opt-in, normalized phase machine; additive over onInitProgress) ──
+    onLifecycle: validator.function().optional(),
+    onLoading: validator.function().optional(),
+    onCompiling: validator.function().optional(),
+    onReady: validator.function().optional(),
+    onGenerating: validator.function().optional(),
+    onComplete: validator.function().optional(),
+    onError: validator.function().optional(),
   })
   .unknown(false)
 

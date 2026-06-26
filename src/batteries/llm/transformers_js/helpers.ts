@@ -13,9 +13,15 @@
  */
 
 import { Media } from '@nhtio/adk'
+import { isError } from '@nhtio/adk/guards'
 import { ArtifactTool, Tool } from '@nhtio/adk'
 import { Tokenizable, SpooledArtifact } from '@nhtio/adk'
 import { E_UNSUPPORTED_MEDIA_MODALITY } from './exceptions'
+import {
+  neutraliseDeveloperRulesTag,
+  sanitizeMimeType,
+  sanitizeFilenameForDescription,
+} from '../chat_common/helpers'
 import {
   descriptionToChatCompletionsJsonSchema,
   renderUntrustedContent as commonRenderUntrustedContent,
@@ -76,6 +82,10 @@ export {
 // Re-export the shared parser layer so consumers import everything from this battery's barrel.
 export * from '../chat_common/tool_parsers'
 export * from '../chat_common/reasoning_parsers'
+// Re-export the shared lifecycle/boot-progress contract (emitLifecycle + types).
+export * from '../chat_common/lifecycle'
+// Re-export the shared portable generation contract (ChatGenerationOptions + resolveGenerationOptions).
+export * from '../chat_common/generation'
 
 // ── transformers.js-native mappers ────────────────────────────────────────────────────────────────
 
@@ -134,7 +144,7 @@ const resolveMediaFallbackText = async (
   if (policy === 'throw') {
     throw new E_UNSUPPORTED_MEDIA_MODALITY([media.kind, media.mimeType, media.filename])
   }
-  const syntheticDescription = `[media: ${media.filename}, kind=${media.kind}, mime=${media.mimeType}]`
+  const syntheticDescription = `[media: ${sanitizeFilenameForDescription(media.filename)}, kind=${media.kind}, mime=${sanitizeMimeType(media.mimeType, media.kind === 'image' || media.kind === 'audio' ? media.kind : undefined)}]`
   if (
     policy === 'fallback-stash' ||
     (typeof policy === 'object' && policy.mode === 'fallback-stash')
@@ -247,8 +257,23 @@ export const buildTransformersJsMessages = async (input: {
   renderFirstPartyRetrievables: typeof renderFirstPartyRetrievables
   renderThirdPartyPublicRetrievables: typeof renderThirdPartyPublicRetrievables
   renderThirdPartyPrivateRetrievables: typeof renderThirdPartyPrivateRetrievables
+  /**
+   * Multimodal config. Absent/false → text-only (every message renders a plain string `content`, the
+   * byte-for-byte original behavior). When set, a message carrying `attachments` of an enabled kind
+   * renders a content-array (text + `{type:'image'|'audio'}` placeholders) and the decoded media is
+   * collected into `images`/`audio` (consumed positionally by `processor(prompt, images, audio)`).
+   */
+  multimodal?: { image: boolean; audio: boolean }
+  /** Decodes a Media instance to a transformers.js input (RawImage / audio samples). Adapter-injected. */
+  decodeMedia?: (media: Media) => Promise<{ kind: 'image' | 'audio'; data: unknown }>
+  unsupportedMediaPolicy?: UnsupportedMediaPolicy
   warn?: (msg: string) => void
-}): Promise<{ messages: TransformersJsMessage[]; tools: TransformersJsTool[] }> => {
+}): Promise<{
+  messages: TransformersJsMessage[]
+  tools: TransformersJsTool[]
+  images: unknown[]
+  audio: unknown[]
+}> => {
   const systemText = await input.renderChatCompletionsSystemPrompt({
     systemPrompt: input.systemPrompt,
     standingInstructions: input.standingInstructions,
@@ -266,6 +291,9 @@ export const buildTransformersJsMessages = async (input: {
   } as never)
 
   const messages: TransformersJsMessage[] = []
+  const images: unknown[] = []
+  const audio: unknown[] = []
+  const mm = input.multimodal
   if (typeof systemText === 'string' && systemText.length > 0) {
     messages.push({ role: 'system', content: systemText } as TransformersJsMessage)
   }
@@ -293,10 +321,55 @@ export const buildTransformersJsMessages = async (input: {
     if (item.kind === 'message') {
       const m = item.value
       const role = m.role === 'user' ? 'user' : 'assistant'
-      messages.push({
-        role,
-        content: m.content !== undefined ? m.content.toString() : '',
-      } as TransformersJsMessage)
+      // Neutralise a body-embedded no-nonce developer-rules tier (envelope-mimicry defense).
+      const text = neutraliseDeveloperRulesTag(m.content !== undefined ? m.content.toString() : '')
+      const attachments = m.attachments ?? []
+      // Multimodal branch: only when enabled, the message has attachments, and we can decode them.
+      if (mm && attachments.length > 0 && input.decodeMedia) {
+        const parts: Array<{ type: string; text?: string }> = []
+        if (text.length > 0) parts.push({ type: 'text', text })
+        for (const media of attachments) {
+          const enabled =
+            (media.kind === 'image' && mm.image) || (media.kind === 'audio' && mm.audio)
+          let decoded: { kind: 'image' | 'audio'; data: unknown } | undefined
+          if (enabled) {
+            // A malformed payload (zero-byte, truncated, polyglot, resolution bomb) must not throw out
+            // of the turn — a decode failure becomes a policy decision, not a turn-killer. On throw we
+            // fall through to the SAME unsupported-media policy path as a disabled modality.
+            try {
+              decoded = await input.decodeMedia(media)
+            } catch (err) {
+              input.warn?.(
+                `decodeMedia failed for ${media.filename} (${media.kind}/${media.mimeType}): ${
+                  isError(err) ? err.message : String(err)
+                } — degrading via unsupportedMediaPolicy.`
+              )
+            }
+          }
+          if (decoded) {
+            if (decoded.kind === 'image') {
+              images.push(decoded.data)
+              parts.push({ type: 'image' })
+            } else {
+              audio.push(decoded.data)
+              parts.push({ type: 'audio' })
+            }
+          } else {
+            // Disabled modality / video / document / decode-failure → degrade to text via the shared
+            // policy ('throw' still raises here — an undecodable attachment under 'throw' is fatal by
+            // design; 'synthetic-description'/'fallback-stash' degrade gracefully).
+            const fallback = await resolveMediaFallbackText(
+              media,
+              input.unsupportedMediaPolicy ?? 'throw',
+              input.warn
+            )
+            parts.push({ type: 'text', text: fallback })
+          }
+        }
+        messages.push({ role, content: parts } as unknown as TransformersJsMessage)
+      } else {
+        messages.push({ role, content: text } as TransformersJsMessage)
+      }
     } else if (item.kind === 'thought') {
       const t = item.value
       const envelope = input.renderThought(t.content.toString(), {
@@ -313,11 +386,142 @@ export const buildTransformersJsMessages = async (input: {
   }
 
   const tools = input.toolsToTransformersJsTools(input.tools.visible())
-  return { messages, tools }
+  return { messages, tools, images, audio }
 }
 
 /** Default {@link buildTransformersJsMessages}. */
 export const defaultBuildTransformersJsMessages = buildTransformersJsMessages
+
+/**
+ * Decode an ADK {@link @nhtio/adk!Media} into a transformers.js multimodal input.
+ *
+ * @remarks
+ * Image → `RawImage.fromBlob(...)`; audio → `Float32Array` PCM at the model's sample rate (16 kHz
+ * default) via `read_audio` over a `data:` URL. Imports `@huggingface/transformers` lazily, so it's
+ * only loaded on the multimodal path. (Verified against a real Gemma-4 run — see plan 0a.)
+ */
+export const mediaToTransformersInput = async (
+  media: Media,
+  opts?: { audioSampleRate?: number }
+): Promise<{ kind: 'image' | 'audio'; data: unknown }> => {
+  const bytes = await media.asBytes()
+  if (media.kind === 'image') {
+    // Sanitise the mime before it becomes a Blob type (a `;base64,`/`\r\n`-laden mime is an injection
+    // vector if reflected; an invalid type degrades to the generic safe subtype).
+    const tf = await import('@huggingface/transformers')
+    const blob = new Blob([bytes as Uint8Array<ArrayBuffer>], {
+      type: sanitizeMimeType(media.mimeType, 'image'),
+    })
+    const image = await tf.RawImage.fromBlob(blob)
+    return { kind: 'image', data: image }
+  }
+  // audio — produce a mono Float32Array at the target rate. transformers.js's `read_audio` decodes via
+  // the Web Audio API (`AudioContext`), which exists in browsers but NOT in Node (it throws
+  // "AudioContext is not available in your environment" — verified). So for PCM WAV — the canonical
+  // 16 kHz speech container these processors expect — we decode the RIFF ourselves: dependency-free,
+  // env-neutral (Node + browser), no codec peer, AND no `@huggingface/transformers` import (a heavy ONNX/
+  // wasm peer that hangs the vitest browser project on import). The PCM-WAV fast path returns BEFORE any
+  // peer load. `read_audio` is the fallback only for compressed containers (mp3/flac/ogg) where a real
+  // decoder is genuinely needed (browser only, by that path's nature).
+  const targetRate = opts?.audioSampleRate ?? 16000
+  const pcm = decodePcmWav(bytes as Uint8Array, targetRate)
+  if (pcm) return { kind: 'audio', data: pcm }
+  const tf = await import('@huggingface/transformers')
+  const b64 = await media.asBase64()
+  const samples = await tf.read_audio(
+    `data:${sanitizeMimeType(media.mimeType, 'audio')};base64,${b64}`,
+    targetRate
+  )
+  return { kind: 'audio', data: samples }
+}
+
+/**
+ * Decode a PCM/IEEE-float RIFF/WAVE buffer to a mono {@link Float32Array} at `targetRate`, with **no**
+ * `AudioContext` and no codec peer — so it runs in Node and the browser alike. Returns `undefined` for
+ * anything that isn't a parseable uncompressed WAV (compressed containers fall back to `read_audio`).
+ *
+ * @remarks
+ * Walks RIFF chunks to find `fmt ` + `data` (so a `LIST`/`fact`/`cue ` chunk before `data` is skipped),
+ * supports 8/16/24/32-bit integer PCM (format 1) and 32/64-bit IEEE float (format 3 / 0xFFFE extensible),
+ * downmixes to mono by averaging channels, then resamples to `targetRate` with linear interpolation. The
+ * sample-rate match is the common path (the fixture + most speech models are 16 kHz mono) so resampling
+ * is usually a no-op.
+ */
+const decodePcmWav = (bytes: Uint8Array, targetRate: number): Float32Array | undefined => {
+  if (bytes.length < 44) return undefined
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const tag = (off: number): string =>
+    String.fromCharCode(bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3])
+  if (tag(0) !== 'RIFF' || tag(8) !== 'WAVE') return undefined
+  let format = 0
+  let channels = 0
+  let sampleRate = 0
+  let bits = 0
+  let dataOff = -1
+  let dataLen = 0
+  let p = 12
+  while (p + 8 <= bytes.length) {
+    const id = tag(p)
+    const size = dv.getUint32(p + 4, true)
+    const body = p + 8
+    if (id === 'fmt ' && body + 16 <= bytes.length) {
+      format = dv.getUint16(body, true)
+      channels = dv.getUint16(body + 2, true)
+      sampleRate = dv.getUint32(body + 4, true)
+      bits = dv.getUint16(body + 14, true)
+      // WAVE_FORMAT_EXTENSIBLE (0xFFFE): the real format is the first 2 bytes of the subformat GUID.
+      if (format === 0xfffe && size >= 24 && body + 26 <= bytes.length) {
+        format = dv.getUint16(body + 24, true)
+      }
+    } else if (id === 'data') {
+      dataOff = body
+      dataLen = Math.min(size, bytes.length - body)
+      break
+    }
+    p = body + size + (size & 1) // chunks are word-aligned
+  }
+  if (dataOff < 0 || channels < 1 || sampleRate < 1) return undefined
+  const isFloat = format === 3
+  const isInt = format === 1
+  if (!isFloat && !isInt) return undefined
+  const bytesPerSample = bits >> 3
+  if (bytesPerSample < 1) return undefined
+  const frames = Math.floor(dataLen / (bytesPerSample * channels))
+  if (frames < 1) return undefined
+  const readSample = (off: number): number => {
+    if (isFloat) return bits === 64 ? dv.getFloat64(off, true) : dv.getFloat32(off, true)
+    if (bits === 8) return (dv.getUint8(off) - 128) / 128 // 8-bit PCM is unsigned
+    if (bits === 16) return dv.getInt16(off, true) / 32768
+    if (bits === 24) {
+      const v = dv.getUint8(off) | (dv.getUint8(off + 1) << 8) | (dv.getUint8(off + 2) << 16)
+      return (v & 0x800000 ? v - 0x1000000 : v) / 8388608
+    }
+    if (bits === 32) return dv.getInt32(off, true) / 2147483648
+    return 0
+  }
+  const mono = new Float32Array(frames)
+  for (let f = 0; f < frames; f++) {
+    let sum = 0
+    const base = dataOff + f * bytesPerSample * channels
+    for (let c = 0; c < channels; c++) sum += readSample(base + c * bytesPerSample)
+    mono[f] = sum / channels
+  }
+  if (sampleRate === targetRate) return mono
+  // Linear-interpolation resample to the model's expected rate.
+  const outLen = Math.max(1, Math.round((frames * targetRate) / sampleRate))
+  const out = new Float32Array(outLen)
+  const ratio = (frames - 1) / Math.max(1, outLen - 1)
+  for (let i = 0; i < outLen; i++) {
+    const x = i * ratio
+    const i0 = Math.floor(x)
+    const i1 = Math.min(frames - 1, i0 + 1)
+    out[i] = mono[i0] + (mono[i1] - mono[i0]) * (x - i0)
+  }
+  return out
+}
+
+/** Default {@link mediaToTransformersInput}. */
+export const defaultMediaToTransformersInput = mediaToTransformersInput
 
 /**
  * A streaming accumulator over transformers.js `TextStreamer` decoded-text deltas.
