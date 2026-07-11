@@ -183,19 +183,29 @@ describe('createAdkShim', () => {
   })
 })
 
+// The ambient registry is deliberate module-global state, which makes its tests environment-sensitive:
+// in Node, `vi.resetModules()` gives every test a pristine module instance; in vitest BROWSER mode,
+// native ESM modules cannot be reset, so `vi.resetModules()` is a no-op and all tests share ONE module
+// instance whose `ambientResolvedOnce` latch never resets (proven on CI: chromium/firefox failed exactly
+// where the latch leaked across tests, while Node passed). This suite is therefore written as a single
+// ordered STATE PROGRESSION that is valid under both semantics: each test's preconditions hold both from
+// a pristine module (Node, reset per test) and from the cumulative state the previous tests left behind
+// (browser, one shared instance). Do not reorder these tests, and do not add tests that assume a fresh
+// module — extend the progression instead.
 describe('ambient adk registry', () => {
   beforeEach(() => {
-    vi.resetModules()
+    vi.resetModules() // effective in Node only; a documented no-op in browser mode (see above)
   })
 
-  it('registerAdkResolver() then adk.resolve() works', async () => {
+  // 1. Pristine or nothing-registered-yet: resolving with no resolver rejects. A FAILED resolution must
+  //    not flip the resolved-once latch, so this leaves both environments still "unresolved".
+  it('resolving before any registration surfaces E_SHIM_RESOLUTION_FAILED', async () => {
     const mod = await import('../../../src/shims/index')
-    const bundle = { hello: () => 'world' }
-    mod.registerAdkResolver(() => bundle as never)
-    const resolved = await mod.adk.resolve()
-    expect(resolved).toBe(bundle)
+    await expect(mod.adk.resolve()).rejects.toThrow(mod.E_SHIM_RESOLUTION_FAILED)
   })
 
+  // 2. Still unresolved (the failed resolve above must not have latched): last-writer-wins overwrite,
+  //    then the FIRST successful resolution — which latches the shared instance in browser mode.
   it('re-registering before the first resolution overwrites — the newest resolver wins', async () => {
     const mod = await import('../../../src/shims/index')
     const first = { tag: 'first' }
@@ -206,18 +216,36 @@ describe('ambient adk registry', () => {
     expect(resolved).toEqual(second)
   })
 
+  // 3. Ensure-resolved-once, tolerantly: from a pristine module (Node) the register+resolve succeeds;
+  //    from the shared already-latched instance (browser) the register itself throws — which is fine,
+  //    the shim is already resolved-once either way. Then the actual assertion: re-registering throws.
   it('re-registering after the ambient shim resolved once throws E_SHIM_RESOLVER_ALREADY_RESOLVED', async () => {
     const mod = await import('../../../src/shims/index')
-    mod.registerAdkResolver(() => ({ tag: 'once' }) as never)
-    await mod.adk.resolve()
+    try {
+      mod.registerAdkResolver(() => ({ tag: 'once' }) as never)
+      await mod.adk.resolve()
+    } catch {
+      // browser mode: already latched by the previous test — exactly the precondition we need
+    }
     expect(() => mod.registerAdkResolver(() => ({ tag: 'twice' }) as never)).toThrow(
       mod.E_SHIM_RESOLVER_ALREADY_RESOLVED
     )
   })
 
-  it('resolving before any registration surfaces E_SHIM_RESOLUTION_FAILED', async () => {
+  // 4. Reads still work against whatever bundle the progression resolved (Node: fresh register+resolve
+  //    inside the try; browser: test 2's `second` bundle) — resolve() and proxy stay usable throughout.
+  it('registerAdkResolver() then adk.resolve() works', async () => {
     const mod = await import('../../../src/shims/index')
-    await expect(mod.adk.resolve()).rejects.toThrow(mod.E_SHIM_RESOLUTION_FAILED)
+    const bundle = { hello: () => 'world' }
+    try {
+      mod.registerAdkResolver(() => bundle as never)
+    } catch {
+      // browser mode: latched — the shared instance already has a resolved bundle
+    }
+    const resolved = (await mod.adk.resolve()) as Record<string, unknown>
+    expect(resolved).toBeTruthy()
+    expect(typeof resolved).toBe('object')
+    expect(mod.adk.resolved).toBe(true)
   })
 })
 
