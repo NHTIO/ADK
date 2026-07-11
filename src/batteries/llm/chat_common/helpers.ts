@@ -72,9 +72,26 @@ export const neutraliseDeveloperRulesTag = (text: string): string =>
  * before parsing. CRUCIALLY this list EXCLUDES every token the parsers key on — `<|channel…`,
  * `<|message|>`, `<|call|>`, `<|constrain|>`, `<|end|>`, `<|think|>`, `<|tool_call>`, `<tool_call>` — so
  * stripping is safe.
+ *
+ * Gemma uses an asymmetric pipe placement for its STRUCTURAL wrappers — `<|turn>…<turn|>` (turn
+ * boundary) and `<|tool>…<tool|>` (the tools-block fence in the system turn). These leak into decoded
+ * prose (e.g. a trailing `<turn|>` on the answer). They are non-semantic to the tool-call/reasoning
+ * parsers — which key on `<|tool_call>` / `<tool_call|>` / `<|think|>`, NOT the bare `<|turn>` / `<|tool>`
+ * fences — so they are safe to strip here.
+ *
+ * `<|tool_response>` is the Gemma channel marker we render tool results behind in the PROMPT (input
+ * direction). It must never appear in GENERATED output — but a small model (gemma-4-E2B) primed by that
+ * input framing sometimes parrots a bare `<|tool_response>` as its entire "answer". No parser consumes
+ * `<|tool_response>` from model output, so stripping it from generated text is safe and turns that
+ * misfire into empty prose (the loop then re-prompts) instead of a literal `<|tool_response>` message.
+ *
+ * Gemma SENTINEL tokens — `<eos>` / `<bos>` / `<pad>` and the turn sentinels `<start_of_turn>` /
+ * `<end_of_turn>` — are decoder special tokens that, under streaming decode (`skip_special_tokens:
+ * false`), can leak into the visible text. Observed in a stress test: a long turn produced a bare
+ * `<eos>` as the ENTIRE assistant message. They are never semantic to the parsers, so strip them too.
  */
 const ENVELOPE_SPECIAL_TOKEN_RE =
-  /<\|(?:python_tag|eom_id|eot_id|im_start|im_end|begin_of_text|end_of_text|start_header_id|end_header_id)\|?>|<\/?s>/g
+  /<\|(?:python_tag|eom_id|eot_id|im_start|im_end|begin_of_text|end_of_text|start_header_id|end_header_id)\|?>|<\|turn>|<turn\|>|<\|tool>|<tool\|>|<\|tool_response>|<eos>|<bos>|<pad>|<end_of_turn>|<start_of_turn>|<\/?s>/g
 
 /**
  * Strip the non-semantic envelope/turn-boundary special tokens (see {@link ENVELOPE_SPECIAL_TOKEN_RE})
@@ -337,6 +354,88 @@ export const renderTrustedContent = (content: string, attrs: TrustedContentAttrs
 /** Default trusted-content renderer; alias of {@link renderTrustedContent}. */
 export const defaultRenderTrustedContent = renderTrustedContent
 
+// ─── SpooledArtifact handle pattern (shared across ALL batteries) ──────────────
+
+/**
+ * Structural (cross-realm-safe) check that a tool result is a {@link @nhtio/adk!SpooledArtifact}: it
+ * exposes the reader surface the handle pattern needs (`asString` + `byteLength`/`lineCount`) and a
+ * constructor carrying the `toolMethods` descriptor list the model is told to call. Used instead of a
+ * bare `instanceof` so a SpooledArtifact from another realm (worker, bundle copy) still matches.
+ */
+export const looksLikeSpooledArtifact = (value: unknown): boolean => {
+  if (value === null || typeof value !== 'object') return false
+  const v = value as {
+    asString?: unknown
+    byteLength?: unknown
+    lineCount?: unknown
+  }
+  return (
+    typeof v.asString === 'function' &&
+    typeof v.byteLength === 'function' &&
+    typeof v.lineCount === 'function'
+  )
+}
+
+/**
+ * Render the "handle" body for a spooled-artifact tool result that the producer marked
+ * `inline: false`: a directions-bearing text block telling the model the result was NOT inlined (to
+ * preserve context budget) and exactly which forged `artifact_*` tools to call — with this
+ * `callId` — to read it incrementally.
+ *
+ * @remarks
+ * This is THE machinery that makes the spool/thrift pattern usable by the model: a large tool result
+ * (a tool catalog, a search-hit set, a scraped doc) stays out of the prompt, and the model pulls only
+ * the slices it needs via `artifact_json_get`/`artifact_grep`/etc. Without it the adapter would either
+ * dump the whole body (defeating the purpose) or hand the model an opaque artifact it cannot read.
+ * Shared verbatim across the OpenAI, Ollama, transformers.js, and LiteRT-LM batteries so the model
+ * sees the SAME contract regardless of backend. The `toolMethods` list is read off the artifact's
+ * constructor (each SpooledArtifact subclass advertises its own query tools).
+ */
+export const renderArtifactHandleBody = (input: {
+  callId: string
+  artifact: unknown
+  byteLength: number
+  lineCount: number
+  estimatedTokens?: number
+  encoding?: string
+}): string => {
+  const { callId, artifact, byteLength, lineCount, estimatedTokens, encoding } = input
+  const ctor = (
+    artifact as {
+      constructor?: {
+        name?: string
+        toolMethods?: ReadonlyArray<{ name: string; description?: string }>
+      }
+    }
+  ).constructor
+  const methods = ctor?.toolMethods ?? []
+  const lines: string[] = []
+  lines.push(`This tool returned a large artifact that was not inlined to preserve context budget.`)
+  lines.push(``)
+  lines.push(`Artifact metadata:`)
+  lines.push(`- callId: ${callId}`)
+  lines.push(`- kind: ${ctor?.name ?? 'SpooledArtifact'}`)
+  lines.push(`- byteLength: ${byteLength}`)
+  lines.push(`- lineCount: ${lineCount}`)
+  if (estimatedTokens !== undefined && encoding) {
+    lines.push(`- estimatedTokens: ${estimatedTokens} (encoding: ${encoding})`)
+  }
+  lines.push(``)
+  lines.push(`To read this artifact in this turn, call one of the following tools with`)
+  lines.push(`callId=${callId}:`)
+  for (const m of methods) {
+    lines.push(m.description ? `- ${m.name} — ${m.description}` : `- ${m.name}`)
+  }
+  lines.push(``)
+  lines.push(
+    `The artifact persists in this turn's context — multiple queries against the same callId are allowed and efficient. Do not assume the body has been inlined anywhere else.`
+  )
+  return lines.join('\n')
+}
+
+/** Default {@link renderArtifactHandleBody}. */
+export const defaultRenderArtifactHandleBody = renderArtifactHandleBody
+
 // ─── renderStandingInstructions ───────────────────────────────────────────────
 
 /** Implements {@link ChatHelpersCommon.renderStandingInstructions}. */
@@ -379,7 +478,7 @@ export const renderMemories = (items: Iterable<{ memory: Memory; attrs: MemoryAt
     const kindAttr = attrs.kind ? ` kind="${escapeXmlAttribute(attrs.kind)}"` : ''
     const scoreAttr = attrs.score !== undefined ? ` score="${attrs.score}"` : ''
     children.push(
-      `<memory_${attrs.nonce} nonce="${nonceAttr}"${sourceAttr}${createdAtAttr}${kindAttr}${scoreAttr}>\n${body}\n</memory_${attrs.nonce}>`
+      `<memory_${attrs.nonce}${sourceAttr} nonce="${nonceAttr}"${createdAtAttr}${kindAttr}${scoreAttr}>\n${body}\n</memory_${attrs.nonce}>`
     )
   }
   if (children.length === 0) {
@@ -417,8 +516,11 @@ export const renderFirstPartyRetrievables = async (
       : ''
     const kindAttr = attrs.kind ? ` kind="${escapeXmlAttribute(attrs.kind)}"` : ''
     const scoreAttr = attrs.score !== undefined ? ` score="${attrs.score}"` : ''
+    // `source` is rendered BEFORE `nonce` on purpose: the first path-shaped token a small model reads after the
+    // tag name should be the REAL citation (the page path), not the nonce — otherwise it copies the nonce as
+    // the cite and the doc-path validator rejects it. The nonce stays IN the tag name for forge-resistance.
     children.push(
-      `<retrieved_${attrs.nonce} nonce="${nonceAttr}"${sourceAttr}${createdAtAttr}${kindAttr}${scoreAttr}>\n${body}\n</retrieved_${attrs.nonce}>`
+      `<retrieved_${attrs.nonce}${sourceAttr} nonce="${nonceAttr}"${createdAtAttr}${kindAttr}${scoreAttr}>\n${body}\n</retrieved_${attrs.nonce}>`
     )
   }
   if (children.length === 0) {
@@ -651,6 +753,12 @@ export const renderChatCompletionsSystemPrompt = async (input: {
   standingInstructions: Iterable<Tokenizable>
   memories: Iterable<Memory>
   retrievables: Iterable<Retrievable>
+  /**
+   * Live dispatch context for resolving a DYNAMIC {@link Tokenizable} systemPrompt via `.render(ctx)`.
+   * Optional; a static systemPrompt ignores it. (standingInstructions/memories render through their own
+   * sub-helpers and remain static-string reads — the flagship's only dynamic content is a thought.)
+   */
+  renderCtx?: unknown
   bucketOrder: ChatCompletionsBucketOrder
   renderStandingInstructions: ChatHelpersCommon['renderStandingInstructions']
   renderMemories: ChatHelpersCommon['renderMemories']
@@ -662,7 +770,7 @@ export const renderChatCompletionsSystemPrompt = async (input: {
   renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
 }): Promise<string> => {
   const parts: string[] = []
-  const base = input.systemPrompt.toString()
+  const base = input.systemPrompt.render(input.renderCtx as never)
   if (base.length > 0) {
     parts.push(base)
   }

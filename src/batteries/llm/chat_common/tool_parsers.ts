@@ -75,6 +75,8 @@ export type ToolCallParserName =
   | 'gemma'
   | 'gpt_oss'
   | 'pythonic'
+  | 'bare_pythonic'
+  | 'loose_keyed'
   | 'llama3_json'
   | 'mistral'
   | 'qwen3_coder'
@@ -196,42 +198,387 @@ export const defaultHermesToolCallParser = hermesToolCallParser
 // empirically via the real-model matrix (do NOT trust the template's literal tokens for the runtime
 // form). So we accept BOTH: the wrapped template form AND the stripped bare form, with unquoted scalars.
 
-const GEMMA_WRAP_RE = /<\|tool_call>\s*call:\s*([A-Za-z_]\w*)\s*(\{[^{}]*\})\s*<tool_call\|>/g
-const GEMMA_BARE_RE = /call:\s*([A-Za-z_]\w*)\s*(\{[^{}]*\})/g
+// Anchors locate the call HEAD (`[<|tool_call>] call:NAME`) up to — but not including — the opening
+// `{`; the argument block is then BRACE-SCANNED (string-aware, see scanGemmaArgs) rather than matched
+// by a flat `\{[^{}]*\}` regex, so a NESTED block survives. A real E4B `provide_answer` emits
+// `{answer:<|“|>…<|”|>,sources:[{path:<|“|>…<|”|>,title:…}]}` — nested arrays/objects AND curly smart
+// quotes — which the old single-level regex silently dropped (the whole call then leaked as prose).
+const GEMMA_WRAP_HEAD = /<\|tool_call>\s*call:\s*([A-Za-z_]\w*)\s*(?=\{)/g
+const GEMMA_BARE_HEAD = /call:\s*([A-Za-z_]\w*)\s*(?=\{)/g
+// Prefix-LESS bare head: `NAME{` with NO `call:` — a real runtime shape (Gemma E2B/E4B drops the
+// `call:` lead entirely, e.g. `say_i_dont_know{reason: "…"}`). Collision-prone (any `word{` in prose
+// matches), so this pass is GATED on ctx.toolNames — only an actual offered tool name is accepted.
+const GEMMA_NOPREFIX_HEAD = /([A-Za-z_]\w*)\s*(?=\{)/g
+const GEMMA_WRAP_TAIL = '<tool_call|>'
 
-/** Normalise a Gemma arg block (`{k:<|"|>v<|"|>}` or stripped `{k:v}`) into JSON. */
+// Any double-quote glyph that delimits a Gemma string value: ASCII `"` or the curly pair `“ ”`. The
+// runtime emits curly quotes (both as the `<|“|>` delimiter token and bare inside values); a straight
+// apostrophe `’` is NOT here — it is a literal inside a value, not a delimiter.
+const GEMMA_DQUOTE = /["“”]/
+
+/**
+ * Scan a Gemma argument block `{ … }` for the index of its matching `}`, treating string regions as
+ * opaque so structural `{ } [ ]` inside a value never unbalance the scan. String state toggles on any
+ * {@link GEMMA_DQUOTE} glyph and on a `<|"|>`/`<|“|>`/`<|”|>` delimiter TOKEN (consumed whole). `from`
+ * indexes the opening `{`. Returns the matching close index, or -1 if unterminated.
+ */
+const scanGemmaArgs = (text: string, from: number): number => {
+  let depth = 0
+  let inStr = false
+  for (let i = from; i < text.length; i++) {
+    // A quote delimiter — `<|"|>` (5 chars), curly `“`/`”`, or ASCII `"`. Collapse a RUN of consecutive
+    // delimiters (e.g. the triple-quote `"""` opener, or a doubled `<|"|><|"|>`) into a SINGLE toggle, so
+    // string state stays balanced and the matching `}` is found. Without the run-collapse, `"""` toggles
+    // three times → stays "in string" → the scan never balances and the whole call is dropped.
+    const delimW = gemmaQuoteDelimiterWidth(text, i)
+    if (delimW > 0) {
+      let j = i + delimW
+      for (
+        let w = gemmaQuoteDelimiterWidth(text, j);
+        w > 0;
+        w = gemmaQuoteDelimiterWidth(text, j)
+      ) {
+        j += w
+      }
+      inStr = !inStr
+      i = j - 1
+      continue
+    }
+    const ch = text[i]
+    if (inStr) continue
+    if (ch === '{' || ch === '[') depth++
+    else if (ch === '}' || ch === ']') {
+      depth--
+      if (depth === 0) return i
+    }
+  }
+  return -1
+}
+
+/**
+ * Whether the delimiter token at `block[i]` is a Gemma string-quote delimiter, and how wide it is. A
+ * delimiter is either the 5-char `<|"|>` / `<|“|>` / `<|”|>` special-token placeholder the decoder leaks,
+ * a bare curly smart quote `“`/`”`, or a plain ASCII `"`. Returns the delimiter width (5, or 1) or 0 if
+ * `block[i]` is not a quote delimiter.
+ */
+const gemmaQuoteDelimiterWidth = (block: string, i: number): number => {
+  if (
+    block[i] === '<' &&
+    block[i + 1] === '|' &&
+    GEMMA_DQUOTE.test(block[i + 2] ?? '') &&
+    block[i + 3] === '|' &&
+    block[i + 4] === '>'
+  ) {
+    return 5
+  }
+  const ch = block[i]
+  if (ch === '"' || ch === '“' || ch === '”') return 1
+  return 0
+}
+
+/**
+ * Canonicalise the string delimiters in a Gemma arg block to ASCII `"`, tracking string state so a
+ * `:` `,` `{` `}` `[` `]` (or a smart quote) appearing INSIDE a value is never treated as structure.
+ * Handles the `<|"|>`/`<|“|>`/`<|”|>` delimiter TOKENS and bare curly `“ ”` glyphs (both open and
+ * close a string). The straight apostrophe `’` is a literal, not a delimiter. Inside a string, a raw
+ * ASCII `"` is escaped to `\"` so the resulting JSON stays valid.
+ *
+ * A RUN of consecutive quote delimiters (any mix of `"`, curly, `<|"|>`) collapses to a SINGLE toggle —
+ * so Gemma's Python-style triple-quote opener `answer:"""…` (and the doubled `<|"|><|"|>` the decoder
+ * sometimes emits) becomes one `"` instead of `"""` (which JSON.parse reads as an empty string `""`
+ * followed by garbage). Verified against a real E2B `provide_answer{answer:"""# …}` capture that failed
+ * to parse and surfaced as `E_LLM_EXECUTION_EXECUTOR_ERROR`.
+ */
+const canonicaliseGemmaStrings = (block: string): string => {
+  let out = ''
+  let inStr = false
+  for (let i = 0; i < block.length; i++) {
+    const delimW = gemmaQuoteDelimiterWidth(block, i)
+    if (delimW > 0) {
+      // Collapse a run of consecutive quote delimiters (e.g. `"""`, `<|"|><|"|>`) into a single toggle.
+      let j = i + delimW
+      while (true) {
+        const w = gemmaQuoteDelimiterWidth(block, j)
+        if (w === 0) break
+        j += w
+      }
+      out += '"'
+      inStr = !inStr
+      i = j - 1
+      continue
+    }
+    const ch = block[i]
+    // Inside a string, escape raw JSON control characters. A real multi-paragraph `answer` value carries
+    // literal newlines/tabs, which JSON.parse rejects ("Bad control character in string literal") unless
+    // escaped. A lone backslash is also escaped so it cannot accidentally escape the closing quote.
+    if (inStr) {
+      if (ch === '\n') {
+        out += '\\n'
+        continue
+      }
+      if (ch === '\r') {
+        out += '\\r'
+        continue
+      }
+      if (ch === '\t') {
+        out += '\\t'
+        continue
+      }
+      if (ch === '\\') {
+        out += '\\\\'
+        continue
+      }
+    }
+    out += ch
+  }
+  return out
+}
+
+/** A bare scalar token is "already JSON" — a quoted string, a nested `[`/`{` opener, a COMPLETE JSON
+ * number, or a literal — and must NOT be re-quoted. Matching a FULL number (not merely a leading digit)
+ * is load-bearing: a digit-led non-number like a UUID `1f173d33-…`, a version, or a hash must still be
+ * quoted, else the call yields invalid JSON and leaks as prose. */
+const isJsonReadyScalar = (v: string): boolean =>
+  /^["[{]/.test(v) ||
+  /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(v) ||
+  /^(?:true|false|null)$/.test(v)
+
+/**
+ * Quote bare keys (`key:` → `"key":`), bare scalar values (`:Paris` → `:"Paris"`), and bare array
+ * ELEMENTS (`[search_docs_semantic]` → `["search_docs_semantic"]`) that the decoder-stripped form leaves
+ * unquoted — but ONLY in structural position (outside quoted strings). Operates on a block whose string
+ * delimiters are already canonical ASCII `"` (see {@link canonicaliseGemmaStrings}), walking it
+ * quote-aware so a `:` `,` or word inside a value is left untouched. Tokens already JSON (quoted,
+ * number/sign, true/false/null, or a nested `[`/`{`) pass through.
+ */
+const quoteBareGemmaTokens = (block: string): string => {
+  let out = ''
+  let inStr = false
+  for (let i = 0; i < block.length; i++) {
+    const ch = block[i]
+    if (ch === '"') {
+      inStr = !inStr
+      out += ch
+      continue
+    }
+    if (inStr) {
+      out += ch
+      continue
+    }
+    // Structural region. Quote a bare key (identifier directly after a `{`/`,`/`[` opener, ws allowed),
+    // emitting only the quoted name + ws — the following `:` is left for the next iteration so the value
+    // branch below can run on it. `(?=\s*:)` confirms it is a key, not a bare-word value.
+    const keyM = /^([A-Za-z_]\w*)(\s*)(?=:)/.exec(block.slice(i))
+    if (keyM && /[{,[]\s*$/.test(out)) {
+      out += `"${keyM[1]}"${keyM[2]}`
+      i += keyM[0].length - 1
+      continue
+    }
+    // Quote a bare scalar value right after a structural ':' — up to the next ',' '}' ']'.
+    if (ch === ':') {
+      const rest = block.slice(i + 1)
+      const valM = /^\s*([^,}\]]+?)\s*(?=[,}\]])/.exec(rest)
+      if (valM && !isJsonReadyScalar(valM[1])) {
+        out += `:"${valM[1]}"`
+        i += 1 + valM[0].length - 1
+        continue
+      }
+    }
+    // Quote a bare ARRAY ELEMENT / list member sitting right after a structural `[` or `,` opener
+    // (e.g. `tools_to_use:[search_docs_semantic]` or `[a,b]`). The key branch needs a following `:` and
+    // the value branch needs a leading `:`, so both miss enum-array elements — the decoder-stripped
+    // `make_plan` `tools_to_use:[search_docs_semantic]` stayed unquoted → invalid JSON → the whole
+    // planner call failed to parse and leaked as prose. Only fires when `out` ends with a `[`/`,` opener
+    // and the element is not already JSON (a nested `{`/`[`, quoted string, number, or literal).
+    if (/[[,]\s*$/.test(out)) {
+      const elM = /^([^,{}[\]"\s][^,}\]]*?)\s*(?=[,}\]])/.exec(block.slice(i))
+      if (elM && !isJsonReadyScalar(elM[1])) {
+        out += `"${elM[1]}"`
+        i += elM[0].length - 1
+        continue
+      }
+    }
+    out += ch
+  }
+  return out
+}
+
+/**
+ * Append any `}`/`]` closers the model dropped, so an under-closed JSON object still parses. Walks the
+ * already-canonical (ASCII-quoted) text quote-aware, tracks the structural `{`/`[` stack, and emits the
+ * matching closers in reverse order. Real Gemma E4B `provide_answer` output omits the OUTER `}` (the
+ * `<tool_call|>` wrapper terminator stands in for it: `…}]<tool_call|>` with two `}` opened but one
+ * closed) — without this, the unbalanced object is dropped and the whole cited answer leaks as prose.
+ *
+ * Also closes an UNTERMINATED string: a long `provide_answer` answer that the model truncates mid-value
+ * (the output-token cap cuts it, or the stream ends: `{answer:"""# Overview…<cut>`) leaves the string
+ * open. Verified live (Gemma-4 E2B): a broad "give me an overview" request whose answer overran the cap
+ * produced exactly this shape, which failed JSON.parse → the call was dropped → the turn errored. When the
+ * walk ends INSIDE a string, close it (`"`) BEFORE emitting the structural closers, so the (truncated)
+ * answer still commits instead of taking the whole turn down.
+ */
+const closeUnbalancedJson = (jsonish: string): string => {
+  const stack: string[] = []
+  let inStr = false
+  for (let i = 0; i < jsonish.length; i++) {
+    const ch = jsonish[i]
+    if (ch === '"' && jsonish[i - 1] !== '\\') {
+      inStr = !inStr
+      continue
+    }
+    if (inStr) continue
+    if (ch === '{') stack.push('}')
+    else if (ch === '[') stack.push(']')
+    else if (ch === '}' || ch === ']') stack.pop()
+  }
+  let out = jsonish
+  // A dangling open string (truncated mid-value) must be closed first, else the appended `}`/`]` land
+  // inside the string and JSON.parse still fails.
+  if (inStr) out += '"'
+  for (let i = stack.length - 1; i >= 0; i--) out += stack[i]
+  return out
+}
+
+/**
+ * Normalise a Gemma KEY-VALUE SEPARATOR `=` to `:` in structural position. Real Gemma E2B/E4B output
+ * sometimes assigns a top-level arg with `=` instead of `:` — observed live: `provide_answer{answer="…",
+ * sources:[…]}` (the `answer` key used `=`, while `sources`/`path` used `:`). The rest of the block is
+ * valid JSON-ish, but the `=` means the key branch in {@link quoteBareGemmaTokens} (which keys on a
+ * following `:`) never quotes that key, so the whole object fails to parse and the cited answer leaks as
+ * prose. Rewrite only an `identifier=` sitting in KEY position — directly after a `{`/`,`/`[` opener (ws
+ * allowed) — to `identifier:`, walking the block quote-aware so an `=` inside a string value (or a
+ * Python-ish `k=v` already handled elsewhere) is left untouched. Runs AFTER string canonicalisation (so
+ * `inStr` tracking is reliable) and BEFORE bare-token quoting (so the now-`:` key gets quoted normally).
+ */
+const normaliseGemmaKeySeparators = (block: string): string => {
+  let out = ''
+  let inStr = false
+  for (let i = 0; i < block.length; i++) {
+    const ch = block[i]
+    if (ch === '"') {
+      inStr = !inStr
+      out += ch
+      continue
+    }
+    if (inStr) {
+      out += ch
+      continue
+    }
+    // A bare `identifier` directly after a structural opener, followed by `=`, is a key assigned with the
+    // wrong separator. Emit the name + ws + `:` and skip the `=`. `(?=\s*=)`-style intent via an explicit
+    // `=` capture; the `out` tail must end with a `{`/`,`/`[` opener (ws allowed) to be a key position.
+    const keyEqM = /^([A-Za-z_]\w*)(\s*)=/.exec(block.slice(i))
+    if (keyEqM && /[{,[]\s*$/.test(out)) {
+      out += `${keyEqM[1]}${keyEqM[2]}:`
+      i += keyEqM[0].length - 1
+      continue
+    }
+    out += ch
+  }
+  return out
+}
+
+/**
+ * Normalise a Gemma arg block (`{k:<|"|>v<|"|>}`, stripped `{k:v}`, or a nested
+ * `{a:<|“|>…<|”|>,b:[{…}]}`) into JSON. Done in quote-aware passes — canonicalise the string delimiters
+ * to ASCII `"`, normalise a wrong `=` key separator to `:`, quote the bare keys/scalars that remain,
+ * then close any dropped `}`/`]` — so a `:` `,` or word inside a value (e.g. a `“Class: TurnRunner”`
+ * title) is never mistaken for structure and a model that omits the outer closer still parses.
+ */
 const gemmaArgsToJson = (argsBlock: string): unknown => {
-  const jsonish = argsBlock
-    // <|"|> string delimiters → " (template form).
-    .replace(/<\|"\|>/g, '"')
-    // Quote bare keys: `{key:` / `,key:` → `"key":`.
-    .replace(/([{,]\s*)([A-Za-z_]\w*)\s*:/g, '$1"$2":')
-    // Quote bare scalar VALUES (the stripped form leaves them unquoted, e.g. city:Paris). Skip values
-    // that are already a JSON literal: a quoted string, a number/sign, or true/false/null.
-    .replace(/:\s*(?!["\d-]|true\b|false\b|null\b)([^,}\]]+?)\s*([,}\]])/g, ':"$1"$2')
-  return tryJsonParse(jsonish)
+  const canonical = canonicaliseGemmaStrings(argsBlock)
+  const colonised = normaliseGemmaKeySeparators(canonical)
+  const quoted = quoteBareGemmaTokens(colonised)
+  const balanced = closeUnbalancedJson(quoted)
+  return tryJsonParse(balanced)
+}
+
+/** Collect Gemma calls whose heads match `headRe`; brace-scan each arg block. */
+const collectGemmaCalls = (
+  rawText: string,
+  headRe: RegExp,
+  wrapped: boolean,
+  allowed?: Set<string>
+): { calls: ParsedToolCall[]; spans: Array<[number, number]> } => {
+  const calls: ParsedToolCall[] = []
+  const spans: Array<[number, number]> = []
+  for (const m of rawText.matchAll(headRe)) {
+    // When gated (the prefix-less pass), only an actual offered tool name may open a call — otherwise
+    // any `word{` in prose would false-match.
+    if (allowed && !allowed.has(m[1])) continue
+    const headStart = m.index ?? 0
+    const braceStart = headStart + m[0].length // lookahead leaves m[0] ending right before `{`
+    // Find the arg-block boundary. Normally the matching `}`. But the wrapped form's REAL output drops
+    // the outer `}` and lets `<tool_call|>` terminate the call (`…}]<tool_call|>`), so the brace scan
+    // never balances — when wrapped, fall back to the wrapper tail as the boundary and let
+    // gemmaArgsToJson's `closeUnbalancedJson` repair the missing closer.
+    let braceEnd = scanGemmaArgs(rawText, braceStart)
+    let spanEnd: number
+    let blockEnd: number
+    if (braceEnd !== -1) {
+      blockEnd = braceEnd + 1
+      spanEnd = braceEnd + 1
+      // Consume a `<tool_call|>` terminator sitting immediately after the close brace — for the WRAPPED
+      // form (`<|tool_call>call:…}<tool_call|>`) AND the bare form, since the decoder strips the leading
+      // `<|tool_call>` head but the runtime still emits the trailing `<tool_call|>` (`call:NAME{…}<tool_call|>`).
+      // Anchored `^\s*` right after the brace, so it can only eat a real adjacent terminator, never prose.
+      const tail = new RegExp(
+        `^\\s*${GEMMA_WRAP_TAIL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`
+      ).exec(rawText.slice(braceEnd + 1))
+      if (tail) spanEnd = braceEnd + 1 + tail[0].length
+    } else if (wrapped) {
+      const tailIdx = rawText.indexOf(GEMMA_WRAP_TAIL, braceStart)
+      if (tailIdx !== -1) {
+        blockEnd = tailIdx // up to (not including) the `<tool_call|>` terminator
+        spanEnd = tailIdx + GEMMA_WRAP_TAIL.length
+      } else {
+        // TRUNCATION fallback: wrapped head but no matching `}` AND no `<tool_call|>` tail — the call was
+        // cut off mid-value (e.g. a long `provide_answer` answer that overran the output-token cap). Take
+        // the rest of the string as the block and let gemmaArgsToJson (closeUnbalancedJson) repair the
+        // dangling string + missing closers, so the truncated answer still commits instead of the whole
+        // call being dropped (which surfaced as a turn-killing error).
+        blockEnd = rawText.length
+        spanEnd = rawText.length
+      }
+    } else {
+      // Bare/prefix-less head with no matching `}` — same truncation fallback: consume to end and repair.
+      blockEnd = rawText.length
+      spanEnd = rawText.length
+    }
+    const parsed = gemmaArgsToJson(rawText.slice(braceStart, blockEnd))
+    if (!isObject(parsed)) continue
+    calls.push({ name: m[1], arguments: asArgsObject(parsed) })
+    spans.push([headStart, spanEnd])
+  }
+  return { calls, spans }
 }
 
 /**
  * Parse Gemma E2B/E4B tool calls. Accepts the wrapped template form
  * (`<|tool_call>call:NAME{k:<|"|>v<|"|>}<tool_call|>`) AND the decoder-stripped runtime form
- * (`call:NAME{k:v}`, special tokens removed, scalars unquoted — the shape a real ONNX run emits).
- * Targets the E2B/E4B form only — Gemma 3 (`tool_code` fences) and FunctionGemma
+ * (`call:NAME{k:v}`, special tokens removed, scalars unquoted — the shape a real ONNX run emits),
+ * including NESTED argument blocks with curly smart quotes (the form a real E4B `provide_answer`
+ * emits: `{answer:<|“|>…<|”|>,sources:[{path:…}]}`), AND the PREFIX-LESS bare form `NAME{…}` with no
+ * `call:` lead (e.g. `say_i_dont_know{reason: "…"}` — a real E2B/E4B runtime shape), gated on
+ * `ctx.toolNames`. Targets the E2B/E4B form only — Gemma 3 (`tool_code` fences) and FunctionGemma
  * (`<start_function_call>`) are out of scope (use a custom {@link ToolCallParserFn}).
  */
-export const gemmaToolCallParser: ToolCallParserFn = (rawText) => {
-  const calls: ParsedToolCall[] = []
-  const spans: Array<[number, number]> = []
-  // Prefer the wrapped form (anchored, collision-free); fall back to the bare form only if none matched.
-  for (const m of rawText.matchAll(GEMMA_WRAP_RE)) {
-    calls.push({ name: m[1], arguments: asArgsObject(gemmaArgsToJson(m[2])) })
-    spans.push([m.index ?? 0, (m.index ?? 0) + m[0].length])
-  }
+export const gemmaToolCallParser: ToolCallParserFn = (rawText, ctx) => {
+  // Prefer the wrapped form (anchored, collision-free); fall back to the bare `call:NAME{` form, then to
+  // the prefix-less `NAME{` form — each only if the previous matched nothing (the earlier anchors also
+  // appear inside the later shapes, so never run more than one). The prefix-less pass is GATED on
+  // ctx.toolNames since `word{` alone is too weak a signal to claim without an allowlist.
+  let { calls, spans } = collectGemmaCalls(rawText, GEMMA_WRAP_HEAD, true)
   if (calls.length === 0) {
-    for (const m of rawText.matchAll(GEMMA_BARE_RE)) {
-      calls.push({ name: m[1], arguments: asArgsObject(gemmaArgsToJson(m[2])) })
-      spans.push([m.index ?? 0, (m.index ?? 0) + m[0].length])
-    }
+    ;({ calls, spans } = collectGemmaCalls(rawText, GEMMA_BARE_HEAD, false))
+  }
+  if (calls.length === 0 && ctx && ctx.toolNames.length > 0) {
+    ;({ calls, spans } = collectGemmaCalls(
+      rawText,
+      GEMMA_NOPREFIX_HEAD,
+      false,
+      new Set(ctx.toolNames)
+    ))
   }
   return calls.length > 0 ? { calls, cleanedText: removeSpans(rawText, spans) } : NO_MATCH(rawText)
 }
@@ -291,10 +638,33 @@ export const defaultGptOssToolCallParser = gptOssToolCallParser
 const PYTHONIC_SHAPE_RE = /^\[\s*[A-Za-z_]\w*\s*\(.*\)\s*\]$/s
 const PYTHONIC_CALL_RE = /([A-Za-z_]\w*)\s*\(([^)]*)\)/g
 
-/** Read a single pythonic literal: quoted string, number, True/False/None. */
+// Curly/smart quote pairs small models emit instead of ASCII quotes (e.g. Gemma: “…”, ‘…’).
+// Matching them lets us read string literals the model clearly intended as strings.
+const SMART_QUOTE_PAIRS: ReadonlyArray<[string, string]> = [
+  ['“', '”'],
+  ['‘', '’'],
+  ['「', '」'],
+]
+
+/**
+ * Read a single pythonic literal: quoted string (ASCII or smart quotes), number, True/False/None,
+ * or a bracketed list of literals (`[a, b]`). Lists recurse so `sources=[“/a”, “/b”]` parses to a
+ * real array. Unrecognised tokens fall through to the raw trimmed string.
+ */
 const readPythonLiteral = (raw: string): JsonValue => {
   const t = raw.trim()
+  // ASCII-quoted string.
   if (/^(['"]).*\1$/s.test(t)) return t.slice(1, -1)
+  // Smart/curly-quoted string (small-model output) — strip the matching pair.
+  for (const [open, close] of SMART_QUOTE_PAIRS) {
+    if (t.length >= 2 && t.startsWith(open) && t.endsWith(close)) return t.slice(1, -1)
+  }
+  // List literal: `[x, y, …]` → array of recursively-read literals.
+  if (t.startsWith('[') && t.endsWith(']')) {
+    const inner = t.slice(1, -1).trim()
+    if (inner.length === 0) return []
+    return splitPythonArgs(inner).map((el) => readPythonLiteral(el))
+  }
   if (t === 'True' || t === 'true') return true
   if (t === 'False' || t === 'false') return false
   if (t === 'None' || t === 'null') return null
@@ -363,6 +733,121 @@ export const pythonicToolCallParser: ToolCallParserFn = (rawText) => {
 
 /** Default {@link pythonicToolCallParser}. */
 export const defaultPythonicToolCallParser = pythonicToolCallParser
+
+// ─── Bare pythonic: NAME(k=v, …) without the [ ] list wrapper (weak signal — gated on toolNames) ──────
+
+// A bare call: optional leading "/" or "call:" noise, then NAME( … ). Captures name + the paren body.
+// Non-global; we scan with a stateful regex below so we can require the callee ∈ toolNames.
+const BARE_PYTHONIC_CALL_RE = /(?:^|[\s>/])(?:call:)?\s*([A-Za-z_]\w*)\s*\(([^)]*)\)/g
+
+/**
+ * Parse a BARE pythonic call — `provide_answer(answer=“…”, sources=[“/x”])` — i.e. the pythonic
+ * `NAME(kwargs)` form WITHOUT the surrounding `[ … ]` list wrapper that {@link pythonicToolCallParser}
+ * requires. Small models (observed: Gemma-4 E2B via transformers.js) emit this for a single call,
+ * sometimes with a leading `/`, a `call:` prefix, or smart quotes in the args.
+ *
+ * Because the bare shape is a WEAK signal (it can resemble incidental prose like "see foo(bar)"),
+ * this parser is gated HARD: it only claims a call whose callee is a real offered tool
+ * (`ctx.toolNames`). That gate is what makes dropping the `[ ]` requirement safe. Runs after the
+ * strict bracketed pythonic parser in the `'auto'` order.
+ */
+export const barePythonicToolCallParser: ToolCallParserFn = (rawText, ctx) => {
+  const allowed = new Set(ctx.toolNames)
+  if (allowed.size === 0) return NO_MATCH(rawText)
+  const calls: ParsedToolCall[] = []
+  const spans: Array<[number, number]> = []
+  for (const m of rawText.matchAll(BARE_PYTHONIC_CALL_RE)) {
+    const name = m[1]
+    if (!allowed.has(name)) continue // gate: only real tools — keeps prose from false-positiving
+    const args: Record<string, JsonValue> = {}
+    for (const pair of splitPythonArgs(m[2])) {
+      const eq = pair.indexOf('=')
+      if (eq < 0) continue
+      args[pair.slice(0, eq).trim()] = readPythonLiteral(pair.slice(eq + 1))
+    }
+    calls.push({ name, arguments: args })
+    // Span covers just the NAME(...) substring (m[0] may include a leading delimiter char).
+    const start = (m.index ?? 0) + m[0].indexOf(name)
+    spans.push([start, (m.index ?? 0) + m[0].length])
+  }
+  if (calls.length === 0) return NO_MATCH(rawText)
+  return { calls, cleanedText: removeSpans(rawText, spans) }
+}
+
+/** Default {@link barePythonicToolCallParser}. */
+export const defaultBarePythonicToolCallParser = barePythonicToolCallParser
+
+// ─── Loose keyed: bare `tool_name` line + `key: value` lines (degenerate small-model form) ────────────
+
+/** Coerce a loose scalar value string into a JSON value (number/bool/null, else the trimmed string). */
+const readLooseScalar = (raw: string): JsonValue => {
+  const s = raw.trim().replace(/,\s*$/, '')
+  if (s === 'true') return true
+  if (s === 'false') return false
+  if (s === 'null') return null
+  if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s)
+  // Strip one layer of surrounding quotes if present.
+  const m = /^"([\s\S]*)"$|^'([\s\S]*)'$/.exec(s)
+  return m ? (m[1] ?? m[2] ?? '') : s
+}
+
+/**
+ * Parse the DEGENERATE keyed form a small instruct model emits when it ignores every structured
+ * tool-call grammar: the bare tool NAME on its own line, then one or more `argname: value` lines.
+ *
+ * @remarks
+ * Observed verbatim from **Gemma-4 E2B on LiteRT-web** (raw-captured): asked to call an answer tool it
+ * emits, with no `call:`/braces/brackets/JSON at all —
+ * ```
+ * say_i_dont_know
+ * reason: The documentation does not contain a definition for that.
+ * ```
+ * No marker-anchored or pythonic/JSON parser claims this, so the "call" leaks into the visible answer as
+ * prose AND the turn looks like a refusal (the tool the model meant to invoke never fires). A 2B can't
+ * be reliably *instructed* into a format (changing the prompt's documented format did not change the
+ * output), so the robust path is to parse the shape it actually produces.
+ *
+ * WEAK SIGNAL, gated HARD (like {@link barePythonicToolCallParser}): it only claims when the FIRST
+ * non-empty line is EXACTLY a real offered tool name (`ctx.toolNames`) and is followed by at least one
+ * `key: value` line. That gate is what keeps it from misreading ordinary prose ("Note: …", a heading
+ * with a colon). Single call only (the degenerate form has no list syntax); runs LAST in `'auto'`.
+ */
+export const looseKeyedToolCallParser: ToolCallParserFn = (rawText, ctx) => {
+  const allowed = new Set(ctx.toolNames)
+  if (allowed.size === 0) return NO_MATCH(rawText)
+  const lines = rawText.split('\n')
+  // Find the first non-empty line; it must be EXACTLY a known tool name (after trimming).
+  let i = 0
+  while (i < lines.length && lines[i].trim() === '') i++
+  if (i >= lines.length) return NO_MATCH(rawText)
+  const name = lines[i].trim()
+  if (!allowed.has(name)) return NO_MATCH(rawText)
+  // Collect the trailing `key: value` lines.
+  const args: Record<string, JsonValue> = {}
+  let j = i + 1
+  let lastConsumed = i
+  for (; j < lines.length; j++) {
+    const line = lines[j]
+    if (line.trim() === '') {
+      lastConsumed = j
+      continue
+    }
+    const kv = /^\s*([A-Za-z_]\w*)\s*:\s*([\s\S]*)$/.exec(line)
+    if (!kv) break // a non-keyed line ends the call body
+    args[kv[1]] = readLooseScalar(kv[2])
+    lastConsumed = j
+  }
+  if (Object.keys(args).length === 0) return NO_MATCH(rawText) // bare name alone is too weak to claim
+  // Consume from the name line through the last keyed line.
+  let start = 0
+  for (let k = 0; k < i; k++) start += lines[k].length + 1
+  let end = start
+  for (let k = i; k <= lastConsumed; k++) end += lines[k].length + (k < lines.length - 1 ? 1 : 0)
+  return { calls: [{ name, arguments: args }], cleanedText: removeSpans(rawText, [[start, end]]) }
+}
+
+/** Default {@link looseKeyedToolCallParser}. */
+export const defaultLooseKeyedToolCallParser = looseKeyedToolCallParser
 
 // ─── Llama3-JSON: bare {"name":…, "parameters":…} (weakest signal — runs late) ────────────────────────
 
@@ -569,6 +1054,8 @@ export const BUNDLED_TOOL_CALL_PARSERS: Readonly<
   gemma: gemmaToolCallParser,
   gpt_oss: gptOssToolCallParser,
   pythonic: pythonicToolCallParser,
+  bare_pythonic: barePythonicToolCallParser,
+  loose_keyed: looseKeyedToolCallParser,
   llama3_json: llama3JsonToolCallParser,
   mistral: mistralToolCallParser,
   qwen3_coder: qwen3CoderToolCallParser,
@@ -581,9 +1068,22 @@ export const BUNDLED_TOOL_CALL_PARSERS: Readonly<
  */
 export const DEFAULT_TOOL_CALL_PARSER_ORDER: ReadonlyArray<
   Exclude<ToolCallParserName, 'auto' | 'none'>
-> = ['hermes', 'gemma', 'gpt_oss', 'phi', 'pythonic', 'llama3_json', 'mistral', 'qwen3_coder']
+> = [
+  'hermes',
+  'gemma',
+  'gpt_oss',
+  'phi',
+  'pythonic',
+  'bare_pythonic',
+  'llama3_json',
+  'mistral',
+  'qwen3_coder',
+  'loose_keyed',
+]
 // (phi is marker-anchored on the `functools` token → placed with the other marker families, ahead of
-// the weak-signal pythonic/llama3_json forms; the rest keep their original precedence.)
+// the weak-signal pythonic/llama3_json forms; the rest keep their original precedence. `loose_keyed`
+// is the WEAKEST signal — a bare `name`+`key: value` form — so it runs DEAD LAST, only claiming text
+// whose first line is exactly an offered tool name.)
 
 /**
  * Compose an `'auto'` parser: run each family parser in `order` until one returns a non-empty

@@ -488,6 +488,18 @@ export class OpfsSpoolStore implements SpoolStore {
   constructor(opts: OpfsSpoolStoreOptions = {}) {
     this.#resolveRoot = opts.directory ?? (() => navigator.storage.getDirectory())
     this.#prefix = opts.keyPrefix ?? ''
+    // Fail fast on a path separator in the prefix. keyPrefix is a FILENAME prefix (it becomes
+    // `keyPrefix + callId` as ONE OPFS file name), and OPFS file names may not contain '/' or '\' —
+    // getFileHandle would otherwise throw "Name is not allowed" on EVERY spooled write at runtime,
+    // a silent footgun (e.g. `keyPrefix: 'agent-spool/'` expecting a subdirectory). Reject it here
+    // with an actionable message instead. Use a flat prefix like 'agent-spool-' for namespacing.
+    if (this.#prefix.includes('/') || this.#prefix.includes('\\')) {
+      throw new RangeError(
+        `OpfsSpoolStore keyPrefix is a filename prefix, not a subdirectory, and must not contain '/' or '\\': received ${JSON.stringify(
+          this.#prefix
+        )}. Use a flat prefix such as '${this.#prefix.replace(/[/\\]+/g, '-')}'.`
+      )
+    }
     this.#defaultThreshold = opts.streamThresholdBytes ?? DEFAULT_STREAM_THRESHOLD_BYTES
   }
 

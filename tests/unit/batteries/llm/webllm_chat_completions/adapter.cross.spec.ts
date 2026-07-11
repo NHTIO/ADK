@@ -1,4 +1,5 @@
 import { DateTime } from 'luxon'
+import { validator } from '@nhtio/validation'
 import { describe, expect, it, vi } from 'vitest'
 import {
   Tokenizable,
@@ -7,12 +8,16 @@ import {
   ToolCall,
   Memory,
   Retrievable,
+  Tool,
   ToolRegistry,
   Registry,
 } from '@nhtio/adk/common'
 import {
   WebLLMChatCompletionsAdapter,
   E_INVALID_WEBLLM_CHAT_COMPLETIONS_OPTIONS,
+  E_WEBLLM_CHAT_COMPLETIONS_CONTEXT_OVERFLOW,
+  toolsToChatCompletionsTools,
+  descriptionToChatCompletionsJsonSchema,
 } from '@nhtio/adk/batteries/llm/webllm_chat_completions'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
@@ -455,5 +460,96 @@ describe('WebLLMChatCompletionsAdapter — lifecycle hooks', () => {
     const withProgress = loading.find((r) => typeof r.progress === 'number')
     expect(withProgress?.progress).toBeCloseTo(0.5, 5)
     expect(withProgress?.detail).toContain('Fetching param cache')
+  })
+})
+
+// ─── context window ─────────────────────────────────────────────────────────────────────────────────
+
+describe('WebLLMChatCompletionsAdapter — context window', () => {
+  // REGRESSION (same class as the LiteRT crash): the overflow tally MUST include the tool DECLARATIONS.
+  // WebLLM sends `body.tools` and MLC applies the model's template in-process; the reproducible dominant
+  // component is the serialized tool JSON, so the guard tallies that as an honest FLOOR. REAL tools →
+  // the battery's REAL toolsToChatCompletionsTools → a REAL Tokenizable count (no fakes): the engine is
+  // never reached (guard fires pre-dispatch).
+  const richTool = (name: string) =>
+    new Tool({
+      name,
+      description:
+        `A tool named ${name} with a deliberately verbose, multi-field input schema so its ` +
+        `serialized JSON declaration weighs many tokens.`,
+      inputSchema: validator.object({
+        query: validator.string().min(1).max(4096).description('the search query text').required(),
+        limit: validator.number().integer().min(1).max(100).description('max results to return'),
+        filters: validator
+          .object({
+            path: validator.string().description('restrict to a documentation path prefix'),
+            since: validator.string().description('ISO date lower bound'),
+            tags: validator.array().items(validator.string()).description('tag allow-list'),
+          })
+          .description('optional structured filters'),
+        verbose: validator.boolean().description('include full bodies in the result'),
+      }),
+      handler: () => 'ok',
+    })
+
+  it('counts the serialized tool declarations (a tool-heavy prompt that fits WITHOUT tools overflows WITH them)', async () => {
+    const engine = makeEngine({ content: 'unused' })
+    const tools = new ToolRegistry([
+      richTool('search_docs_semantic'),
+      richTool('search_docs_keyword'),
+      richTool('provide_answer'),
+      richTool('get_current_time'),
+      richTool('calculate'),
+    ])
+    const enc = 'gemma' as const
+    const sysAndMsg =
+      Tokenizable.estimateTokens('You are a helpful assistant.', enc) +
+      Tokenizable.estimateTokens('hi', enc)
+    const toolBlock = Tokenizable.estimateTokens(
+      JSON.stringify(
+        toolsToChatCompletionsTools(tools.visible(), { descriptionToChatCompletionsJsonSchema })
+      ),
+      enc
+    )
+    expect(toolBlock).toBeGreaterThan(sysAndMsg)
+    const contextWindow = sysAndMsg + Math.floor(toolBlock / 2)
+    const adapter = new WebLLMChatCompletionsAdapter({
+      model: 'm',
+      stream: false,
+      engine,
+      tokenEncoding: enc,
+      contextWindow,
+    })
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })], tools })
+    await expect(adapter.executor()(ctx, makeHelpers())).rejects.toThrow(
+      E_WEBLLM_CHAT_COMPLETIONS_CONTEXT_OVERFLOW
+    )
+    expect(engine.requests).toHaveLength(0) // engine never reached
+  })
+
+  it('does NOT overflow the same tool-heavy prompt when the window covers the tools', async () => {
+    const engine = makeEngine({ content: 'ok' })
+    const tools = new ToolRegistry([richTool('search_docs_semantic'), richTool('provide_answer')])
+    const enc = 'gemma' as const
+    const everything =
+      Tokenizable.estimateTokens('You are a helpful assistant.', enc) +
+      Tokenizable.estimateTokens('hi', enc) +
+      Tokenizable.estimateTokens(
+        JSON.stringify(
+          toolsToChatCompletionsTools(tools.visible(), { descriptionToChatCompletionsJsonSchema })
+        ),
+        enc
+      )
+    const adapter = new WebLLMChatCompletionsAdapter({
+      model: 'm',
+      stream: false,
+      engine,
+      autoAck: true,
+      tokenEncoding: enc,
+      contextWindow: everything + 256,
+    })
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })], tools })
+    await adapter.executor()(ctx, makeHelpers())
+    expect(engine.requests).toHaveLength(1) // engine WAS reached — no false overflow
   })
 })

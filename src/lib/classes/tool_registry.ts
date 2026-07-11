@@ -237,19 +237,24 @@ export class ToolRegistry {
    * any forged tools in place so the consumer can inspect what was registered when debugging the
    * failure. Subscriptions are short-lived and die with the context regardless.
    *
-   * Forgetting this call after merging in `Subclass.forgeTools(ctx)` output means ephemeral tools
-   * accumulate across executor invocations, and subsequent `forgeTools(ctx)` calls in later
-   * iterations will see a stale `callId` enum that excludes new tool calls. The plan-documented
-   * pattern is:
+   * ARTIFACT READERS ARE FORGED BY THE CORE. As of the core-forge change, the `DispatchRunner` forges
+   * artifact-reader tools from prior-turn `SpooledArtifact` results into `ctx.tools` (and calls
+   * `ctx.tools.bindContext(ctx)`) once per iteration, BEFORE the input pipeline — so a battery executor no
+   * longer forges or binds; it reads the already-forged `ctx.tools` for both representation (rendering the
+   * tool declarations) and resolution (looking up an incoming call by name). The lifecycle is unchanged:
+   * ephemeral readers are still pruned on `ack`, and the core re-forges each iteration (prune-then-forge) so
+   * the `callId` enum never goes stale.
+   *
+   * `bindContext` remains the public seam for a CUSTOM consumer that forges its own ephemeral tools outside
+   * the core path. If you forge into a long-lived registry yourself, bind it (or prune manually) or the
+   * ephemeral tools accumulate and later `forgeTools(ctx)` calls see a stale `callId` enum. The pattern for a
+   * hand-rolled forge is:
    *
    * ```ts
-   * const executor: DispatchExecutorFn = async (ctx) => {
-   *   const forged = SpooledArtifact.forgeTools(ctx)
-   *   const merged = ToolRegistry.merge([main, forged])
-   *   main.bindContext(ctx)
-   *   const result = await llm.invoke({ tools: merged.all(), ... })
-   *   ctx.ack()
-   * }
+   * // Custom forge (the core already does this for artifact readers on ctx.tools):
+   * const forged = SpooledArtifact.forgeTools(ctx)
+   * for (const tool of forged.all()) ctx.tools.register(tool, true)
+   * ctx.tools.bindContext(ctx) // prune the ephemeral readers when the dispatch acks
    * ```
    *
    * @param ctx - The execution context whose `ack` event should trigger pruning.

@@ -18,6 +18,7 @@
  */
 
 import { DateTime } from 'luxon'
+import type { GpuBudget } from './gpu_budget'
 
 /** The coarse lifecycle phases a battery transitions through. */
 export type BatteryLifecyclePhase =
@@ -53,6 +54,13 @@ export interface BatteryLifecycleReport {
   raw?: unknown
   /** The failure, populated only when `phase === 'error'`. */
   error?: unknown
+  /**
+   * The probed WebGPU device budget, populated on the `ready` phase for on-device batteries running on
+   * the WebGPU EP. SURFACED, not enforced — the consumer reads this to know the per-allocation ceiling
+   * (the wall an over-large context window hits) and choose its window accordingly. Absent on non-WebGPU
+   * runtimes (Node/wasm) and on every other phase. See {@link GpuBudget}.
+   */
+  gpuBudget?: GpuBudget
 }
 
 /** A lifecycle report consumer. */
@@ -126,7 +134,9 @@ export const emitLifecycle = (
   battery: BatteryLifecycleBattery,
   model: string,
   phase: BatteryLifecyclePhase,
-  extra?: Partial<Pick<BatteryLifecycleReport, 'detail' | 'progress' | 'raw' | 'error'>>,
+  extra?: Partial<
+    Pick<BatteryLifecycleReport, 'detail' | 'progress' | 'raw' | 'error' | 'gpuBudget'>
+  >,
   now: () => string = () => DateTime.now().toISO() as string
 ): void => {
   if (!hooks) return

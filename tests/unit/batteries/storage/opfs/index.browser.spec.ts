@@ -303,6 +303,16 @@ describeOpfs('OPFS battery (browser)', () => {
       expect(store.keyFor('abc')).toBe('agent-runs-abc')
     })
 
+    it('rejects a keyPrefix containing a path separator (it is a filename prefix, not a dir)', () => {
+      // REGRESSION: a trailing-slash prefix (e.g. 'agent-spool/') used as if it were a subdirectory
+      // produced `getFileHandle('agent-spool/…')` → "Name is not allowed" on EVERY write — a silent
+      // runtime footgun. The constructor must reject '/' and '\\' up front with an actionable message.
+      expect(() => new OpfsSpoolStore({ keyPrefix: 'agent-spool/' })).toThrow(/filename prefix/)
+      expect(() => new OpfsSpoolStore({ keyPrefix: 'a\\b' })).toThrow(/must not contain/)
+      // The error suggests a flat alternative.
+      expect(() => new OpfsSpoolStore({ keyPrefix: 'agent-spool/' })).toThrow(/agent-spool-/)
+    })
+
     it('keyPrefix applied to writes — files land at the prefixed name on the underlying dir', async () => {
       const prefixed = new OpfsSpoolStore({ directory: directoryThunk, keyPrefix: 'pfx-' })
       await prefixed.write('only', 'value')

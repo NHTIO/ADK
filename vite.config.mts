@@ -141,6 +141,11 @@ export default defineConfig(async ({ mode }) => {
     },
     define: {
       __VERSION__: JSON.stringify(packageJson.version),
+      // The flagship agent modules (docs/.vitepress/theme/components/agent/*) reference the wiretap
+      // build-define with bare `if (__ADK_WIRETAP__)`. It is normally injected by the docs vite config;
+      // under vitest (the portable Node agent harness spec) it is otherwise undefined and throws. Pin it
+      // OFF for tests — matches the released docs build (ADK_DOCS_RELEASE=1).
+      __ADK_WIRETAP__: false,
       // TEST_*-prefixed env vars are loaded from .env.test by `loadEnv` above and inlined here
       // as a single object so browser-project tests can read them (browsers have no
       // `process.env`). Node-project tests can still use `process.env.TEST_*` directly. Empty

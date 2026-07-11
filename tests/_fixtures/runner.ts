@@ -28,6 +28,7 @@ export interface CapturedEvent {
     | 'iterationStart'
     | 'iterationEnd'
     | 'log'
+    | 'warning'
     | 'toolExecutionStart'
     | 'toolExecutionEnd'
     | 'error'
@@ -143,6 +144,7 @@ export const makeFixtureRunner = <S extends ScriptStore = InMemorySpoolStore>(
   runner.observe('iterationStart', (payload) => events.push({ kind: 'iterationStart', payload }))
   runner.observe('iterationEnd', (payload) => events.push({ kind: 'iterationEnd', payload }))
   runner.observe('log', (payload) => events.push({ kind: 'log', payload }))
+  runner.observe('warning', (payload) => events.push({ kind: 'warning', payload }))
   runner.observe('toolExecutionStart', (payload) =>
     events.push({ kind: 'toolExecutionStart', payload })
   )

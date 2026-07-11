@@ -105,27 +105,30 @@ export interface RawToolCall {
    */
   fromArtifactTool?: boolean
   /**
-   * When `true` (default), LLM adapters render this tool call's result inline — the full
-   * stringified body is wrapped in the adapter's trust envelope and sent to the model as the
-   * `tool` role content. When `false`, the adapter surfaces the result as a "handle" — a
-   * directions-bearing envelope that tells the model which forged artifact-query tools to call
-   * against this `tc.id` to read the content incrementally.
+   * When `false` (the default), the adapter surfaces a {@link @nhtio/adk!SpooledArtifact} result as a
+   * "handle" — a directions-bearing envelope that tells the model which forged artifact-query tools to
+   * call against this `tc.id` to read the content incrementally, keeping the body OUT of the prompt.
+   * When `true`, the adapter renders the result inline — the full stringified body wrapped in the
+   * adapter's trust envelope and sent to the model as the `tool` role content.
    *
    * @remarks
-   * Policy is the producer's or middleware's call:
-   *   - A normal tool returns its result with `inline: true` by default so its output is shown
-   *     verbatim.
-   *   - Middleware that wants to keep large results out of the model's prompt sets `inline: false`
-   *     (typically via `ctx.mutateToolCall(tc.id, { inline: false })`) before yielding.
-   *   - LLM adapters do not override the flag, do not size-check the result, and do not silently
-   *     switch to the handle pattern.
+   * Handle-by-default is the secure, budget-aligned posture: the LLM batteries already spool-wrap every
+   * non-{@link @nhtio/adk!Media}, non-{@link @nhtio/adk!ArtifactTool} tool result into a `SpooledArtifact`,
+   * so a result that could be arbitrarily large never lands in the next prompt just because nobody
+   * touched a flag — the core ADK context-window-diet principle (see the Budgets / Artifacts docs).
+   * Inlining is the OPT-IN: a producer that knows its output is small sets `inline: true` so the model
+   * sees the body verbatim without a query round-trip.
    *
-   * For {@link @nhtio/adk!Tokenizable} results, the flag is effectively informational — handles only make
-   * sense for {@link @nhtio/adk!SpooledArtifact} (which is the only result kind the forged artifact-query
-   * tools can read). When `inline: false` is set on a call whose `results` is a `Tokenizable`,
-   * the adapter renders inline anyway and may log a warning.
+   * Policy is the producer's or middleware's call (LLM adapters obey the flag — they never size-check
+   * the result or silently switch modes). Set per call at construction, or flip mid-turn via
+   * `ctx.mutateToolCall(tc.id, { inline: true })`.
    *
-   * @defaultValue `true`
+   * Handles only make sense for `SpooledArtifact` (the only result kind the forged artifact-query tools
+   * can read). For a {@link @nhtio/adk!Tokenizable} result (e.g. an `ArtifactTool` answer or an error
+   * string) the flag is moot — the adapter renders it inline regardless, since there is no queryable
+   * artifact to hand back.
+   *
+   * @defaultValue `false`
    */
   inline?: boolean
   /** When this tool call was first created. */
@@ -210,7 +213,7 @@ const rawToolCallSchema = validator.object<RawToolCall>({
     })
     .required(),
   fromArtifactTool: validator.boolean().default(false),
-  inline: validator.boolean().default(true),
+  inline: validator.boolean().default(false),
   createdAt: validator.datetime().required(),
   updatedAt: validator.datetime().required(),
   completedAt: validator.datetime().required(),
@@ -277,8 +280,9 @@ export class ToolCall {
    */
   declare readonly fromArtifactTool: boolean
   /**
-   * `true` (default) renders this tool call's result inline in the prompt; `false` instructs LLM
-   * adapters to surface the result as a handle reference. See {@link RawToolCall.inline}.
+   * `false` (default) instructs LLM adapters to surface a `SpooledArtifact` result as a handle
+   * reference (body kept out of the prompt); `true` renders the result inline. See
+   * {@link RawToolCall.inline}.
    */
   declare readonly inline: boolean
   /** When this tool call was first created. */

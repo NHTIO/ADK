@@ -6,6 +6,7 @@ import { validateOrThrow } from './utils/validation'
 import { ToolRegistry } from './classes/tool_registry'
 import { isInstanceOf, isError } from './utils/guards'
 import { TypedEventEmitter } from '@nhtio/tiny-typed-emitter'
+import { runWithEstimationWarnings } from './utils/estimation_context'
 import { turnRunnerConfigSchema } from './contracts/turn_runner_config'
 import { TurnContext, RawTurnContext } from './contracts/turn_runner_context'
 import {
@@ -16,6 +17,8 @@ import {
 } from './exceptions/runtime'
 import type { Runner } from '@nhtio/middleware'
 import type { RawTurnGate } from './classes/turn_gate'
+import type { WarningEvent } from './types/dispatch_runner'
+import type { EstimationWarning } from './utils/estimation_context'
 import type { ResolvedTurnRunnerConfig, TurnRunnerConfig } from './contracts/turn_runner_config'
 import type {
   OpenGateFn,
@@ -126,7 +129,9 @@ export class TurnRunner {
   constructor(config: TurnRunnerConfig) {
     // Validate once, capturing the field-level error so the thrown exception can name the
     // offending field(s) (e.g. a missing required callback) instead of failing opaquely.
-    const { error } = turnRunnerConfigSchema.validate(config, { abortEarly: false })
+    const { error } = turnRunnerConfigSchema.validate(config, {
+      abortEarly: false,
+    })
     if (error) {
       const detail = error.details.map((d) => d.message).join('; ')
       throw new E_INVALID_TURN_RUNNER_CONFIG([detail], { cause: error })
@@ -345,118 +350,150 @@ export class TurnRunner {
 
     turnContextId = turnContext.id
 
-    const startedAt = DateTime.now()
-    this.#observabilityEmitter.emit('turnStart', { turnId: turnContext.id, startedAt })
+    // Publish a turn-level warn-sink for the duration of the run so a token estimation done directly in a
+    // TURN pipeline (outside any dispatch) can degrade-and-warn instead of throwing. A nested
+    // DispatchRunner.dispatch() pushes its own sink on top (see estimation_context), so estimations inside
+    // a dispatch route to the richer dispatch-scoped sink and this turn-level one is the fallback. No
+    // dispatchId/iteration here — those belong to a dispatch scope, not the turn.
+    const emitEstimationWarning = (w: EstimationWarning): void => {
+      const event: WarningEvent = {
+        emittedAt: DateTime.now(),
+        source: 'turn-runner',
+        kind: 'token-estimation-degraded',
+        message: `token estimation for encoding "${String(w.encoding)}" failed; fell back to a char-based estimate`,
+        error: w.error,
+        payload: { encoding: w.encoding, textPreview: w.textPreview },
+      }
+      this.#observabilityEmitter.emit('warning', event)
+    }
 
-    const emitTurnEnd = () => {
-      const endedAt = DateTime.now()
-      this.#observabilityEmitter.emit('turnEnd', {
+    await runWithEstimationWarnings(emitEstimationWarning, async () => {
+      const startedAt = DateTime.now()
+      this.#observabilityEmitter.emit('turnStart', {
         turnId: turnContext.id,
         startedAt,
-        endedAt,
-        durationMs: endedAt.diff(startedAt).milliseconds,
       })
-    }
 
-    // 1. Input pipeline
-    let inputFailed = false
-    let inputReached = false
-    await this.#inputRunner
-      .errorHandler(async (error) => {
-        if (!isError(error) || !isInstanceOf(error, 'AbortError')) {
-          inputFailed = true
-          const err = new E_INPUT_PIPELINE_ERROR({
-            cause: isError(error) ? error : undefined,
-          })
-          this.#observabilityEmitter.emit('error', err)
-        }
-      })
-      .finalHandler(async () => {
-        inputReached = true
-      })
-      .run((fn, next) => Promise.resolve(fn(turnContext, next)))
+      const emitTurnEnd = () => {
+        const endedAt = DateTime.now()
+        this.#observabilityEmitter.emit('turnEnd', {
+          turnId: turnContext.id,
+          startedAt,
+          endedAt,
+          durationMs: endedAt.diff(startedAt).milliseconds,
+        })
+      }
 
-    if (!inputReached && !inputFailed && !turnContext.aborted) {
-      inputFailed = true
-      const err = new E_PIPELINE_SHORT_CIRCUITED(['turn-input'])
-      this.#observabilityEmitter.emit('error', err)
-    }
+      // 1. Input pipeline
+      let inputFailed = false
+      let inputReached = false
+      await this.#inputRunner
+        .errorHandler(async (error) => {
+          if (!isError(error) || !isInstanceOf(error, 'AbortError')) {
+            inputFailed = true
+            const err = new E_INPUT_PIPELINE_ERROR({
+              cause: isError(error) ? error : undefined,
+            })
+            this.#observabilityEmitter.emit('error', err)
+          }
+        })
+        .finalHandler(async () => {
+          inputReached = true
+        })
+        .run((fn, next) => Promise.resolve(fn(turnContext, next)))
 
-    if (inputFailed || turnContext.aborted) {
+      if (!inputReached && !inputFailed && !turnContext.aborted) {
+        inputFailed = true
+        const err = new E_PIPELINE_SHORT_CIRCUITED(['turn-input'])
+        this.#observabilityEmitter.emit('error', err)
+      }
+
+      if (inputFailed || turnContext.aborted) {
+        emitTurnEnd()
+        return
+      }
+
+      // 2. LLM execution dispatch
+      let dispatchFailed = false
+      try {
+        await DispatchRunner.dispatch({
+          source: turnContext,
+          executor: this.#config.executorCallback,
+          turnInputPipeline: this.#config.dispatchInputPipeline,
+          turnOutputPipeline: this.#config.dispatchOutputPipeline,
+          observers: {
+            dispatchStart: [
+              (e) => {
+                this.#observabilityEmitter.emit('dispatchStart', e)
+              },
+            ],
+            dispatchEnd: [
+              (e) => {
+                this.#observabilityEmitter.emit('dispatchEnd', e)
+              },
+            ],
+            iterationStart: [
+              (e) => {
+                this.#observabilityEmitter.emit('iterationStart', e)
+              },
+            ],
+            iterationEnd: [
+              (e) => {
+                this.#observabilityEmitter.emit('iterationEnd', e)
+              },
+            ],
+            log: [
+              (e) => {
+                this.#observabilityEmitter.emit('log', e)
+              },
+            ],
+            // Re-forward a DispatchRunner-emitted `warning` (e.g. token-estimation degraded) up to the turn
+            // bus, so a consumer subscribed only to the TurnRunner still sees it — mirrors the log/dispatch*
+            // bridges above. Non-fatal; the dispatch continues.
+            warning: [
+              (e) => {
+                this.#observabilityEmitter.emit('warning', e)
+              },
+            ],
+          },
+        })
+      } catch (err) {
+        dispatchFailed = true
+        const wrapped = isInstanceOf(err, 'BaseException')
+          ? (err as InstanceType<typeof Error>)
+          : err
+        this.#observabilityEmitter.emit('error', wrapped as any)
+      }
+
+      if (dispatchFailed || turnContext.aborted) {
+        emitTurnEnd()
+        return
+      }
+
+      // 3. Output pipeline
+      let outputFailed = false
+      let outputReached = false
+      await this.#outputRunner
+        .errorHandler(async (error) => {
+          if (!isError(error) || !isInstanceOf(error, 'AbortError')) {
+            outputFailed = true
+            const err = new E_OUTPUT_PIPELINE_ERROR({
+              cause: isError(error) ? error : undefined,
+            })
+            this.#observabilityEmitter.emit('error', err)
+          }
+        })
+        .finalHandler(async () => {
+          outputReached = true
+        })
+        .run((fn, next) => Promise.resolve(fn(turnContext, next)))
+
+      if (!outputReached && !outputFailed && !turnContext.aborted) {
+        const err = new E_PIPELINE_SHORT_CIRCUITED(['turn-output'])
+        this.#observabilityEmitter.emit('error', err)
+      }
+
       emitTurnEnd()
-      return
-    }
-
-    // 2. LLM execution dispatch
-    let dispatchFailed = false
-    try {
-      await DispatchRunner.dispatch({
-        source: turnContext,
-        executor: this.#config.executorCallback,
-        turnInputPipeline: this.#config.dispatchInputPipeline,
-        turnOutputPipeline: this.#config.dispatchOutputPipeline,
-        observers: {
-          dispatchStart: [
-            (e) => {
-              this.#observabilityEmitter.emit('dispatchStart', e)
-            },
-          ],
-          dispatchEnd: [
-            (e) => {
-              this.#observabilityEmitter.emit('dispatchEnd', e)
-            },
-          ],
-          iterationStart: [
-            (e) => {
-              this.#observabilityEmitter.emit('iterationStart', e)
-            },
-          ],
-          iterationEnd: [
-            (e) => {
-              this.#observabilityEmitter.emit('iterationEnd', e)
-            },
-          ],
-          log: [
-            (e) => {
-              this.#observabilityEmitter.emit('log', e)
-            },
-          ],
-        },
-      })
-    } catch (err) {
-      dispatchFailed = true
-      const wrapped = isInstanceOf(err, 'BaseException') ? (err as InstanceType<typeof Error>) : err
-      this.#observabilityEmitter.emit('error', wrapped as any)
-    }
-
-    if (dispatchFailed || turnContext.aborted) {
-      emitTurnEnd()
-      return
-    }
-
-    // 3. Output pipeline
-    let outputFailed = false
-    let outputReached = false
-    await this.#outputRunner
-      .errorHandler(async (error) => {
-        if (!isError(error) || !isInstanceOf(error, 'AbortError')) {
-          outputFailed = true
-          const err = new E_OUTPUT_PIPELINE_ERROR({
-            cause: isError(error) ? error : undefined,
-          })
-          this.#observabilityEmitter.emit('error', err)
-        }
-      })
-      .finalHandler(async () => {
-        outputReached = true
-      })
-      .run((fn, next) => Promise.resolve(fn(turnContext, next)))
-
-    if (!outputReached && !outputFailed && !turnContext.aborted) {
-      const err = new E_PIPELINE_SHORT_CIRCUITED(['turn-output'])
-      this.#observabilityEmitter.emit('error', err)
-    }
-
-    emitTurnEnd()
+    })
   }
 }

@@ -15,13 +15,13 @@
  */
 
 import { Media } from '@nhtio/adk'
-import { ArtifactTool, Tool } from '@nhtio/adk'
-import { Tokenizable, SpooledArtifact } from '@nhtio/adk'
+import { SpooledArtifact } from '@nhtio/adk'
 import { E_UNSUPPORTED_MEDIA_MODALITY } from './exceptions'
 import {
   neutraliseDeveloperRulesTag,
   sanitizeMimeType,
   sanitizeFilenameForDescription,
+  defaultRenderArtifactHandleBody,
 } from '../chat_common/helpers'
 import {
   descriptionToChatCompletionsJsonSchema,
@@ -38,6 +38,8 @@ import {
   renderThought,
   filterThoughts,
 } from '../openai_chat_completions/helpers'
+import type { Tokenizable } from '@nhtio/adk'
+import type { ArtifactTool, Tool } from '@nhtio/adk'
 import type { Message, Memory, Retrievable, Thought, ToolCall, ToolRegistry } from '@nhtio/adk'
 import type {
   LiteRtMessage,
@@ -82,12 +84,23 @@ export {
   extractReasoningFields,
 } from '../openai_chat_completions/helpers'
 
+// The shared SpooledArtifact handle-pattern machinery (renders the "this is a spooled artifact, call
+// these tools to read it" envelope) + its structural guard. Surfaced on the battery barrel so consumers
+// can override/compose it like any other render helper.
+export {
+  renderArtifactHandleBody,
+  defaultRenderArtifactHandleBody,
+  looksLikeSpooledArtifact,
+} from '../chat_common/helpers'
+
 // Re-export the shared text-parser layer so consumers import everything from this battery's barrel.
 // LiteRT-LM (v0.13.1) is text-only: tool calls + reasoning arrive as text in `content`, parsed here.
 export * from '../chat_common/tool_parsers'
 export * from '../chat_common/reasoning_parsers'
 export * from '../chat_common/lifecycle'
 export * from '../chat_common/generation'
+// Shared WebGPU memory observability (budget probe, OOM detector, live instrument).
+export * from '../chat_common/gpu_budget'
 
 // ── LiteRT-native mappers ─────────────────────────────────────────────────────────────────────────
 
@@ -141,9 +154,16 @@ export const defaultToolsToLiteRtTools = toolsToLiteRtTools
  * — which the shared {@link createAutoToolCallParser} already does (its `gemma` family handles the
  * decoder-stripped `call:NAME{…}` runtime form, plus hermes/pythonic as fallbacks).
  *
- * The block lists each tool's name, description, and JSON-Schema parameters, then instructs the
- * Gemma-documented pythonic call format `[func(arg=value)]`. The model's natural `call:NAME{…}` form is
- * ALSO accepted by the `auto` parser, so compliance has two catch paths.
+ * The block lists each tool's name, description, and JSON-Schema parameters, then instructs Gemma's
+ * OWN trained call format `call:NAME{key:value, …}` — NOT the pythonic `[func(arg=value)]` form. This
+ * matters: the LiteRT-web runtime is Gemma-only, and a real Gemma E2B/E4B run emits the
+ * decoder-stripped `call:NAME{…}` shape natively (verified via the real-model matrix; the `gemma`
+ * family in {@link createAutoToolCallParser} is built for exactly this). Instructing the pythonic form
+ * instead FIGHTS the model's training — a small instruct model, caught between its trained format and a
+ * conflicting instruction, degenerates to an unparseable hybrid (e.g. `say_i_dont_know\nreason: …`)
+ * that no parser catches, so the "call" leaks into the answer as prose. Teaching the model the format
+ * it already knows makes its natural output parse on the first try. A concrete example is included
+ * because a 2B follows a shown example far more reliably than an abstract grammar.
  */
 export const renderToolsAsPromptText = (
   tools: ReadonlyArray<Tool | ArtifactTool>,
@@ -159,8 +179,11 @@ export const renderToolsAsPromptText = (
   )
   return [
     '<tool_definitions>',
-    'You have access to the following tools. When you decide to call one, emit the call as',
-    '`[func_name(param=value, ...)]` and nothing else on that line. Use only the tools listed.',
+    'You have access to the following tools. To call one, emit EXACTLY this format and nothing else',
+    'on that line:',
+    '  call:tool_name{arg1:value1, arg2:value2}',
+    'For example, to call a tool named search with a query: call:search{query:turn runner}',
+    'Use only the tools listed below. Put string values as-is (no surrounding quotes needed).',
     '',
     ...lines,
     '</tool_definitions>',
@@ -282,9 +305,11 @@ const resolveMediaFallbackText = async (
  * Render a {@link @nhtio/adk!ToolCall}'s `results` into a LiteRT `tool_response` content item.
  *
  * @remarks
- * Materialises {@link @nhtio/adk!SpooledArtifact}(s) via `asString()` and applies the trust envelope
- * (reusing the shared `renderTrustedContent`/`renderUntrustedContent`). Media results degrade to text
- * via {@link renderMediaToLiteRtContent}'s fallback path (LiteRT tool responses are text-shaped).
+ * A {@link @nhtio/adk!SpooledArtifact} result renders as a HANDLE (metadata + the forged `artifact_*`
+ * tools to read it) when its `ToolCall.inline === false` — the secure default — and inline via
+ * `asString()` only when a producer opted into `inline: true`. Applies the trust envelope (reusing the
+ * shared `renderTrustedContent`/`renderUntrustedContent`). Media results degrade to text via
+ * {@link renderMediaToLiteRtContent}'s fallback path (LiteRT tool responses are text-shaped).
  */
 export const renderLiteRtToolResult = async (input: {
   toolCall: ToolCall
@@ -293,12 +318,24 @@ export const renderLiteRtToolResult = async (input: {
   unsupportedMediaPolicy: UnsupportedMediaPolicy
   renderUntrustedContent: typeof commonRenderUntrustedContent
   renderTrustedContent: typeof commonRenderTrustedContent
+  /**
+   * Override for the artifact-handle body renderer (see {@link renderArtifactHandleBody}). Defaults to
+   * the shared {@link defaultRenderArtifactHandleBody}. The adapter threads the consumer's
+   * `helpers.renderArtifactHandleBody` here so an app can change which forged `artifact_*` reader the
+   * model is steered toward first.
+   */
+  renderArtifactHandleBody?: typeof defaultRenderArtifactHandleBody
   warn?: (msg: string) => void
 }): Promise<LiteRtMessageContentItem> => {
   const { results, toolCall, tool } = input
+  const renderHandle = input.renderArtifactHandleBody ?? defaultRenderArtifactHandleBody
   const isTrusted = tool?.trusted === true
 
   let body: string
+  // Whether `body` is a non-inlined artifact HANDLE (vs. inlined content). Only the `kind` label on
+  // the envelope changes — the trust TIER is still the producing tool's (trusted vs untrusted), since a
+  // handle to a third-party artifact carries the same injection hazard as its inlined content would.
+  let isHandle = false
   if (
     Media.isMedia(results) ||
     (Array.isArray(results) && results.every((r) => Media.isMedia(r)))
@@ -310,6 +347,34 @@ export const renderLiteRtToolResult = async (input: {
       parts.push(text)
     }
     body = parts.join('\n\n')
+  } else if (
+    !Array.isArray(results) &&
+    SpooledArtifact.isSpooledArtifact(results) &&
+    toolCall.inline === false
+  ) {
+    // Handle pattern: the producer marked this result non-inline, so emit a directions-bearing handle
+    // (metadata + the forged artifact_* tools to read it) instead of dumping the body. This is what
+    // makes the spool/thrift pattern usable — the catalog/search result stays out of the prompt and
+    // the model pulls only the slices it needs. Parity with the OpenAI + Ollama batteries.
+    let byteLength = 0
+    let lineCount = 0
+    try {
+      byteLength = await results.byteLength()
+    } catch {
+      /* best-effort metadata */
+    }
+    try {
+      lineCount = await results.lineCount()
+    } catch {
+      /* best-effort metadata */
+    }
+    body = renderHandle({
+      callId: toolCall.id,
+      artifact: results,
+      byteLength,
+      lineCount,
+    })
+    isHandle = true
   } else if (Array.isArray(results)) {
     const parts: string[] = []
     for (const a of results) parts.push(await (a as SpooledArtifact).asString())
@@ -323,12 +388,12 @@ export const renderLiteRtToolResult = async (input: {
   const envelope = isTrusted
     ? input.renderTrustedContent(body, {
         nonce: toolCall.checksum,
-        kind: 'trusted-tool-result',
+        kind: isHandle ? 'trusted-artifact-handle' : 'trusted-tool-result',
         tool: toolCall.tool,
       } as never)
     : input.renderUntrustedContent(body, {
         nonce: toolCall.checksum,
-        kind: 'tool-result',
+        kind: isHandle ? 'artifact-handle' : 'tool-result',
         tool: toolCall.tool,
       } as never)
 
@@ -372,6 +437,13 @@ export const buildLiteRtConversationInput = async (input: {
   toolCalls: Iterable<ToolCall>
   tools: ToolRegistry
   renderedToolCallResults: Map<string, LiteRtMessageContentItem>
+  /**
+   * The live dispatch context, threaded so DYNAMIC (evaluatable) {@link Tokenizable} content resolves
+   * against it at assembly via `.render(renderCtx)`. Optional — a static Tokenizable ignores it, and
+   * callers outside a dispatch may omit it (the evaluator's no-context fallback applies). Typed loosely
+   * (the primitive types the arg as `DispatchContext`; this battery does not import that contract).
+   */
+  renderCtx?: unknown
   bucketOrder: LiteRtLmBucketOrder
   selfIdentity: string
   thoughtSurfacing: 'all-self' | 'latest-self' | 'all'
@@ -418,6 +490,7 @@ export const buildLiteRtConversationInput = async (input: {
     standingInstructions: input.standingInstructions,
     memories: input.memories,
     retrievables: input.retrievables,
+    renderCtx: input.renderCtx,
     bucketOrder: input.bucketOrder,
     renderStandingInstructions: input.renderStandingInstructions,
     renderMemories: input.renderMemories,
@@ -480,7 +553,11 @@ export const buildLiteRtConversationInput = async (input: {
       const m = item.value
       const role = m.role === 'user' ? 'user' : 'assistant'
       // Neutralise a body-embedded no-nonce developer-rules tier (envelope-mimicry defense).
-      const text = neutraliseDeveloperRulesTag(m.content !== undefined ? m.content.toString() : '')
+      // `.render(renderCtx)` resolves a DYNAMIC Tokenizable against the live dispatch context (static → its
+      // string, as before); the overflow guard measured the same ctx, so counts and content agree.
+      const text = neutraliseDeveloperRulesTag(
+        m.content !== undefined ? m.content.render(input.renderCtx as never) : ''
+      )
       // Multimodal: a message with attachments + the renderer wired → emit a content-item array
       // (text first, then one item per attachment via the shared media renderer, which honors the
       // modality flags + degrades disabled/unsupported kinds through `unsupportedMediaPolicy`).
@@ -512,7 +589,7 @@ export const buildLiteRtConversationInput = async (input: {
       }
     } else if (item.kind === 'thought') {
       const t = item.value
-      const envelope = input.renderThought(t.content.toString(), {
+      const envelope = input.renderThought(t.content.render(input.renderCtx as never), {
         nonce: t.id,
         kind: 'self-reasoning',
         from: t.identity?.identifier ?? input.selfIdentity,

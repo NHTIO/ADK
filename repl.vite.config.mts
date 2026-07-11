@@ -40,6 +40,13 @@ export default defineConfig(async (): Promise<UserConfig> => {
       outDir: resolve(DOCS_DIR, 'public', 'repl'),
       emptyOutDir: true,
       sourcemap: true,
+      // Do NOT minify. @nhtio/encoder's decoder maps a `custom:<ClassName>` tag back to a constructor by
+      // `constructor.name`; lib-mode esbuild minification mangles class names (SpooledJsonArtifact → _),
+      // so encode() emits `custom:_` and decode() throws "Value of type custom:_ cannot be decoded" —
+      // breaking the ToolCall/SpooledArtifact handle round-trip the flagship relies on. (Vite's top-level
+      // `esbuild.keepNames` does NOT reach the lib-mode minify pass, so disabling minify is the fix.)
+      // This asset is loaded by URL, so correctness beats the size win; the dist already ships unminified.
+      minify: false,
       lib: {
         entry: { 'adk-repl': resolve(DOCS_DIR, '.vitepress', 'repl', 'index.ts') },
         name: 'adk-repl',

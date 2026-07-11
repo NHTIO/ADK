@@ -10,7 +10,9 @@
  */
 
 import type { TokenEncoding } from '@nhtio/adk/common'
+import type { DispatchContext } from '@nhtio/adk/types'
 import type { SpooledArtifact, Media, SpoolStore } from '@nhtio/adk/common'
+import type { ToolCallParserName, ToolCallParserFn } from '../chat_common/tool_parsers'
 import type {
   Tokenizable,
   Memory,
@@ -29,6 +31,8 @@ import type {
   UnsupportedMediaPolicy,
   ChatCompletionsRetryConfig,
   ChatHelpersCommon,
+  RawGenerationObserverFn,
+  PromptAssembledObserverFn,
 } from '../chat_common/types'
 
 // ─── Re-exported shared (wire-shape-agnostic) types ───────────────────────────
@@ -50,6 +54,7 @@ export type {
   UnsupportedMediaPolicy,
   ChatCompletionsRetryConfig,
 } from '../chat_common/types'
+export type { ToolCallParserName, ToolCallParserFn } from '../chat_common/tool_parsers'
 
 // ─── Reasoning field precedence ───────────────────────────────────────────────
 
@@ -704,4 +709,51 @@ export interface OpenAIChatCompletionsAdapterOptions {
       }
     }
   }
+  /**
+   * Observe the model's RAW response for each completed generation — fired once per terminal generation,
+   * after the provider's reply is parsed but before the result is persisted, with the returned assistant
+   * content (`rawText`), the residual `cleanedText`, and the extracted `reasoning` / `toolCalls`. Purely
+   * observational (return value ignored, errors swallowed). Default absent. An ADK-control key — stripped
+   * from the wire request body, never sent to the provider. See {@link RawGenerationObserverFn}.
+   */
+  onRawGeneration?: RawGenerationObserverFn
+  /**
+   * Observe the fully-assembled request this battery is about to POST TO the provider — fired once per
+   * terminal generation, the instant the body is built and BEFORE the fetch, with the wire `messages`,
+   * `tools`, and the complete `requestBody`. The mirror of {@link onRawGeneration}. Purely observational
+   * (return value ignored, errors swallowed). Default absent. An ADK-control key — stripped from the wire
+   * request body, never sent to the provider. The request is handed back AS-IS — no redaction — so treat
+   * it as potentially sensitive (it may contain auth material that rode the body) if you persist it. See
+   * {@link PromptAssembledObserverFn}.
+   */
+  onPromptAssembled?: PromptAssembledObserverFn
+  /**
+   * OPTIONAL fallback parser for tool calls the provider did NOT return structurally.
+   *
+   * @remarks
+   * The Chat Completions `message.tool_calls` array is authoritative: when the provider returns tool
+   * calls, those are used and this option is never consulted. But some models — especially small local
+   * ones served through an OpenAI-compatible endpoint — emit a tool call in a surface form the endpoint
+   * does not lift into `tool_calls`: `<call:name{…}`, a fenced ```` ```json ```` block, `<tool_code…>`, or
+   * bare `name\nkey: value`. Those land as plain assistant `content` with `tool_calls` empty, silently
+   * dropping the call. This is a cross-model, cross-weight reality, not a single-endpoint quirk.
+   *
+   * Set this to a parser family name (e.g. `'gemma'`), `'auto'` (try every bundled parser in priority
+   * order), or a custom {@link ToolCallParserFn} to recover such calls from `content` ONLY when the
+   * provider returned none. Recovered calls execute exactly like native ones. Default absent = disabled =
+   * today's native-only behaviour (fully backward-compatible). Mirrors the on-device batteries'
+   * `toolCallParser`, which parse from text unconditionally because those runtimes never return structured
+   * calls.
+   */
+  localToolCallParser?: ToolCallParserName | ToolCallParserFn
+  /**
+   * OPTIONAL hook to SHAPE the artifact-query tools forged from prior-turn SpooledArtifact results, before
+   * they merge into the visible tool set. Receives the merged forged registry + dispatch context; returns a
+   * (possibly narrowed) registry, applied BEFORE the merge with `ctx.tools`. Lets the assembler keep only the
+   * core readers on a tight window (the rest reachable via tool_catalog/call_a_tool). Default absent =
+   * identity (all forged tools) = backward-compatible. The battery stays budget-agnostic (per the CONTRIBUTING
+   * size-threshold rule) — it applies the supplied filter without measuring context; budget logic lives in the
+   * caller's filter.
+   */
+  forgeToolsFilter?: (forged: ToolRegistry, ctx: DispatchContext) => ToolRegistry
 }

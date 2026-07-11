@@ -14,16 +14,9 @@
  */
 
 import type { TokenEncoding } from '@nhtio/adk'
-import type { SpoolStore } from '@nhtio/adk/common'
+import type { DispatchContext } from '@nhtio/adk/types'
 import type { BatteryLifecycleHooks } from '../chat_common'
-import type {
-  ToolCallParserName,
-  ToolCallParserFn,
-  ReasoningParserName,
-  ReasoningParserFn,
-  ChatSampler,
-  MediaOutputExtractorFn,
-} from '../chat_common'
+import type { SpoolStore, ToolRegistry } from '@nhtio/adk/common'
 import type {
   ChatCompletionsBucketOrder,
   ChatCompletionsHelpers,
@@ -32,6 +25,16 @@ import type {
   ReasoningFieldPrecedence,
   UnsupportedMediaPolicy,
 } from '../openai_chat_completions/types'
+import type {
+  ToolCallParserName,
+  ToolCallParserFn,
+  ReasoningParserName,
+  ReasoningParserFn,
+  ChatSampler,
+  MediaOutputExtractorFn,
+  RawGenerationObserverFn,
+  PromptAssembledObserverFn,
+} from '../chat_common'
 import type {
   Message as TransformersMessage,
   DataType as TransformersDataType,
@@ -61,6 +64,18 @@ export type TransformersJsProgressCallback = ProgressCallback
 export type TransformersJsModel = PreTrainedModel
 /** A loaded multimodal processor instance (`AutoProcessor` output). */
 export type TransformersJsProcessor = Processor
+/**
+ * ONNX Runtime session options forwarded verbatim to transformers.js's `session_options` loader arg.
+ *
+ * @remarks
+ * A REACHABLE LEVER, never auto-applied by the battery (surface, don't impose). Kept structurally open
+ * (`Record<string, unknown>`) rather than aliasing `onnxruntime-common`'s `InferenceSession.SessionOptions`
+ * directly: that type is not a peer of this battery, and a hard re-export of an external type breaks the
+ * bundler (the same reason the wire shapes above are local aliases). Useful keys for the WebGPU EP:
+ * `preferredOutputLocation` (`'gpu-buffer'` to keep outputs on GPU for IO-binding), `graphOptimizationLevel`,
+ * `enableGraphCapture`. Note `freeDimensionOverrides` cannot pin a KV-cached decoder's dynamic dims.
+ */
+export type TransformersJsSessionOptions = Record<string, unknown>
 
 /**
  * `device`/`dtype` for a multimodal model: a single value (all submodules) OR a `Record` keyed by ONNX
@@ -110,6 +125,8 @@ export type CreateTransformersJsPipeline = (input: {
   device?: TransformersJsDevice
   dtype?: TransformersJsDtype
   onInitProgress?: TransformersJsProgressCallback
+  /** ONNX Runtime session options forwarded verbatim to `pipeline(...)` as `session_options`. */
+  sessionOptions?: TransformersJsSessionOptions
 }) => Promise<TransformersJsPipeline>
 
 /**
@@ -136,6 +153,8 @@ export type CreateTransformersJsMultimodal = (input: {
   device?: TransformersJsDevice
   dtype?: TransformersJsDtype
   onInitProgress?: TransformersJsProgressCallback
+  /** ONNX Runtime session options forwarded verbatim to `from_pretrained(...)` as `session_options`. */
+  sessionOptions?: TransformersJsSessionOptions
 }) => Promise<{ model: TransformersJsModel; processor: TransformersJsProcessor }>
 
 // ── Adapter options ───────────────────────────────────────────────────────────────────────────────
@@ -168,6 +187,29 @@ export interface TransformersJsAdapterOptions extends BatteryLifecycleHooks {
   device?: TransformersJsDevice
   /** Quantization/precision dtype (e.g. `'q4f16'`), or a per-submodule `Record` (see {@link device}). */
   dtype?: TransformersJsDtype
+  /**
+   * ONNX Runtime session options forwarded verbatim to the loader's `session_options` arg (both the
+   * pipeline and multimodal paths). A REACHABLE LEVER for advanced WebGPU memory/perf control —
+   * surfaced, never auto-applied. See {@link TransformersJsSessionOptions} for useful keys. The battery
+   * sets no default here; whatever you pass is what the runtime gets.
+   */
+  sessionOptions?: TransformersJsSessionOptions
+  /**
+   * Pin the autoregressive KV cache (`present.*` outputs) to GPU buffers on the WebGPU EP, keeping it
+   * OFF the ONNX-Runtime-Web **wasm32 linear-memory heap** (hard-capped at 4 GiB). **Default `true`.**
+   *
+   * @remarks
+   * This is the battery's headline in-browser memory default: the wasm32 heap is the wall hit first when
+   * running on the WASM/JSEP WebGPU path, and the KV cache is its largest growing consumer across a
+   * multi-generate turn. transformers.js is *supposed* to pin this automatically, but its auto-pin
+   * silently no-ops on models with nested config (e.g. Gemma-4's `text_config`) — leaving the KV cache
+   * on the wasm heap. We apply the pin explicitly by default so the common case "just works".
+   *
+   * The ESCAPE HATCH: set `false` to disable entirely, or set your own
+   * `sessionOptions.preferredOutputLocation` — an explicit value ALWAYS wins and is never overwritten.
+   * No effect off the WebGPU EP (there is no `'gpu-buffer'` location on the wasm/cpu backend).
+   */
+  pinKvCacheToGpu?: boolean
   /** Called with model-load progress reports while weights download/compile. */
   onInitProgress?: TransformersJsProgressCallback
   /**
@@ -261,6 +303,15 @@ export interface TransformersJsAdapterOptions extends BatteryLifecycleHooks {
    */
   toolCallParser?: ToolCallParserName | ToolCallParserFn
   /**
+   * OPTIONAL hook to SHAPE the artifact-query tools forged from prior-turn SpooledArtifact results, before
+   * they merge into the visible tool set. Receives the merged forged registry + dispatch context; returns a
+   * (possibly narrowed) registry, applied BEFORE the merge with `ctx.tools`. Lets the assembler keep only the
+   * core readers on a tight window (the rest reachable via tool_catalog/call_a_tool). Default absent =
+   * identity = backward-compatible. The battery stays budget-agnostic (per the CONTRIBUTING size-threshold
+   * rule) — it applies the supplied filter without measuring context; budget logic lives in the caller.
+   */
+  forgeToolsFilter?: (forged: ToolRegistry, ctx: DispatchContext) => ToolRegistry
+  /**
    * How to parse reasoning/thinking out of the model's text output. A family name, `'auto'` (the
    * default), `'none'`, or a custom {@link ReasoningParserFn}. Extracted reasoning becomes ADK Thoughts.
    */
@@ -281,6 +332,25 @@ export interface TransformersJsAdapterOptions extends BatteryLifecycleHooks {
    * `ctx.storeMediaBytes` and attached as a `Media.toolGenerated(...)`.
    */
   extractMediaOutputs?: MediaOutputExtractorFn
+  /**
+   * Observe the model's RAW text output for each completed generation — fired once per terminal
+   * generation, after envelope-stripping + reasoning/tool-call parsing but before the result is
+   * persisted, with the complete `rawText`, the residual `cleanedText`, and the extracted
+   * `reasoning` / `toolCalls`. Purely observational (return value ignored, errors swallowed). Default
+   * absent. This is the supported seam for parser bring-up against a new model, live "why did it
+   * abstain?" debugging, and ground-truth fixture capture — the job that previously needed a temporary
+   * hook patched into the adapter. See {@link RawGenerationObserverFn}.
+   */
+  onRawGeneration?: RawGenerationObserverFn
+  /**
+   * Observe the fully-assembled prompt this battery is about to send TO the model — fired once per
+   * terminal generation, the instant assembly completes and BEFORE the pipeline/generate dispatch, with
+   * the per-turn `messages` and the `tools` handed to `apply_chat_template`. The mirror of
+   * {@link onRawGeneration}. Purely observational (return value ignored, errors swallowed). Default absent.
+   * The request is handed back AS-IS — no redaction — so treat it as potentially sensitive if you persist
+   * it. See {@link PromptAssembledObserverFn}.
+   */
+  onPromptAssembled?: PromptAssembledObserverFn
 }
 
 /** The JSON-schema-shaped value used for a tool's `parameters` field (re-export for convenience). */

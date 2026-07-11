@@ -17,7 +17,9 @@
  */
 
 import type { TokenEncoding } from '@nhtio/adk/common'
+import type { DispatchContext } from '@nhtio/adk/types'
 import type { SpooledArtifact, Media, SpoolStore } from '@nhtio/adk/common'
+import type { ToolCallParserName, ToolCallParserFn } from '../chat_common/tool_parsers'
 import type {
   Tokenizable,
   Memory,
@@ -36,6 +38,8 @@ import type {
   UnsupportedMediaPolicy,
   ChatCompletionsRetryConfig,
   ChatHelpersCommon,
+  RawGenerationObserverFn,
+  PromptAssembledObserverFn,
 } from '../chat_common/types'
 
 // ─── Re-exported shared (wire-shape-agnostic) types ───────────────────────────
@@ -55,6 +59,7 @@ export type {
   ChatCompletionsRetryConfig,
   ChatHelpersCommon,
 } from '../chat_common/types'
+export type { ToolCallParserName, ToolCallParserFn } from '../chat_common/tool_parsers'
 
 // ─── think control ────────────────────────────────────────────────────────────
 
@@ -384,4 +389,57 @@ export interface OllamaAdapterOptions {
   options?: OllamaRuntimeOptions
   /** How long the model stays resident after the request (e.g. `'5m'`, `0` to unload). */
   keep_alive?: string | number
+  /**
+   * Observe the model's RAW response for each completed generation — fired once per terminal generation,
+   * after the provider's reply is parsed but before the result is persisted, with the returned assistant
+   * content (`rawText`), the residual `cleanedText`, and the extracted `reasoning` / `toolCalls`. Purely
+   * observational (return value ignored, errors swallowed). Default absent. See
+   * {@link RawGenerationObserverFn}.
+   */
+  onRawGeneration?: RawGenerationObserverFn
+  /**
+   * Observe the fully-assembled request this battery is about to POST TO Ollama — fired once per terminal
+   * generation, the instant the body is built and BEFORE the fetch, with the wire `messages`, `tools`, and
+   * the complete `requestBody`. The mirror of {@link onRawGeneration}. Purely observational (return value
+   * ignored, errors swallowed). Default absent. The request is handed back AS-IS — no redaction — so treat
+   * it as potentially sensitive if you persist it. See {@link PromptAssembledObserverFn}.
+   */
+  onPromptAssembled?: PromptAssembledObserverFn
+  /**
+   * OPTIONAL fallback parser for tool calls the provider's chat template did NOT return structurally.
+   *
+   * @remarks
+   * Native `/api/chat` tool-calling is authoritative: when Ollama returns `message.tool_calls`, those are
+   * used and this option is never consulted. But small models (Gemma, Phi, and others) frequently emit a
+   * tool call in a surface form the server template does not recognize — `<call:name{…}`, a fenced
+   * ```` ```json ```` block, `<tool_code…>`, or bare `name\nkey: value` — in which case the call arrives as
+   * plain `message.content` and `tool_calls` is empty, silently dropping the call. This is a cross-model,
+   * cross-weight reality, not a single-provider quirk.
+   *
+   * Set this to a parser family name (e.g. `'gemma'`), `'auto'` (try every bundled parser in priority
+   * order), or a custom {@link ToolCallParserFn} to recover such calls from `content` ONLY when the provider
+   * returned none. Recovered calls execute exactly like native ones. Default absent = disabled = today's
+   * native-only behaviour (fully backward-compatible). Mirrors the on-device batteries' `toolCallParser`,
+   * which parse from text unconditionally because those runtimes never return structured calls.
+   */
+  localToolCallParser?: ToolCallParserName | ToolCallParserFn
+  /**
+   * OPTIONAL hook to SHAPE the artifact-query tools forged from prior-turn SpooledArtifact results, before
+   * they merge into the visible tool set.
+   *
+   * @remarks
+   * When a prior tool returned a {@link @nhtio/adk!SpooledArtifact}, this battery forges that artifact class's
+   * reader tools (via `ctor.forgeTools(ctx)`) so the model can read the handle. A JSON artifact forges ~14
+   * readers (~2.4k tokens of tool schema) — an unsheddable floor on a tight window, because the forge happens
+   * INSIDE the battery, downstream of any middleware subtractive pass. This hook lets the ASSEMBLER shape that
+   * forged set: it receives the merged forged registry + the dispatch context and returns a (possibly narrowed)
+   * registry, applied BEFORE the merge with `ctx.tools`. e.g. return only the core readers
+   * (`artifact_head`, `artifact_json_get`) so a tight window fits; the rest stay reachable via
+   * `tool_catalog`/`call_a_tool`. Default absent = identity (all forged tools) = fully backward-compatible.
+   *
+   * The battery stays BUDGET-AGNOSTIC (per the CONTRIBUTING size-threshold rule): it does NOT measure or
+   * compare against `contextWindow` — it just applies whatever filter the assembler supplied. Any budget
+   * logic lives in the caller's filter (middleware-side), which legitimately knows the turn's budget.
+   */
+  forgeToolsFilter?: (forged: ToolRegistry, ctx: DispatchContext) => ToolRegistry
 }

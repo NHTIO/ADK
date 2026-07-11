@@ -5,9 +5,9 @@
  */
 
 import { isError } from '@nhtio/adk/guards'
-import { byteStoreSchema } from '@nhtio/adk/common'
 import { E_INVALID_LITERT_LM_OPTIONS } from './exceptions'
 import { validator, ValidationError } from '@nhtio/validation'
+import { byteStoreSchema, TokenEncoding } from '@nhtio/adk/common'
 import type { LiteRtLmAdapterOptions } from './types'
 
 const bucketLabelSchema = validator
@@ -29,19 +29,10 @@ const reasoningFieldPrecedenceSchema = validator
 
 const tokenEncodingSchema = validator
   .alternatives(
-    validator
-      .string()
-      .valid(
-        'gpt2',
-        'r50k_base',
-        'p50k_base',
-        'p50k_edit',
-        'cl100k_base',
-        'o200k_base',
-        'gemini',
-        'llama2',
-        'claude'
-      ),
+    // Derive the allowed set from the canonical TokenEncoding array (the single source of truth) so a
+    // newly-added encoding (e.g. 'gemma') is accepted here automatically — no drift between the counter
+    // and the validators.
+    validator.string().valid(...TokenEncoding),
     // OPTIONAL: a valid encoding string, explicit null, or absent (undefined = "no token counting").
     validator.any().valid(null).optional()
   )
@@ -54,6 +45,7 @@ const helpersSchema = validator
     descriptionToChatCompletionsJsonSchema: helperSchema.optional(),
     renderUntrustedContent: helperSchema.optional(),
     renderTrustedContent: helperSchema.optional(),
+    renderArtifactHandleBody: helperSchema.optional(),
     renderStandingInstructions: helperSchema.optional(),
     renderMemories: helperSchema.optional(),
     renderRetrievables: helperSchema.optional(),
@@ -93,20 +85,29 @@ const modelSchema = validator
 
 // NATIVE escape hatch — optional, no defaults (the shared generation resolver owns the defaults and
 // builds the effective samplerParams from the canonical `sampler`/`temperature`/`topK`/`topP`). When a
-// caller DOES pass samplerParams directly, the GREEDY/k<=1 invariant is still enforced here so a bad
-// combo fails at validation rather than exploding in the wasm runtime (`Top-K value N must be <= 1`).
+// caller DOES pass samplerParams directly, the k<=1 invariant is enforced here so a bad combo fails at
+// validation with a clear message rather than exploding in the wasm runtime (`Top-K value N must be
+// <= 1`).
+//
+// WHY k<=1 for EVERY type (not just GREEDY): this battery runs on the WebGPU sampling path, where the
+// LiteRT runtime IGNORES `type` (it always combines top-k + top-p) and the WebGPU TopK sampler requires
+// `k <= 1` regardless of type (grounded in runtime/proto/sampler_params.proto — "type … Ignored on the
+// GPU path"). So TOP_K/TOP_P with k>1 throws at generate time just like GREEDY would. Diversity comes
+// from `p` + `temperature`, not `k`.
 const samplerParamsSchema = validator
   .object({
     // 1=TOP_K, 2=TOP_P, 3=GREEDY (0=TYPE_UNSPECIFIED lets the runtime guess — disallowed here).
     type: validator.number().integer().valid(1, 2, 3).optional(),
-    // CONDITIONAL on `type`: the LiteRT GREEDY sampler is argmax/top-1 and the runtime REQUIRES `k <= 1`.
+    // The WebGPU sampling path requires k<=1 for ALL sampler types. Reject k>1 with a clear message.
     k: validator
       .number()
       .integer()
-      .when('type', {
-        is: 3,
-        then: validator.number().valid(1),
-        otherwise: validator.number().integer().min(1),
+      .valid(0, 1)
+      .messages({
+        'any.only':
+          'LiteRT-LM runs on the WebGPU sampling path, which requires samplerParams.k <= 1 ' +
+          '(the runtime ignores the sampler type and combines top-k + top-p). Use k: 1 and tune ' +
+          'p/temperature for diversity.',
       })
       .optional(),
     p: validator.number().min(0).max(1).optional(),
@@ -128,6 +129,7 @@ export const liteRtLmOptionsSchema = validator
     createEngine: validator.function().optional(),
     onInitProgress: validator.function().optional(),
     isWebGPUAvailable: validator.function().optional(),
+    forgeToolsFilter: validator.function().optional(),
     inputPromptAsHint: validator.string().optional(),
     // ── Generation: PORTABLE canonical contract (shared with transformers.js) ──
     // Optional — the shared resolver fills deterministic defaults (greedy, temp 0.7, k 40, p 0.95, max
@@ -135,7 +137,23 @@ export const liteRtLmOptionsSchema = validator
     maxTokens: validator.number().integer().min(1).optional(),
     sampler: validator.string().valid('greedy', 'top-k', 'top-p').optional(),
     temperature: validator.number().min(0).optional(),
-    topK: validator.number().integer().min(1).optional(),
+    // topK must be <= 1: this battery runs on the WebGPU sampling path, which requires k<=1 for ALL
+    // sampler types (the runtime ignores the type and combines top-k + top-p). A k>1 throws
+    // `Top-K value N must be <= 1` at generate time, so we reject it up front with guidance. Diversity
+    // comes from topP + temperature. (NOTE: the shared resolver's default topK of 40 is applied AFTER
+    // validation and is clamped to 1 in the adapter's #samplerParams — only an EXPLICIT topK>1 here is
+    // a caller error worth surfacing.)
+    topK: validator
+      .number()
+      .integer()
+      .valid(0, 1)
+      .messages({
+        'any.only':
+          'LiteRT-LM runs on the WebGPU sampling path, which requires topK <= 1 (the runtime ignores ' +
+          'the sampler type and combines top-k + top-p). Use topK: 1 and tune topP/temperature for ' +
+          'diversity.',
+      })
+      .optional(),
     topP: validator.number().min(0).max(1).optional(),
     seed: validator.number().integer().optional(),
     multimodal: validator
@@ -206,6 +224,8 @@ export const liteRtLmOptionsSchema = validator
     enableThinking: validator.boolean().default(false),
     reasoningOrphanRecovery: validator.boolean().default(true),
     extractMediaOutputs: validator.function().optional(),
+    onRawGeneration: validator.function().optional(),
+    onPromptAssembled: validator.function().optional(),
   })
   .unknown(false)
 

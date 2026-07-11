@@ -22,6 +22,8 @@ import {
   E_INVALID_OLLAMA_OPTIONS,
   E_OLLAMA_CONTEXT_OVERFLOW,
   E_OLLAMA_HTTP_ERROR,
+  ollamaToolsFromTools,
+  descriptionToChatCompletionsJsonSchema,
 } from '@nhtio/adk/batteries/llm/ollama'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
@@ -552,6 +554,90 @@ describe('OllamaAdapter — context window enforcement', () => {
       }).executor()(ctx, makeHelpers())
     ).rejects.toThrow(E_OLLAMA_CONTEXT_OVERFLOW)
     expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  // REGRESSION (same class as the LiteRT crash): the overflow tally MUST include the tool DECLARATIONS.
+  // Ollama renders `tools` through the MODEL'S OWN Go chat template server-side (per-model, not
+  // reproducible client-side), so the guard tallies the serialized wire `tools` JSON as an honest FLOOR.
+  // REAL tools → the battery's REAL ollamaToolsFromTools → a REAL Tokenizable count (no fakes): fetch is
+  // never reached (guard fires pre-dispatch).
+  const richTool = (name: string) =>
+    new Tool({
+      name,
+      description:
+        `A tool named ${name} with a deliberately verbose, multi-field input schema so its ` +
+        `serialized JSON declaration weighs many tokens.`,
+      inputSchema: validator.object({
+        query: validator.string().min(1).max(4096).description('the search query text').required(),
+        limit: validator.number().integer().min(1).max(100).description('max results to return'),
+        filters: validator
+          .object({
+            path: validator.string().description('restrict to a documentation path prefix'),
+            since: validator.string().description('ISO date lower bound'),
+            tags: validator.array().items(validator.string()).description('tag allow-list'),
+          })
+          .description('optional structured filters'),
+        verbose: validator.boolean().description('include full bodies in the result'),
+      }),
+      handler: () => 'ok',
+    })
+
+  it('counts the serialized tool declarations (a tool-heavy prompt that fits WITHOUT tools overflows WITH them)', async () => {
+    const fetchFn = vi.fn(cassetteFetch(singleOllamaResponseCassette('c', { content: 'unused' })))
+    const tools = new ToolRegistry([
+      richTool('search_docs_semantic'),
+      richTool('search_docs_keyword'),
+      richTool('provide_answer'),
+      richTool('get_current_time'),
+      richTool('calculate'),
+    ])
+    const enc = 'cl100k_base' as const
+    const sysAndMsg =
+      Tokenizable.estimateTokens('You are a helpful assistant.', enc) +
+      Tokenizable.estimateTokens('hi', enc)
+    const toolBlock = Tokenizable.estimateTokens(
+      JSON.stringify(
+        ollamaToolsFromTools(tools.visible(), { descriptionToChatCompletionsJsonSchema })
+      ),
+      enc
+    )
+    expect(toolBlock).toBeGreaterThan(sysAndMsg)
+    const contextWindow = sysAndMsg + Math.floor(toolBlock / 2)
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })], tools })
+    await expect(
+      new OllamaAdapter({
+        model: 'llama3.2',
+        stream: false,
+        tokenEncoding: enc,
+        contextWindow,
+        fetch: fetchFn as never,
+      }).executor()(ctx, makeHelpers())
+    ).rejects.toThrow(E_OLLAMA_CONTEXT_OVERFLOW)
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('does NOT overflow the same tool-heavy prompt when the window covers the tools', async () => {
+    const fetchFn = vi.fn(cassetteFetch(singleOllamaResponseCassette('c', { content: 'ok' })))
+    const tools = new ToolRegistry([richTool('search_docs_semantic'), richTool('provide_answer')])
+    const enc = 'cl100k_base' as const
+    const everything =
+      Tokenizable.estimateTokens('You are a helpful assistant.', enc) +
+      Tokenizable.estimateTokens('hi', enc) +
+      Tokenizable.estimateTokens(
+        JSON.stringify(
+          ollamaToolsFromTools(tools.visible(), { descriptionToChatCompletionsJsonSchema })
+        ),
+        enc
+      )
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })], tools })
+    await new OllamaAdapter({
+      model: 'llama3.2',
+      stream: false,
+      tokenEncoding: enc,
+      contextWindow: everything + 256,
+      fetch: fetchFn as never,
+    }).executor()(ctx, makeHelpers())
+    expect(fetchFn).toHaveBeenCalledTimes(1) // fetch WAS reached — no false overflow
   })
 })
 

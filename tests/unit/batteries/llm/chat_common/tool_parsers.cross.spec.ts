@@ -4,6 +4,8 @@ import {
   gemmaToolCallParser,
   gptOssToolCallParser,
   pythonicToolCallParser,
+  barePythonicToolCallParser,
+  looseKeyedToolCallParser,
   llama3JsonToolCallParser,
   mistralToolCallParser,
   qwen3CoderToolCallParser,
@@ -56,6 +58,293 @@ describe('tool parsers — per-family extraction', () => {
     expect(r.calls).toEqual([{ name: 'set_temp', arguments: { value: 21, active: true } }])
   })
 
+  it('gemma: a digit-LED but non-numeric bare value (UUID callId) is quoted, not dropped', () => {
+    // Raw-captured from Gemma-4 E2B on LiteRT-web reading a forged artifact handle. The bare value
+    // `1f173d33-2585-…` STARTS with a digit but is NOT a JSON number — the old `^[\d-]` guard left it
+    // unquoted (`{"callId":1f173d33-…}`), JSON.parse failed, the call was dropped, it leaked as prose,
+    // and the model re-emitted the identical `artifact_head` call forever (the duplicate-call gate
+    // never fired because nothing parsed). The fix matches a COMPLETE JSON number instead.
+    const raw = 'call:artifact_head{callId:1f173d33-2585-6720-a37e-7238969a2236,n:10}'
+    const r = gemmaToolCallParser(raw, { toolNames: ['artifact_head'] })
+    expect(r.calls).toEqual([
+      {
+        name: 'artifact_head',
+        arguments: { callId: '1f173d33-2585-6720-a37e-7238969a2236', n: 10 },
+      },
+    ])
+  })
+
+  it('gemma: single-key UUID callId (artifact_cat) parses (the value is a digit-led non-number)', () => {
+    const raw = 'call:artifact_cat{callId:1f173d33-2585-6720-a37e-7238969a2236}'
+    const r = gemmaToolCallParser(raw, { toolNames: ['artifact_cat'] })
+    expect(r.calls).toEqual([
+      { name: 'artifact_cat', arguments: { callId: '1f173d33-2585-6720-a37e-7238969a2236' } },
+    ])
+  })
+
+  it('gemma: NESTED args + curly smart quotes (real E4B provide_answer — captured verbatim)', () => {
+    // Raw-captured from Gemma-4 E4B on LiteRT-web answering a doc question. The OLD single-level
+    // `\{[^{}]*\}` regex dropped this whole call (nested `sources:[{…}]`), so a CORRECT, grounded,
+    // cited answer leaked as prose and read like a failure/abstention. The arg block nests an array of
+    // objects and uses curly `<|“|>`/`<|”|>` delimiter tokens + bare `“ ”` string glyphs throughout.
+    const raw =
+      '<|tool_call>call:provide_answer{answer:<|“|>The TurnRunner executes the agent’s turn ' +
+      'lifecycle.<|”|>,sources:[{path: “/the-loop/turn-runner”, title: “Turn Runner”},' +
+      '{path: “/api/turn_runner”, title: “Class: TurnRunner”}]}<tool_call|>'
+    const r = gemmaToolCallParser(raw, { toolNames: ['provide_answer', 'say_i_dont_know'] })
+    expect(r.calls).toEqual([
+      {
+        name: 'provide_answer',
+        arguments: {
+          answer: 'The TurnRunner executes the agent’s turn lifecycle.',
+          sources: [
+            { path: '/the-loop/turn-runner', title: 'Turn Runner' },
+            { path: '/api/turn_runner', title: 'Class: TurnRunner' },
+          ],
+        },
+      },
+    ])
+    expect(r.cleanedText).toBe('')
+  })
+
+  it('gemma: nested args also parse in the decoder-STRIPPED bare form (no wrapper, straight quotes)', () => {
+    const raw = 'call:provide_answer{answer:"Done.",sources:[{path:"/x",title:"X"}]}'
+    const r = gemmaToolCallParser(raw, { toolNames: ['provide_answer'] })
+    expect(r.calls).toEqual([
+      {
+        name: 'provide_answer',
+        arguments: { answer: 'Done.', sources: [{ path: '/x', title: 'X' }] },
+      },
+    ])
+  })
+
+  it('gemma: top-level key assigned with `=` instead of `:` (real E2B provide_answer — captured verbatim)', () => {
+    // Live capture (Gemma-4 E2B, WebGPU, 2026-06-30): the model emitted a well-formed provide_answer
+    // call but used `answer=` (EQUALS) for the top-level key while `sources`/`path` used `:`. The `=`
+    // meant the key was never quoted, the object failed JSON.parse, and the whole cited answer leaked as
+    // prose. normaliseGemmaKeySeparators rewrites the structural `=` to `:` so it parses. Straight quotes
+    // throughout — the curly quotes seen in the rendered bubble were the docs markdown processor, NOT the
+    // model (verified against the raw generation trace).
+    const raw =
+      '<|tool_call>call:provide_answer{answer="ADK is an execution chassis you assemble yourself, ' +
+      'meaning you own the implementation details like tools and storage mapping.",' +
+      'sources:[{path:"/assembly/Division of Ownership"},{path:"/assembly/The Chassis Contract"},' +
+      '{path:"/assembly/byo-llm-2"}]}<tool_call|>'
+    const r = gemmaToolCallParser(raw, { toolNames: ['provide_answer'] })
+    expect(r.calls).toEqual([
+      {
+        name: 'provide_answer',
+        arguments: {
+          answer:
+            'ADK is an execution chassis you assemble yourself, meaning you own the implementation ' +
+            'details like tools and storage mapping.',
+          sources: [
+            { path: '/assembly/Division of Ownership' },
+            { path: '/assembly/The Chassis Contract' },
+            { path: '/assembly/byo-llm-2' },
+          ],
+        },
+      },
+    ])
+    expect(r.cleanedText).toBe('')
+  })
+
+  it('gemma: an `=` INSIDE a string value is NOT treated as a key separator', () => {
+    // Guard: the `=`→`:` normalisation must be quote-aware. A value containing `=` (here a code snippet)
+    // must survive untouched — only a structural `identifier=` in key position is rewritten.
+    const raw =
+      'call:provide_answer{answer:"Set it with const x = new TurnRunner().",sources:[{path:"/x"}]}'
+    const r = gemmaToolCallParser(raw, { toolNames: ['provide_answer'] })
+    expect(r.calls).toEqual([
+      {
+        name: 'provide_answer',
+        arguments: {
+          answer: 'Set it with const x = new TurnRunner().',
+          sources: [{ path: '/x' }],
+        },
+      },
+    ])
+  })
+
+  it('gemma: wrapped form with the OUTER `}` OMITTED — `…}]<tool_call|>` (real E4B output)', () => {
+    // The decisive live-captured shape: the model closes the nested `sources` array+objects but DROPS the
+    // outer object `}` and lets `<tool_call|>` terminate the call (3 `{`, 2 `}`). The wrapped-form
+    // boundary falls back to the wrapper tail and closeUnbalancedJson repairs the missing closer. Values
+    // also carry markdown backticks + a literal apostrophe, which must survive inside the string.
+    // A real multi-paragraph answer also carries LITERAL newlines (a `\n\n` between paragraphs), which
+    // JSON.parse rejects inside a string unless escaped — canonicaliseGemmaStrings escapes them.
+    const raw =
+      '<|tool_call>call:provide_answer{answer:<|"|>The `TurnRunner` runs the agent\'s turn ' +
+      'lifecycle.\n\nSee the docs.<|"|>,sources:[{path: "/api/turn_runner.html", ' +
+      'title: "Class: TurnRunner", "section": "Methods"},' +
+      '{path: "/the-loop/turn-runner.html", title: "Turn Runner"}]<tool_call|>'
+    const r = gemmaToolCallParser(raw, { toolNames: ['provide_answer'] })
+    expect(r.calls).toEqual([
+      {
+        name: 'provide_answer',
+        arguments: {
+          answer: "The `TurnRunner` runs the agent's turn lifecycle.\n\nSee the docs.",
+          sources: [
+            { path: '/api/turn_runner.html', title: 'Class: TurnRunner', section: 'Methods' },
+            { path: '/the-loop/turn-runner.html', title: 'Turn Runner' },
+          ],
+        },
+      },
+    ])
+    expect(r.cleanedText).toBe('')
+  })
+
+  it('gemma: PREFIX-LESS bare form `NAME{…}` with no `call:` lead, gated on toolNames (real E2B/E4B)', () => {
+    // Raw-captured: `say_i_dont_know{reason: "…"}` — the model dropped the `call:` lead entirely. Gated
+    // on toolNames so a stray `word{` in prose can't false-match; an offered tool name opens the call.
+    const raw =
+      'say_i_dont_know{reason: "The available tools do not contain a general-purpose arithmetic tool."}'
+    const r = gemmaToolCallParser(raw, {
+      toolNames: ['provide_answer', 'say_i_dont_know'],
+    })
+    expect(r.calls).toEqual([
+      {
+        name: 'say_i_dont_know',
+        arguments: {
+          reason: 'The available tools do not contain a general-purpose arithmetic tool.',
+        },
+      },
+    ])
+    expect(r.cleanedText).toBe('')
+  })
+
+  it('gemma: prefix-less form does NOT fire without a toolNames gate (prose safety)', () => {
+    // `config{retries: 3}` looks like a prefix-less call but is just prose — no gate ⇒ no claim.
+    const raw = 'set the config{retries: 3} as needed'
+    expect(gemmaToolCallParser(raw, { toolNames: [] }).calls).toEqual([])
+    // …and even WITH a gate, a non-offered name is not claimed.
+    expect(gemmaToolCallParser(raw, { toolNames: ['say_i_dont_know'] }).calls).toEqual([])
+  })
+
+  it('gemma: bare (unquoted) enum-ARRAY elements — `tools_to_use:[search_docs_semantic]` (real make_plan)', () => {
+    // Live-captured verbatim from the in-browser planner: a `make_plan` call whose `tools_to_use` is an
+    // array of BARE identifiers and whose `steps` are `<|"|>…<|"|>`-delimited strings. The key branch
+    // (needs a following `:`) and the scalar-value branch (needs a leading `:`) both MISS an array
+    // element — so `[search_docs_semantic]` stayed unquoted → invalid JSON → the whole planner call
+    // failed to parse and leaked as prose. quoteBareGemmaTokens now quotes bare array elements too.
+    const raw =
+      'call:make_plan{answer_kind:doc_cited,tools_to_use:[search_docs_semantic],steps:[<|"|>Search ' +
+      'the @nhtio/adk documentation for the core thesis or main goal of the library.<|"|>,<|"|>Analyze ' +
+      'the search results to extract the most relevant passage describing the core thesis.<|"|>]}<tool_call|>'
+    const r = gemmaToolCallParser(raw, {
+      toolNames: ['make_plan', 'search_docs_semantic', 'provide_answer'],
+    })
+    expect(r.calls).toEqual([
+      {
+        name: 'make_plan',
+        arguments: {
+          answer_kind: 'doc_cited',
+          tools_to_use: ['search_docs_semantic'],
+          steps: [
+            'Search the @nhtio/adk documentation for the core thesis or main goal of the library.',
+            'Analyze the search results to extract the most relevant passage describing the core thesis.',
+          ],
+        },
+      },
+    ])
+    expect(r.cleanedText).toBe('')
+  })
+
+  it('gemma: bare array elements — multi-element + empty + number arrays all stay well-typed', () => {
+    // Multi-element enum array (each bare id quoted), an EMPTY array (no element branch fires), and a
+    // numeric array (digits are JSON-ready, so they must stay UNquoted — not stringified).
+    const multi = gemmaToolCallParser(
+      'call:make_plan{answer_kind:doc_cited,tools_to_use:[search_docs_semantic,search_docs_keyword,provide_answer]}',
+      { toolNames: ['make_plan'] }
+    )
+    expect(multi.calls[0]?.arguments).toEqual({
+      answer_kind: 'doc_cited',
+      tools_to_use: ['search_docs_semantic', 'search_docs_keyword', 'provide_answer'],
+    })
+    const empty = gemmaToolCallParser('call:make_plan{answer_kind:greeting,tools_to_use:[]}', {
+      toolNames: ['make_plan'],
+    })
+    expect(empty.calls[0]?.arguments).toEqual({ answer_kind: 'greeting', tools_to_use: [] })
+    const nums = gemmaToolCallParser('call:rank{scores:[1,2,3]}', { toolNames: ['rank'] })
+    expect(nums.calls[0]?.arguments).toEqual({ scores: [1, 2, 3] })
+  })
+
+  it('gemma: TRIPLE-QUOTE value opener — `provide_answer{answer:"""# …}` (real E2B — captured verbatim)', () => {
+    // Live capture (Gemma-4 E2B, WebGPU, 2026-07-01): the model opened the `answer` value with a
+    // Python-style TRIPLE quote `"""`. The old canonicaliser toggled string-state on EACH of the three
+    // quotes → `answer:""` (empty string) + `#…` garbage → JSON.parse failed → the whole cited answer was
+    // dropped and leaked as malformed prose (which then threw downstream: E_LLM_EXECUTION_EXECUTOR_ERROR).
+    // A run of consecutive quote delimiters must collapse to a SINGLE opening quote.
+    const raw =
+      '<|tool_call>call:provide_answer{answer:"""# Comprehensive Overview of @nhtio/adk\n\n' +
+      'The library provides a framework for building AI systems.""",sources:[{path:"/assembly",title:"Assembly"}]}<tool_call|>'
+    const r = gemmaToolCallParser(raw, { toolNames: ['provide_answer'] })
+    expect(r.calls).toEqual([
+      {
+        name: 'provide_answer',
+        arguments: {
+          answer:
+            '# Comprehensive Overview of @nhtio/adk\n\nThe library provides a framework for building AI systems.',
+          sources: [{ path: '/assembly', title: 'Assembly' }],
+        },
+      },
+    ])
+    expect(r.cleanedText).toBe('')
+  })
+
+  it('gemma: `<|"|>`-delimited elements inside a make_plan array + steps (real E2B — captured verbatim)', () => {
+    // Live capture (2026-07-01): make_plan emitted `<|"|>`-wrapped string elements inside `tools_to_use`
+    // AND `steps` arrays. Each `<|"|>` is a decoder-leaked quote delimiter and must canonicalise to a
+    // normal quoted string element — not unbalance the array scan.
+    const raw =
+      'call:make_plan{answer_kind:doc_cited,answer_scope:brief,' +
+      'tools_to_use:[<|"|>search_docs_semantic<|"|>],' +
+      'steps:[<|"|>Search the docs for the core loop.<|"|>,<|"|>Synthesize the answer.<|"|>]}'
+    const r = gemmaToolCallParser(raw, { toolNames: ['make_plan'] })
+    expect(r.calls[0]?.arguments).toEqual({
+      answer_kind: 'doc_cited',
+      answer_scope: 'brief',
+      tools_to_use: ['search_docs_semantic'],
+      steps: ['Search the docs for the core loop.', 'Synthesize the answer.'],
+    })
+  })
+
+  it('gemma: TRUNCATED provide_answer (long answer overran the output cap — unterminated string, no closers)', () => {
+    // Live capture (Gemma-4 E2B, WebGPU, 2026-07-01): a broad "give me an overview" request produced a
+    // long `provide_answer{answer:"""# …` whose body overran the output-token cap — the generation ended
+    // MID-VALUE with no closing `"""`, no `}`, no `<tool_call|>`. collectGemmaCalls used to DROP such a
+    // call (brace scan fails, no wrapper tail), so the truncated answer leaked and the turn threw
+    // E_LLM_EXECUTION_EXECUTOR_ERROR. Now: consume to end-of-string, closeUnbalancedJson closes the
+    // dangling string + missing brace, and the partial answer COMMITS instead of taking the turn down.
+    const wrapped = gemmaToolCallParser(
+      '<|tool_call>call:provide_answer{answer:"""# Overview\n\nThe library provides a framework for building apps and it kept going until it was cut',
+      { toolNames: ['provide_answer'] }
+    )
+    expect(wrapped.calls).toHaveLength(1)
+    expect(wrapped.calls[0]?.name).toBe('provide_answer')
+    expect(String(wrapped.calls[0]?.arguments.answer)).toContain('# Overview')
+    expect(String(wrapped.calls[0]?.arguments.answer)).toContain('cut')
+
+    // Same for the decoder-stripped bare head.
+    const bare = gemmaToolCallParser('call:provide_answer{answer:"""Body text that was truncated', {
+      toolNames: ['provide_answer'],
+    })
+    expect(bare.calls).toHaveLength(1)
+    expect(String(bare.calls[0]?.arguments.answer)).toContain('Body text that was truncated')
+  })
+
+  it('gemma: truncation fallback does NOT swallow trailing prose after a properly-closed call', () => {
+    // Guard: the end-of-string fallback only fires when the brace scan genuinely fails. A well-formed
+    // closed call must parse exactly and leave the trailing prose alone (not absorb it into the args).
+    const r = gemmaToolCallParser(
+      'call:provide_answer{answer:"Done.",sources:[{path:"/x"}]} and here is trailing prose.',
+      { toolNames: ['provide_answer'] }
+    )
+    expect(r.calls).toEqual([
+      { name: 'provide_answer', arguments: { answer: 'Done.', sources: [{ path: '/x' }] } },
+    ])
+  })
+
   it('gpt_oss: harmony commentary channel', () => {
     const raw =
       '<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|>'
@@ -80,6 +369,78 @@ describe('tool parsers — per-family extraction', () => {
     expect(pythonicToolCallParser(raw, CTX).calls).toEqual([
       { name: 'not_a_real_tool', arguments: { x: 'y' } },
     ])
+  })
+
+  it('bare_pythonic: NAME(k=v) without [ ] wrapper, gated on toolNames', () => {
+    // Real onnx-community/gemma-4-E2B-it-ONNX output: a single pythonic call with NO list wrapper,
+    // a leading "/", and SMART QUOTES around the args (the format the flagship hit live).
+    const raw =
+      '/provide_answer(answer=“A dispatch ends in exactly one terminal signal.”, sources=[“/the-loop/llm-dispatch”])'
+    const r = barePythonicToolCallParser(raw, {
+      toolNames: ['provide_answer', 'say_i_dont_know'],
+    })
+    expect(r.calls).toEqual([
+      {
+        name: 'provide_answer',
+        arguments: {
+          answer: 'A dispatch ends in exactly one terminal signal.',
+          sources: ['/the-loop/llm-dispatch'],
+        },
+      },
+    ])
+  })
+
+  it('bare_pythonic: gate rejects a bare call to an unoffered tool (prose safety)', () => {
+    // Without the [ ] structural signal, the callee∈toolNames gate is what prevents incidental
+    // prose like "see configure(x)" from false-positiving.
+    const raw = 'You can call configure(option="x") to set it up.'
+    expect(barePythonicToolCallParser(raw, CTX).calls).toEqual([])
+  })
+
+  it('bare_pythonic: empty toolNames declines (no gate ⇒ no claim)', () => {
+    const raw = 'provide_answer(answer="hi", sources=["/x"])'
+    expect(barePythonicToolCallParser(raw, { toolNames: [] }).calls).toEqual([])
+  })
+
+  it('loose_keyed: bare `name` line + `key: value` lines (the Gemma-4 E2B/LiteRT live form)', () => {
+    // Raw-captured verbatim from Gemma-4 E2B on LiteRT-web: the model ignores every structured grammar
+    // and emits the bare tool name then `arg: value` lines.
+    const raw = 'say_i_dont_know\nreason: The documentation does not contain a definition for that.'
+    const r = looseKeyedToolCallParser(raw, { toolNames: ['provide_answer', 'say_i_dont_know'] })
+    expect(r.calls).toEqual([
+      {
+        name: 'say_i_dont_know',
+        arguments: { reason: 'The documentation does not contain a definition for that.' },
+      },
+    ])
+    expect(r.cleanedText).toBe('')
+  })
+
+  it('loose_keyed: coerces scalar arg types (number/bool) and strips quotes', () => {
+    const raw = 'set_temp\ncity: "Paris"\ndegrees: 21\nmetric: true'
+    const r = looseKeyedToolCallParser(raw, { toolNames: ['set_temp'] })
+    expect(r.calls[0]).toEqual({
+      name: 'set_temp',
+      arguments: { city: 'Paris', degrees: 21, metric: true },
+    })
+  })
+
+  it('loose_keyed: gate — first line must be EXACTLY a known tool name (prose safety)', () => {
+    // A heading-with-colon or prose must not be misread as a call.
+    expect(looseKeyedToolCallParser('Note:\nreason: just a note', CTX).calls).toEqual([])
+    expect(looseKeyedToolCallParser('Here is what I found\nsource: /x', CTX).calls).toEqual([])
+  })
+
+  it('loose_keyed: bare name with NO key:value lines is too weak to claim', () => {
+    expect(
+      looseKeyedToolCallParser('say_i_dont_know', { toolNames: ['say_i_dont_know'] }).calls
+    ).toEqual([])
+  })
+
+  it('loose_keyed: empty toolNames declines (no gate ⇒ no claim)', () => {
+    expect(looseKeyedToolCallParser('say_i_dont_know\nreason: x', { toolNames: [] }).calls).toEqual(
+      []
+    )
   })
 
   it('llama3_json: bare {name, parameters}', () => {
@@ -238,6 +599,13 @@ describe('tool parsers — auto driver', () => {
     const r = auto('Just a normal answer.', CTX)
     expect(r.calls).toHaveLength(0)
     expect(r.cleanedText).toBe('Just a normal answer.')
+  })
+
+  it('routes the loose-keyed Gemma/LiteRT form to loose_keyed (no earlier family false-claims it)', () => {
+    const raw = 'say_i_dont_know\nreason: not in the docs'
+    const r = auto(raw, { toolNames: ['say_i_dont_know', 'provide_answer'] })
+    expect(r.calls).toEqual([{ name: 'say_i_dont_know', arguments: { reason: 'not in the docs' } }])
+    expect(r.cleanedText).toBe('')
   })
 
   it('first-wins by priority: hermes beats a bare-JSON misread', () => {

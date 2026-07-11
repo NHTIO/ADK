@@ -95,6 +95,15 @@ export type {
   ChatCompletionsHelpers,
 } from './types'
 
+// Shared wire-observability contract (the TO/FROM taps) — surfaced on the barrel so consumers can type
+// their observers.
+export type {
+  RawGenerationObservation,
+  RawGenerationObserverFn,
+  PromptAssembledObservation,
+  PromptAssembledObserverFn,
+} from '../chat_common'
+
 export { openAIChatCompletionsOptionsSchema, validateOptions } from './validation'
 
 export {

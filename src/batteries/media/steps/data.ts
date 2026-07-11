@@ -82,6 +82,9 @@ const serializeDoc = async (doc: Doc, payload: StepPayload): Promise<StepPayload
   return { ...payload, bytes: encoder.encode(JSON.stringify(doc.value, null, 2)) }
 }
 
+/** Path segments that resolve through the prototype chain rather than an own property. */
+const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
+
 /** Parse a dot/bracket path (`a.b[2].c`) into segments. */
 const parsePath = (verb: string, raw: string): Array<string | number> => {
   if (typeof raw !== 'string' || raw.trim() === '') fail(verb, 'path must be a non-empty string')
@@ -93,7 +96,21 @@ const parsePath = (verb: string, raw: string): Array<string | number> => {
     else segments.push(match[1])
   }
   if (segments.length === 0) fail(verb, `could not parse path "${raw}"`)
+  for (const segment of segments) {
+    if (typeof segment === 'string' && UNSAFE_KEYS.has(segment)) {
+      fail(verb, `path segment "${segment}" is not allowed`)
+    }
+  }
   return segments
+}
+
+/** Reject `__proto__`/`prototype`/`constructor` anywhere in a merge fragment's key tree. */
+const assertSafeObjectKeys = (verb: string, value: unknown): void => {
+  if (value === null || typeof value !== 'object') return
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (UNSAFE_KEYS.has(key)) fail(verb, `object key "${key}" is not allowed`)
+    assertSafeObjectKeys(verb, child)
+  }
 }
 
 /** Walk to the parent of the path target, creating containers when `create` is set. */
@@ -186,6 +203,7 @@ export const dataMergeStep: StepImpl = async (ctx) => {
   if (fragment === null || typeof fragment !== 'object' || Array.isArray(fragment)) {
     fail(verb, 'fragment must be a JSON object')
   }
+  assertSafeObjectKeys(verb, fragment)
   const doc = await parseDoc(verb, ctx.payload)
   if (doc.value === null || typeof doc.value !== 'object' || Array.isArray(doc.value)) {
     fail(verb, 'merge requires the document root to be an object')

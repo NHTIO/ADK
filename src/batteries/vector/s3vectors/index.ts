@@ -22,10 +22,10 @@
  */
 
 import { evaluateFilter } from '../filters'
-import { normalizeScore } from '../helpers'
 import { BaseVectorStore } from '../contract'
 import { validateRecords } from '../validation'
 import { isInstanceOf } from '@nhtio/adk/guards'
+import { normalizeScore, sanitizeMetadata } from '../helpers'
 import {
   E_VECTOR_STORE_DRIVER_UNAVAILABLE,
   E_VECTOR_STORE_CONNECTION_FAILED,
@@ -360,7 +360,7 @@ export class S3VectorsVectorStore extends BaseVectorStore {
         vectors.push({
           key: r.id,
           data: { float32: vector },
-          metadata: { ...(r.metadata ?? {}), __document: r.document ?? '' },
+          metadata: { ...sanitizeMetadata(r.metadata ?? {}), __document: r.document ?? '' },
         })
       }
 

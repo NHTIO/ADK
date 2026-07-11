@@ -18,10 +18,10 @@
  */
 
 import { evaluateFilter } from '../filters'
-import { normalizeScore } from '../helpers'
 import { BaseVectorStore } from '../contract'
 import { validateRecords } from '../validation'
 import { isInstanceOf } from '@nhtio/adk/guards'
+import { normalizeScore, sanitizeMetadata } from '../helpers'
 import {
   E_VECTOR_STORE_COLLECTION_FAILED,
   E_VECTOR_STORE_UPSERT_FAILED,
@@ -350,7 +350,7 @@ export class CloudflareVectorizeVectorStore extends BaseVectorStore {
         if (dims !== undefined && vector.length !== dims) {
           throw new E_VECTOR_STORE_DIMENSION_MISMATCH([dims, vector.length])
         }
-        const meta: any = { ...(r.metadata ?? {}) }
+        const meta: any = { ...sanitizeMetadata(r.metadata ?? {}) }
         if (r.document) meta.__document = r.document
         ndjsonLines.push(JSON.stringify({ id: r.id, values: vector, metadata: meta }))
       }

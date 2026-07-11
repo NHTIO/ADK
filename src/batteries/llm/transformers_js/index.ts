@@ -70,6 +70,10 @@ export {
   defaultGptOssToolCallParser,
   pythonicToolCallParser,
   defaultPythonicToolCallParser,
+  barePythonicToolCallParser,
+  defaultBarePythonicToolCallParser,
+  looseKeyedToolCallParser,
+  defaultLooseKeyedToolCallParser,
   llama3JsonToolCallParser,
   defaultLlama3JsonToolCallParser,
   mistralToolCallParser,
@@ -112,6 +116,10 @@ export {
   resolveGenerationOptions,
   defaultResolveGenerationOptions,
   GENERATION_DEFAULTS,
+  // shared WebGPU memory observability (surface, don't impose)
+  isGpuOutOfMemoryError,
+  probeGpuBudget,
+  instrumentGpuBuffers,
 } from './helpers'
 
 export type { TransformersJsStreamAccumulator, TransformersJsTool } from './helpers'
@@ -125,6 +133,8 @@ export type {
   BatteryLifecycleCallback,
   BatteryLifecycleHooks,
 } from './helpers'
+
+export type { GpuBudget, GpuBufferSample, GpuBufferInstrument } from './helpers'
 
 export type {
   ParsedToolCall,
@@ -140,7 +150,12 @@ export type {
 } from './helpers'
 
 // Media-output seam types (shared, defined in chat_common/types).
-export type { GeneratedMediaOutput, MediaOutputExtractorFn } from '../chat_common'
+export type {
+  GeneratedMediaOutput,
+  MediaOutputExtractorFn,
+  RawGenerationObservation,
+  RawGenerationObserverFn,
+} from '../chat_common'
 
 export type {
   TransformersJsAdapterOptions,
@@ -158,6 +173,7 @@ export type {
   TransformersJsDevice,
   TransformersJsDtype,
   TransformersJsProgressCallback,
+  TransformersJsSessionOptions,
   TransformersJsHelpers,
   TransformersJsBucketOrder,
   TransformersJsJsonSchema,
@@ -184,3 +200,7 @@ export {
   E_TRANSFORMERS_JS_TOOL_PARSE_FAILED,
   E_UNSUPPORTED_MEDIA_MODALITY,
 } from './exceptions'
+
+// Shared on-device WebGPU OOM exception (surfaced so consumers can `isInstanceOf` it structurally and
+// react — retry smaller, recycle(), switch model — instead of string-matching ORT internals).
+export { E_LLM_GPU_OUT_OF_MEMORY } from '../chat_common/exceptions'

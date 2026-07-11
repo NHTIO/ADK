@@ -40,6 +40,15 @@
  * Exceptions from spool and media artifact construction. Fatal — wrap-site validation that the
  * supplied value implements the required reader interface.
  *
+ * @groupDescription Shims
+ * Exceptions from {@link @nhtio/adk/shims!AdkShim} — the leaf-module async-resolver seam for binding
+ * a runtime-loaded ADK bundle without importing it into a module graph eagerly.
+ *
+ * @groupDescription Context
+ * Exceptions from the {@link @nhtio/adk/batteries/context!} context-management batteries (`thrift`,
+ * `compact`). Fatal — a required injected resolver (`estimateTokens`, or compact's `summarize`) was
+ * omitted; there is no degrade-and-continue path.
+ *
  * @module @nhtio/adk/exceptions
  */
 
@@ -83,4 +92,24 @@ export {
   E_LLM_EXECUTION_EXECUTOR_ERROR,
   E_READER_NOT_DESCRIBABLE,
   E_NO_READER_RESOLVER,
+  E_TOKENIZABLE_EVALUATOR_INVALID,
 } from './lib/exceptions/runtime'
+
+/**
+ * @primaryExport
+ */
+export { E_TOKEN_ESTIMATOR_SHADOWS_BUILTIN } from './lib/classes/tokenizable'
+
+/**
+ * @primaryExport
+ */
+export {
+  E_SHIM_NOT_RESOLVED,
+  E_SHIM_RESOLUTION_FAILED,
+  E_SHIM_RESOLVER_ALREADY_RESOLVED,
+} from './shims'
+
+/**
+ * @primaryExport
+ */
+export { E_CONTEXT_RESOLVER_MISSING } from './batteries/context/exceptions'

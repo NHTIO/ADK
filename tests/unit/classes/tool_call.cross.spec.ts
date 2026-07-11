@@ -116,9 +116,9 @@ describe('ToolCall', () => {
   })
 
   describe('inline field', () => {
-    it('defaults to true when omitted', () => {
+    it('defaults to false when omitted (handle-by-default: a spooled result stays out of the prompt unless a producer opts into inline:true)', () => {
       const tc = new ToolCall(validRaw())
-      expect(tc.inline).toBe(true)
+      expect(tc.inline).toBe(false)
     })
 
     it('accepts inline: false', () => {

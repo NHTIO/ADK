@@ -53,11 +53,11 @@ import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
 import { emitLifecycle } from '../chat_common/lifecycle'
 import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
+import { resolveToolCallParser } from '../chat_common/tool_parsers'
 import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import {
   Tokenizable,
-  ToolRegistry,
   ToolCall,
   Message,
   Thought,
@@ -136,6 +136,9 @@ const ADK_CONTROL_KEYS: ReadonlySet<string> = new Set([
   'isWebGPUAvailable',
   'autoAck',
   'enableThinking',
+  // Observability hooks — never sent to the engine.
+  'onRawGeneration',
+  'onPromptAssembled',
 ])
 
 // ─── Option merging ───────────────────────────────────────────────────────────
@@ -426,30 +429,10 @@ export class WebLLMChatCompletionsAdapter {
       // ── Step 2: resolve helpers ───────────────────────────────────────────
       const resolvedHelpers = resolveHelpers(merged.helpers)
 
-      // ── Step 3: forge artifact-query tools ────────────────────────────────
-      const uniqueCtors = new Set<typeof SpooledArtifact>()
-      for (const tc of ctx.turnToolCalls) {
-        const results = tc.results as unknown as { constructor?: unknown }
-        const ctor = results?.constructor
-        if (ctor && SpooledArtifact.isSpooledArtifactConstructor(ctor)) {
-          uniqueCtors.add(ctor as unknown as typeof SpooledArtifact)
-        }
-      }
-      const forgedRegistries: ToolRegistry[] = []
-      for (const ctor of uniqueCtors) {
-        const forgeFn = (
-          ctor as unknown as {
-            forgeTools?: (c: DispatchContext) => ToolRegistry
-          }
-        ).forgeTools
-        if (typeof forgeFn === 'function') {
-          forgedRegistries.push(forgeFn.call(ctor, ctx))
-        }
-      }
-      const mergedRegistry = ToolRegistry.merge([ctx.tools, ...forgedRegistries], {
-        onCollision: 'replace',
-      })
-      mergedRegistry.bindContext(ctx)
+      // ── Step 3: artifact-reader tools ─────────────────────────────────────
+      // Forged by the DispatchRunner CORE into `ctx.tools` before the input pipeline runs (generation is a
+      // generic core concern; this battery owns only representation). Read the pre-forged `ctx.tools`
+      // directly — no local merge, no bindContext here.
 
       // ── Step 4: pre-render tool-call results ──────────────────────────────
       const renderedToolCallResults = new Map<string, string | ChatCompletionsContentBlock[]>()
@@ -462,7 +445,7 @@ export class WebLLMChatCompletionsAdapter {
             | SpooledArtifact[]
             | Media
             | Media[],
-          tool: mergedRegistry.get(tc.tool) as Tool | ArtifactTool | undefined,
+          tool: ctx.tools.get(tc.tool) as Tool | ArtifactTool | undefined,
           renderUntrustedContent: resolvedHelpers.renderUntrustedContent,
           renderTrustedContent: resolvedHelpers.renderTrustedContent,
           unsupportedMediaPolicy: merged.unsupportedMediaPolicy ?? 'throw',
@@ -507,13 +490,30 @@ export class WebLLMChatCompletionsAdapter {
           const tk = new Tokenizable(textPart)
           tlTokens += await estimateTokensOf(tk, encoding)
         }
-        const total = spTokens + siTokens + memTokens + retTokens + tlTokens
+        // Tool DECLARATIONS: WebLLM sends the visible tools as `body.tools` and MLC applies the model's
+        // conversation template IN-PROCESS (browser), wrapping them per-model — so the exact rendered
+        // string isn't reproducible here without the template. Tally the serialized tool JSON (the
+        // reproducible, dominant component the adapter actually passes) as an honest FLOOR. Without this
+        // the guard undercounts a tool-heavy prompt by the entire declaration block.
+        let toolTokens = 0
+        const visibleTools = ctx.tools.visible()
+        if (visibleTools.length > 0) {
+          const toolsJson = JSON.stringify(
+            resolvedHelpers.toolsToChatCompletionsTools(visibleTools, {
+              descriptionToChatCompletionsJsonSchema:
+                resolvedHelpers.descriptionToChatCompletionsJsonSchema,
+            })
+          )
+          toolTokens = await estimateTokensOf(new Tokenizable(toolsJson), encoding)
+        }
+        const total = spTokens + siTokens + memTokens + retTokens + tlTokens + toolTokens
         const perBucketObj = {
           systemPrompt: spTokens,
           standingInstructions: siTokens,
           memories: memTokens,
           retrievables: retTokens,
           timeline: tlTokens,
+          tools: toolTokens,
         }
         helpers.log.debug({
           kind: 'context-window-usage',
@@ -560,7 +560,7 @@ export class WebLLMChatCompletionsAdapter {
       }
       const forcedForgedHits: Array<{ toolName: string }> = []
       for (const name of forcedToolNames) {
-        const t = mergedRegistry.get(name) as { ephemeral?: boolean } | undefined
+        const t = ctx.tools.get(name) as { ephemeral?: boolean } | undefined
         if (t?.ephemeral === true) {
           forcedForgedHits.push({ toolName: name })
         }
@@ -595,7 +595,7 @@ export class WebLLMChatCompletionsAdapter {
           messages: ctx.turnMessages,
           thoughts: ctx.turnThoughts,
           toolCalls: ctx.turnToolCalls,
-          tools: mergedRegistry,
+          tools: ctx.tools,
           renderedToolCallResults,
           bucketOrder: merged.bucketOrder ?? [
             'standingInstructions',
@@ -643,7 +643,7 @@ export class WebLLMChatCompletionsAdapter {
         ...(body.extra_body ?? {}),
         enable_thinking: merged.enableThinking ?? false,
       }
-      const toolsArr = mergedRegistry.visible()
+      const toolsArr = ctx.tools.visible()
       if (toolsArr.length > 0) {
         body.tools = resolvedHelpers.toolsToChatCompletionsTools(toolsArr, {
           descriptionToChatCompletionsJsonSchema:
@@ -652,6 +652,29 @@ export class WebLLMChatCompletionsAdapter {
       }
       if (reasoningPayloads.length > 0) {
         body._adk_reasoning_payloads = reasoningPayloads
+      }
+
+      // One id for this whole generation — correlates the TO tap (onPromptAssembled) with the FROM tap
+      // (onRawGeneration) below.
+      const dispatchStreamId = uuidv6()
+
+      // Prompt-assembled observability tap: the EXACT request body going TO the engine, the instant it is
+      // built and BEFORE create(). Mirror of onRawGeneration. Handed back AS-IS — no redaction — and
+      // swallow observer errors so it can never corrupt the generation path.
+      if (merged.onPromptAssembled) {
+        try {
+          merged.onPromptAssembled({
+            battery: 'webllm_chat_completions',
+            kind: 'request-body',
+            messages: body.messages,
+            tools: body.tools,
+            requestBody: body,
+            streamed: stream,
+            streamId: dispatchStreamId,
+          })
+        } catch {
+          /* observer errors are non-fatal */
+        }
       }
 
       // ── Step 7: invoke WebLLM engine ─────────────────────────────────────
@@ -685,7 +708,7 @@ export class WebLLMChatCompletionsAdapter {
 
       // ── Inner helper: persist + execute one assembled tool call ───────────
       const executeAndPersistToolCall = async (call: AssembledToolCall): Promise<void> => {
-        const tool = mergedRegistry.get(call.name)
+        const tool = ctx.tools.get(call.name)
         // Parse args defensively. The model may emit non-JSON or a non-object
         // JSON value (string, number, array, null); both are recoverable error
         // conditions, NOT dispatch-killers. A parse failure short-circuits to
@@ -749,7 +772,7 @@ export class WebLLMChatCompletionsAdapter {
           // List the tools that DO exist so the model can self-correct on the next iteration
           // instead of guessing. Without this, a single typo'd / hallucinated tool name yields
           // a dead-end "not found" with no path forward.
-          const available = mergedRegistry
+          const available = ctx.tools
             .all()
             .map((t) => t.name)
             .sort()
@@ -849,11 +872,36 @@ export class WebLLMChatCompletionsAdapter {
             isError: toolHadError,
             results,
             fromArtifactTool: isArtifactTool,
+            // ArtifactTool results are the documented exception: they inline the slice the model queried
+            // from a prior artifact (handing back a handle to a query result would be recursion). Every
+            // other result keeps the secure default (inline:false → handle).
+            inline: isArtifactTool,
             createdAt: completedAt2,
             updatedAt: completedAt2,
             completedAt: completedAt2,
           })
         )
+      }
+
+      // FALLBACK tool-call recovery. WebLLM's OpenAI-shaped `message.tool_calls` is authoritative; this is
+      // consulted ONLY when the engine returned zero structured calls AND the caller opted in via
+      // `localToolCallParser`. On-device small models routinely emit a call in a surface form the chat
+      // template does not lift into `tool_calls` (`<call:name{…}`, a ```json block, bare `name\nkey:
+      // value`), landing it in `content`. Pure parse — returns assembled calls with `args` as the JSON
+      // STRING `executeAndPersistToolCall` expects (empty when disabled or no match), so each call site can
+      // reflect them in the onRawGeneration tap and then execute. Fully backward-compatible: absent option
+      // → `[]` → today's native-only behaviour.
+      const parseFallbackToolCalls = (content: string): AssembledToolCall[] => {
+        if (merged.localToolCallParser === undefined) return []
+        if (typeof content !== 'string' || content.length === 0) return []
+        const parser = resolveToolCallParser(merged.localToolCallParser)
+        const toolNames = ctx.tools.visible().map((t) => t.name)
+        return parser(content, { toolNames }).calls.map((c) => ({
+          id: uuidv6(),
+          type: 'function' as const,
+          name: c.name,
+          args: JSON.stringify(c.arguments),
+        }))
       }
 
       const selfIdentity = merged.selfIdentity ?? 'assistant'
@@ -870,7 +918,7 @@ export class WebLLMChatCompletionsAdapter {
           return
         }
         const accumulator = resolvedHelpers.createChatCompletionsToolCallDeltaAccumulator()
-        const streamId = uuidv6()
+        const streamId = dispatchStreamId
 
         let partialMessageContent = ''
         let sawMessageDelta = false
@@ -930,7 +978,40 @@ export class WebLLMChatCompletionsAdapter {
               )
             }
           }
-          const calls = accumulator.drain()
+          const nativeCalls = accumulator.drain()
+          // Fallback recovery (opt-in): if the engine streamed no structured calls, try to parse one out of
+          // the accumulated `content`. Consulted only when native calls are absent, so the engine wins.
+          const calls =
+            nativeCalls.length > 0 ? nativeCalls : parseFallbackToolCalls(partialMessageContent)
+
+          // Raw-generation observability tap (FROM the engine) — streaming path. `rawText`/`cleanedText`
+          // are the accumulated assistant content; `toolCalls` are the calls this dispatch will act on
+          // (native, or fallback-recovered — args JSON-parsed best-effort). Fired once at stream drain;
+          // observer errors swallowed.
+          if (merged.onRawGeneration) {
+            try {
+              merged.onRawGeneration({
+                rawText: partialMessageContent,
+                cleanedText: partialMessageContent,
+                reasoning: thoughtExtracts.map((r) => r.content),
+                toolCalls: calls.map((c) => {
+                  let parsedArgs: Record<string, unknown> = {}
+                  try {
+                    const p: unknown = JSON.parse(c.args || '{}')
+                    if (isObject(p)) parsedArgs = p as Record<string, unknown>
+                  } catch {
+                    /* leave args empty on unparseable JSON */
+                  }
+                  return { name: c.name, arguments: parsedArgs as never }
+                }),
+                streamed: true,
+                streamId: dispatchStreamId,
+              })
+            } catch {
+              /* observer errors are non-fatal */
+            }
+          }
+
           helpers.log.debug({
             kind: 'accumulator-finalised',
             message: `Stream finalised: ${calls.length} tool call(s), message=${sawMessageDelta}, thoughtFields=${thoughtExtracts.length}`,
@@ -1046,19 +1127,53 @@ export class WebLLMChatCompletionsAdapter {
       }
 
       const rawCalls = msg?.tool_calls ?? []
-      if (rawCalls.length === 0) {
+      const content = typeof msg?.content === 'string' ? msg.content : ''
+
+      // Fallback recovery (opt-in): if the engine returned no structured calls, try to parse one out of the
+      // assistant `content`. Consulted only when native calls are absent, so the engine always wins.
+      const nativeCalls: AssembledToolCall[] = rawCalls.map((tc) => ({
+        id: tc.id,
+        type: tc.type ?? 'function',
+        name: tc.function?.name ?? '',
+        args: tc.function?.arguments ?? '',
+      }))
+      const calls = nativeCalls.length > 0 ? nativeCalls : parseFallbackToolCalls(content)
+
+      // Raw-generation observability tap (FROM the engine) — non-streaming path. `rawText`/`cleanedText`
+      // are the returned assistant content; `toolCalls` are the calls this dispatch will act on (native, or
+      // fallback-recovered — args JSON-parsed best-effort). Fired once per terminal generation; observer
+      // errors swallowed.
+      if (merged.onRawGeneration) {
+        try {
+          merged.onRawGeneration({
+            rawText: content,
+            cleanedText: content,
+            reasoning: reasoningExtracts.map((r) => r.content),
+            toolCalls: calls.map((c) => {
+              let parsedArgs: Record<string, unknown> = {}
+              try {
+                const p: unknown = JSON.parse(c.args || '{}')
+                if (isObject(p)) parsedArgs = p as Record<string, unknown>
+              } catch {
+                /* leave args empty on unparseable JSON */
+              }
+              return { name: c.name, arguments: parsedArgs as never }
+            }),
+            streamed: false,
+            streamId: dispatchStreamId,
+          })
+        } catch {
+          /* observer errors are non-fatal */
+        }
+      }
+
+      if (calls.length === 0) {
         // No tool calls — terminal text answer. Self-ack only when opted in;
         // otherwise the implementor's output pipeline owns completion.
         emitLifecycle(merged, 'webllm', merged.model, 'complete')
         if (merged.autoAck) ctx.ack()
         return
       }
-      const calls: AssembledToolCall[] = rawCalls.map((tc) => ({
-        id: tc.id,
-        type: tc.type ?? 'function',
-        name: tc.function?.name ?? '',
-        args: tc.function?.arguments ?? '',
-      }))
       for (const call of calls) {
         if (ctx.abortSignal.aborted) return
         await executeAndPersistToolCall(call)

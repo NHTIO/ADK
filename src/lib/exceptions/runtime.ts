@@ -600,3 +600,29 @@ export const E_NO_READER_RESOLVER = createException<[string]>(
   422,
   false
 )
+
+/**
+ * Thrown by {@link @nhtio/adk!Tokenizable} when a DYNAMIC (evaluatable) value's evaluator function fails to
+ * produce a usable string at resolve time — either it THREW, or it RETURNED A NON-STRING.
+ *
+ * @remarks
+ * An evaluatable Tokenizable wraps a `(ctx?) => string` that is invoked at prompt-assembly time (and, with
+ * no context, at measurement/serialization time). Both failure modes are PROGRAMMER errors, not recoverable
+ * runtime conditions: an evaluator that throws is buggy, and a non-string return would otherwise coerce
+ * silent garbage into the prompt (`undefined` → "undefined", an object → "[object Object]"). So we surface
+ * loudly rather than degrade — the only sanctioned fallback is the evaluator's OWN `ctx === undefined`
+ * branch, which must itself return a string. Inside a runner the throw rides the nack → error seam (a
+ * dispatch error / banner); outside a runner it propagates as the real bug it is.
+ *
+ * The single printf argument describes the failure ("threw" or "returned a non-string (<type>)"); the
+ * original error, when the evaluator threw, is attached on `cause`.
+ *
+ * @group Primitive Validation
+ */
+export const E_TOKENIZABLE_EVALUATOR_INVALID = createException<[string]>(
+  'E_TOKENIZABLE_EVALUATOR_INVALID',
+  'A dynamic Tokenizable evaluator did not produce a string: %s. The evaluator must return a string for every input (including when the context is undefined), and must not throw.',
+  'E_TOKENIZABLE_EVALUATOR_INVALID',
+  500,
+  true
+)

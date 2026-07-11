@@ -54,3 +54,25 @@ export const dimensionsMatch = (vector: number[], expected: number | undefined):
 /** `true` if `vector` is an array of finite numbers (no NaN/Infinity). */
 export const isFiniteVector = (vector: number[]): boolean =>
   Array.isArray(vector) && vector.every((n) => typeof n === 'number' && Number.isFinite(n))
+
+/** Metadata keys that resolve through the prototype chain rather than an own property. */
+const UNSAFE_METADATA_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
+
+/**
+ * Strip `__proto__`/`prototype`/`constructor` keys from caller-supplied metadata before an
+ * adapter spreads or assigns it onto a record bound for storage. Every adapter's own-object
+ * targets (`{}` literals) are already immune to prototype reassignment, but a stray
+ * `__proto__`-keyed record would otherwise round-trip verbatim through storage and back out
+ * to a caller — this keeps the stored shape honest regardless.
+ */
+export const sanitizeMetadata = <T extends Record<string, unknown> | undefined>(metadata: T): T => {
+  if (!metadata) return metadata
+  let clean: Record<string, unknown> | undefined
+  for (const key of Object.keys(metadata)) {
+    if (UNSAFE_METADATA_KEYS.has(key)) {
+      clean ??= { ...metadata }
+      delete clean[key]
+    }
+  }
+  return (clean ?? metadata) as T
+}

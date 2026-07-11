@@ -245,8 +245,16 @@ describe('stripEnvelopeSpecialTokens', () => {
     expect(stripEnvelopeSpecialTokens('<s>x</s>')).toBe('x')
   })
 
+  it('strips Gemma structural turn/tool fences that leak into prose (asymmetric pipe)', () => {
+    // Gemma emits `<|turn>…<turn|>` (turn boundary) and `<|tool>…<tool|>` (tools-block fence);
+    // a trailing `<turn|>` was leaking onto the answer. These are non-semantic — strip them.
+    expect(stripEnvelopeSpecialTokens('You received 2 items.<turn|>')).toBe('You received 2 items.')
+    expect(stripEnvelopeSpecialTokens('<|turn>model\nhi<turn|>')).toBe('model\nhi')
+    expect(stripEnvelopeSpecialTokens('<|tool>decl<tool|>')).toBe('decl')
+  })
+
   it('PRESERVES every token the parsers key on (must not over-strip)', () => {
-    // Reasoning + tool markers survive verbatim — stripping these would break the parsers.
+    // Reasoning + tool-CALL markers survive verbatim — stripping these would break the parsers.
     const hermes = '<tool_call>{"name":"x","arguments":{}}</tool_call>'
     expect(stripEnvelopeSpecialTokens(hermes)).toBe(hermes)
     const harmony = '<|channel|>analysis<|message|>think<|end|>'
@@ -255,6 +263,25 @@ describe('stripEnvelopeSpecialTokens', () => {
     expect(stripEnvelopeSpecialTokens(gptoss)).toBe(gptoss)
     const gemmaThink = '<|tool_call>call:f{a:1}<tool_call|>'
     expect(stripEnvelopeSpecialTokens(gemmaThink)).toBe(gemmaThink)
+  })
+
+  it('strips Gemma sentinel tokens that leak under streaming decode (<eos>/<bos>/turn sentinels)', () => {
+    // REGRESSION: a long stress-test turn produced a bare `<eos>` as the WHOLE assistant message.
+    // These decoder sentinels leak when decoding with skip_special_tokens:false; never semantic.
+    expect(stripEnvelopeSpecialTokens('<eos>')).toBe('')
+    expect(stripEnvelopeSpecialTokens('A complete answer.<eos>')).toBe('A complete answer.')
+    expect(stripEnvelopeSpecialTokens('<bos>hello<eos>')).toBe('hello')
+    expect(stripEnvelopeSpecialTokens('<start_of_turn>model\nhi<end_of_turn>')).toBe('model\nhi')
+  })
+
+  it('strips a bare <|tool_response> the model parrots from its INPUT framing', () => {
+    // `<|tool_response>` frames tool results in the PROMPT (input). A small model (gemma-4-E2B)
+    // sometimes echoes a bare `<|tool_response>` as its whole "answer". No parser consumes it from
+    // OUTPUT, so strip it — the misfire becomes empty prose (loop re-prompts) not a literal message.
+    expect(stripEnvelopeSpecialTokens('<|tool_response>')).toBe('')
+    // Only the bare open marker is an envelope token; any trailing content/close is left for the
+    // (input-side) renderer/parsers and is not our concern on output.
+    expect(stripEnvelopeSpecialTokens('<|tool_response>response:f{x:1}')).toBe('response:f{x:1}')
   })
 
   it('is a no-op on plain prose (and idempotent)', () => {

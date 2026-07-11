@@ -11,10 +11,10 @@
  * the RediSearch module loaded.
  */
 
-import { normalizeScore } from '../helpers'
 import { BaseVectorStore } from '../contract'
 import { validateRecords } from '../validation'
 import { isInstanceOf } from '@nhtio/adk/guards'
+import { normalizeScore, sanitizeMetadata } from '../helpers'
 import { isFilterCondition, isRawFilter, isFilterGroup } from '../filters'
 import {
   E_VECTOR_STORE_DRIVER_UNAVAILABLE,
@@ -312,7 +312,7 @@ export class RedisVectorStore extends BaseVectorStore {
         }
         if (r.document !== undefined) entries.__document = r.document
         if (r.metadata) {
-          for (const [k, v] of Object.entries(r.metadata)) {
+          for (const [k, v] of Object.entries(sanitizeMetadata(r.metadata))) {
             if (v === null || v === undefined) continue
             entries[k] = typeof v === 'object' ? JSON.stringify(v) : String(v)
           }

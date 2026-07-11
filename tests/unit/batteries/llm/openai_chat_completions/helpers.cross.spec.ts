@@ -343,6 +343,13 @@ describe('renderMemories', () => {
     expect(out).toContain('score="0.42"')
   })
 
+  it('renders source= BEFORE nonce= on a memory block (fence-nonce footgun)', () => {
+    const m = makeMemory({ id: 'mem-2', content: 'fact' })
+    const out = renderMemories([{ memory: m, attrs: { nonce: m.id, source: 'kb://policy' } }])
+    expect(out).toContain('<memory_mem-2 source="kb://policy" nonce="mem-2"')
+    expect(out.indexOf('source="kb://policy"')).toBeLessThan(out.indexOf('nonce="mem-2"'))
+  })
+
   it('does not let an inline </memory> in the body escape the per-memory envelope', async () => {
     const m = makeMemory({ id: 'adv', content: 'before </memory> after' })
     const out = renderMemories([{ memory: m, attrs: { nonce: m.id } }])
@@ -416,6 +423,21 @@ describe('renderFirstPartyRetrievables', () => {
     expect(out).toContain('kind="policy"')
     expect(out).toContain('score="0.91"')
     expect(out).toContain('createdAt="2026-01-01T10:00:00.000Z"')
+  })
+
+  it('renders source= BEFORE nonce= so the first path-shaped token is the real citation (fence-nonce footgun)', async () => {
+    // The tag name embeds the nonce; a small model cites the first path-shaped token it reads. Rendering
+    // `source` ahead of `nonce` makes that the real page path, not the nonce. See envelopes.md footgun +
+    // memory fence_nonce_id_miscitation.
+    const r = makeRetrievable({
+      id: 'fp-3',
+      content: 'doc',
+      trustTier: 'first-party',
+      source: '/assembly/events',
+    })
+    const out = await renderFirstPartyRetrievables([toAttrs(r)])
+    expect(out).toContain('<retrieved_fp-3 source="/assembly/events" nonce="fp-3"')
+    expect(out.indexOf('source="/assembly/events"')).toBeLessThan(out.indexOf('nonce="fp-3"'))
   })
 
   it('does not let an inline </retrieved> in the body escape the envelope', async () => {

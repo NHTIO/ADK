@@ -12,16 +12,8 @@
  */
 
 import type { TokenEncoding } from '@nhtio/adk'
-import type { SpoolStore } from '@nhtio/adk/common'
-import type {
-  ToolCallParserName,
-  ToolCallParserFn,
-  ReasoningParserName,
-  ReasoningParserFn,
-  BatteryLifecycleHooks,
-  ChatSampler,
-  MediaOutputExtractorFn,
-} from '../chat_common'
+import type { DispatchContext } from '@nhtio/adk/types'
+import type { SpoolStore, ToolRegistry } from '@nhtio/adk/common'
 import type {
   ChatCompletionsBucketOrder,
   ChatCompletionsHelpers,
@@ -30,6 +22,17 @@ import type {
   ReasoningFieldPrecedence,
   UnsupportedMediaPolicy,
 } from '../openai_chat_completions/types'
+import type {
+  ToolCallParserName,
+  ToolCallParserFn,
+  ReasoningParserName,
+  ReasoningParserFn,
+  BatteryLifecycleHooks,
+  ChatSampler,
+  MediaOutputExtractorFn,
+  RawGenerationObserverFn,
+  PromptAssembledObserverFn,
+} from '../chat_common'
 import type {
   Engine as LiteRtEngineClass,
   Conversation as LiteRtConversationClass,
@@ -243,6 +246,16 @@ export interface LiteRtLmAdapterOptions extends BatteryLifecycleHooks {
    */
   toolCallParser?: ToolCallParserName | ToolCallParserFn
   /**
+   * OPTIONAL hook to SHAPE the artifact-query tools forged from prior-turn SpooledArtifact results, before
+   * they merge into the visible tool set. Receives the merged forged registry + dispatch context; returns a
+   * (possibly narrowed) registry, applied BEFORE the merge with `ctx.tools`. Lets the assembler keep only the
+   * core readers on a tight window (the rest reachable via tool_catalog/call_a_tool). Default absent =
+   * identity (all forged tools) = backward-compatible. The battery stays budget-agnostic (per the CONTRIBUTING
+   * size-threshold rule) — it applies the supplied filter without measuring context; budget logic lives in the
+   * caller's filter.
+   */
+  forgeToolsFilter?: (forged: ToolRegistry, ctx: DispatchContext) => ToolRegistry
+  /**
    * How tool definitions are delivered to the model. Defaults to `'prompt'`.
    *
    * - `'prompt'` — render the tool definitions as a text block in the system prompt and parse the
@@ -284,6 +297,25 @@ export interface LiteRtLmAdapterOptions extends BatteryLifecycleHooks {
    * seam for a model that emits media content items.
    */
   extractMediaOutputs?: MediaOutputExtractorFn
+  /**
+   * Observe the model's RAW text output for each completed generation — fired once per terminal
+   * generation, after envelope-stripping + reasoning/tool-call parsing but before the result is
+   * persisted, with the complete `rawText`, the residual `cleanedText`, and the extracted
+   * `reasoning` / `toolCalls`. Purely observational (return value ignored, errors swallowed). Default
+   * absent. This is the supported seam for parser bring-up against a new model, live "why did it
+   * abstain?" debugging, and ground-truth fixture capture — the job that previously needed a temporary
+   * hook patched into the adapter. See {@link RawGenerationObserverFn}.
+   */
+  onRawGeneration?: RawGenerationObserverFn
+  /**
+   * Observe the fully-assembled prompt this battery is about to send TO the model — fired once per
+   * terminal generation, the instant assembly completes and BEFORE the engine dispatch, with the rendered
+   * `preface`, the per-turn `messages`, and the rendered `tools` block. The mirror of
+   * {@link onRawGeneration} (which taps what comes back). Purely observational (return value ignored,
+   * errors swallowed). Default absent. The request is handed back AS-IS — no redaction — so treat it as
+   * potentially sensitive if you persist it. See {@link PromptAssembledObserverFn}.
+   */
+  onPromptAssembled?: PromptAssembledObserverFn
 }
 
 /** Sampler-parameters option shape (the `type` field accepts the numeric {@link SamplerType} value). */

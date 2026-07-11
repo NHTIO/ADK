@@ -15,6 +15,169 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-07-07
+
+### Security
+
+- **Prototype pollution in the `data.*` media steps (GHSA-xwg2-cvvj-3w4v).** `data.set` and
+  `data.delete` walk a caller-supplied dot/bracket path (`a.b[2].c`) with plain bracket access
+  (`container[seg]`); a path segment of `__proto__`, `prototype`, or `constructor` resolved
+  through the real prototype chain instead of stopping at an own property, so `data.set` with
+  `path: "__proto__.polluted"` reached `Object.prototype` and poisoned every plain object in
+  the process for the remainder of its lifetime — reachable from LLM tool-call arguments via
+  the forged `media_query`/`data_set` tool surface. `parsePath` now rejects any segment in that
+  denylist before `walkToParent` ever runs, closing both verbs (they share the same parser).
+  `data.merge` used a different code path (`{ ...target }` spread) that is not independently
+  exploitable — spreading onto a fresh object literal makes `__proto__` an inert own property,
+  not a prototype reassignment — but a new `assertSafeObjectKeys` guard now rejects the same
+  three keys anywhere in a merge fragment's tree before either the shallow or deep merge
+  strategy runs, so the verb can't be used to smuggle a poisoned key back out through a
+  round-tripped document.
+- **Defense-in-depth: reject the same three keys in vector-adapter metadata.** An audit for
+  the same vulnerability class found five adapters (`pinecone`, `s3vectors`, `qdrant`, `redis`,
+  `cloudflare`) that spread caller-supplied `record.metadata` onto a fresh object literal before
+  upsert. None of these were independently exploitable for the reason above — the spread target
+  is always a new `{}`, never a walked reference — but a `__proto__`-keyed metadata object would
+  otherwise round-trip verbatim through storage and back out to a caller. A new
+  `sanitizeMetadata` helper (`src/batteries/vector/helpers.ts`) strips `__proto__`, `prototype`,
+  and `constructor` keys before each adapter's upsert path builds its stored record.
+- Audited the rest of the codebase for the same reachable-prototype-chain pattern — the
+  `data_structure` and `structured_data` tool batteries, the `apply_patch` media step, the
+  data-format `MediaEngine`, and `Registry`'s `dset`-backed path storage — and found no further
+  instances; everything else either only reads, or only ever writes to a freshly constructed
+  object.
+
+### Added
+
+- **`Tokenizable` accepts a dynamic evaluator, resolved at prompt-assembly time.** Alongside a plain
+  string, the constructor now takes a {@link TokenizableEvaluator} — a `(ctx?) => string` — so wrapped
+  content can compute itself coherent with the live `DispatchContext` it ships in (e.g. an instruction
+  that adapts to whether a tool survived the subtractive-context pass). Resolutions are cached
+  per-context in a `WeakMap` so repeated measures of the same dispatch (subtractive pass + overflow
+  guard) don't re-invoke the evaluator. A `render(ctx)` method is the explicit, context-aware read;
+  the standard string-coercion protocol (`toString`/`valueOf`/`toJSON`) resolves with no context, hitting
+  the evaluator's own `undefined`-branch fallback. An evaluator that throws or returns a non-string
+  raises the new `E_TOKENIZABLE_EVALUATOR_INVALID` — loud, no silent coercion. New `'gemma'` encoding
+  identifier for {@link Tokenizable.estimateTokens} (Gemma 2/3/4, backed by the same
+  `@lenml/tokenizer-gemini` SentencePiece vocabulary as `'gemini'` — deliberate reuse, distinct name).
+  Files: `src/lib/classes/tokenizable.ts`, `src/lib/exceptions/runtime.ts`.
+- **Token-estimation failures degrade instead of silently returning `Infinity`.** A real-tokenizer
+  failure (e.g. a special-token literal, an encoder bug) inside a `TurnRunner` run or `DispatchRunner`
+  dispatch now emits a `warning` and falls back to a char-based guesstimate, rather than the previous
+  silent `Number.POSITIVE_INFINITY` — which, combined with the overflow guards, could spuriously trip
+  an `E_*_CONTEXT_OVERFLOW` on ordinary text. Outside any runner execution, the failure still re-throws
+  (a genuine bug in non-runner code must surface). The ambient channel a runner publishes for the
+  duration of its run is `src/lib/utils/estimation_context.ts` (new) — a LIFO stack of warn-emit sinks
+  so a dispatch nested inside a turn routes to its own (richer) emitter.
+- **WebGPU memory observability for the on-device LLM batteries.** `probeGpuBudget()`
+  (`src/batteries/llm/chat_common/gpu_budget.ts`, new) reads the WebGPU adapter's buffer-size limits
+  and adapter info, non-invasively — observability only, allocates nothing. A new opt-in
+  `instrumentGpuBuffers()` wraps `GPUDevice.prototype.createBuffer` to track live/peak GPU buffer bytes
+  against that budget, for an application that wants a live "you're at X of Y GiB" gauge. Paired with a
+  new typed `E_LLM_GPU_OUT_OF_MEMORY` (`chat_common/exceptions.ts`, new) — `isGpuOutOfMemoryError()`
+  matches ORT-web's several GPU-exhaustion and WASM-linear-memory-exhaustion error signatures and both
+  the `transformers_js` and `litert_lm` batteries translate a raw provider throw into this one typed,
+  catchable error, surfaced via a non-fatal `ctx.nack(...)` rather than a throw. A new `gpuBudget` field
+  on the battery lifecycle report carries the probed snapshot. Consistent with the ADK's
+  surface-don't-impose stance: the batteries never auto-cap the caller's context window.
+- **Shared tool-call parser layer expanded and hardened.** The `gemma` parser is rewritten as a
+  string-aware balanced-brace scanner — correctly handles nested argument objects and the curly smart
+  quotes (`“…”`, `‘…’`) small models emit in place of ASCII quotes, instead of the previous lazy-regex
+  approach. Two new parser families: `'bare_pythonic'` and `'loose_keyed'` (`toolCallParser` /
+  `ToolCallParserName`). New observer seams on every LLM battery's options: `onRawGeneration` (the raw
+  model text for a completed generation, after envelope-stripping but before persistence — reasoning /
+  tool-call parser bring-up, live abstention debugging, fixture capture) and `onPromptAssembled` (the
+  fully-assembled request about to ship, the mirror tap on the way in). Both are purely observational,
+  default-absent, and consumed by all five LLM batteries (`chat_common/tool_parsers.ts`,
+  `chat_common/lifecycle.ts`, `chat_common/types.ts`).
+- **`litert_lm` battery: engine hosted in a disposable Web Worker.** New standalone worker build
+  configs — `litert-lm-worker.vite.config.mts` and `webllm-worker.vite.config.mts` — with matching
+  `build:litert-lm-worker` / `build:webllm-worker` package scripts, compiling the LiteRT-LM (IIFE,
+  classic-worker-compatible — LiteRT's Emscripten glue calls `importScripts()`, illegal in a module
+  worker) and WebLLM (ES module worker) engine handlers as separate bundles co-located with their wasm
+  assets, so a long-lived session can recover from a browser-level WebGPU device loss by terminating
+  and respawning the worker rather than reusing a dead `GPUAdapter`. The adapter's existing
+  `createEngine` injection seam (`LiteRtLmAdapterOptions.createEngine`) is what a host wires a
+  worker-backed engine through; the battery itself stays runtime-agnostic.
+- **`DispatchRunner` / `TurnRunner` emit a `WarningEvent`** observability payload — non-fatal
+  conditions (starting with the token-estimation degrade above) surfaced through the same observability
+  bus as `LogEvent` / `GenerationStatsEvent`, carrying `dispatchId`/`iteration`, a `source`, and a
+  `kind`. Executor-thrown and nacked errors also now preserve a meaningful `Error`-shaped `cause` even
+  when the thrown/nacked value is not itself a strict `Error` (a raw string or cross-realm error no
+  longer collapses to a cause-less generic wrapper) — `toErrorCause` in `src/lib/dispatch_runner.ts`.
+- **Documentation: the "Punching Above Its Weights" showcase family.** The flagship agent showcase
+  (`docs/showcase/punching-above-its-weights.md`) demonstrates building a real tool-using agent under
+  hostile conditions — Gemma-4 E2B via `LiteRtLmAdapter` in a browser tab, a 4GB GPU ceiling, a
+  live-draggable context window — technique by technique (planner book-end, subtractive pass over the
+  shipped context battery, gate cascade, artifact handles, GPU survival), each with real code embeds
+  and field-note receipts, closing on the blind-judged 5-cell evaluation matrix. Its companion
+  **"The Agent, In Full"** (`docs/showcase/punching-above-its-weights-source.md`) exposes the complete
+  31-file agent source in a read-only in-page Monaco viewer, with an LLM-consumable full-source
+  mirror emitted through the docs pipeline for coding agents to port from. Method-side pages:
+  **Token Thrift** (`docs/the-loop/token-thrift.md`, the context-discipline lever), **Behavioral
+  Rails** (`docs/the-loop/behavioral-rails.md`, gates/own-voice nudges/the planner contract), **Read
+  the Wire** (`docs/the-loop/read-the-wire.md`, evidence-directed agent debugging), and **Runtime
+  Loading** (`docs/assembly/runtime-loading.md`, the `@nhtio/adk/shims` consumption guide). The
+  underlying evaluation/research harness (corpus runs, floor calibration, adversarial threads, the
+  LiteRT worker Step-0 probe) is committed under `research/`.
+
+- **New context battery domain: `thrift` and `compact`, two strategies for what goes into one
+  dispatch's window.** `src/batteries/context/thrift` is the subtractive strategy already backing
+  the Token Thrift work above — `subtractToFit`, `stripPriorTurnThoughts`, and the calibrated
+  `selectRelevantTurns`/`scaledRelevanceFloor` relevance-based turn selection (floor constants
+  `RELEVANCE_FLOOR_MIN`/`MAX`/`CURVE` calibrated against a triple-oracle, 94-turn stress corpus) are
+  now a standalone, importable battery rather than flagship-agent-only code.
+  `src/batteries/context/compact` is new: a faithful extraction of the flagship agent's own
+  Claude-Code-style auto-compaction (`assembleCompactedTurns`, `summariseTurns`,
+  `COMPACTION_SYSTEM_PROMPT`) — keep the newest turns verbatim, fold everything older into a
+  rolling summary once it crosses a token threshold. Both batteries are built entirely on injected
+  resolvers rather than bundled capabilities: `EstimateTokensFn` (no default tokenizer) and, for
+  `compact`, `SummarizeFn` (no default model transport) — with **zero imports from `@nhtio/adk`
+  core** at the structural-contract layer (`WorkingMessage`, `WorkingMemory`, `WorkingRetrievable`,
+  and friends are locally-declared, duck-typed shapes a real core object satisfies structurally
+  without either side importing the other). This decoupling is practical against real models
+  because of the token-estimator registry added above ({@link registerTokenEstimator}) — a caller
+  can register a custom encoding's estimator without editing `Tokenizable`'s internal switch, so
+  `thrift`/`compact` work against any encoding a project uses, built-in or not. The two batteries
+  are composable: `thrift`'s `isSummaryMessage` predicate (default id `'__compact-summary'`,
+  matching `compact`'s `DEFAULT_SUMMARY_MESSAGE_ID`) protects `compact`'s rolling summary message
+  from being shed like an ordinary old turn when both run in the same pipeline. Evaluated
+  head-to-head against a naive-recency baseline across five model/window cells on a shared 94-turn
+  corpus: thrift is the lightest arm nearly everywhere and never collapses, while compact tops the
+  two cells where real context pressure meets a paid summarizer budget (kimi-k2.5 @ 128k, 1.48 vs.
+  1.13 3-judge; gemma-31b @ 128k, 2-judge pool pending its third judge) — documented in full,
+  including the naive baseline's 0.08 collapse on the kimi cell and per-cell dispatch/summarizer-
+  overhead tables, in the new `docs/batteries/context/` pages.
+
+- **`@nhtio/adk/shims` — an async-resolver seam for binding a runtime-loaded ADK bundle without
+  importing core into the consumer's module graph.** {@link createAdkShim} wraps a consumer-supplied
+  {@link AdkResolverFn} (all environment knowledge — `fetch` + dynamic `import()`, a Worker handshake,
+  a host-injected global — lives in that one function; the shim ships no loading policy of its own)
+  and returns `{ resolve, get, resolved, proxy }`: single-flight `resolve()`, a synchronous `get()` for
+  already-resolved reads, a live `resolved` boolean, and a `proxy` that replaces the hand-rolled
+  `export let Foo: typeof Module.Foo` holder pattern with one destructurable object. Memoization is
+  GC-safe — the resolved bundle is held via `WeakRef` (never strongly retained by the shim itself),
+  falling back to a plain strong reference only where `WeakRef` is unavailable. A module-scope ambient
+  variant (`registerAdkResolver` + `adk`) covers the "many files, one shared binding" case. Three typed
+  exceptions cover the failure modes: `E_SHIM_NOT_RESOLVED` (a sync read before anything resolved),
+  `E_SHIM_RESOLUTION_FAILED` (the resolver rejected or threw, cause preserved), and
+  `E_SHIM_RESOLVER_ALREADY_RESOLVED` (re-registering the ambient resolver after it already resolved
+  once — a split-brain guard). `src/shims/index.ts` is a **leaf module** — proven at dist level
+  (`shims.mjs`, 17.7KB) to import only the exceptions chunk plus `@nhtio/validation` and `fast-printf`,
+  zero core graph — and deliberately not re-exported from the root `@nhtio/adk` barrel, since doing so
+  would drag the very module graph this subpath exists to let you avoid back into the import. The docs
+  site itself now dogfoods this exact seam: `docs/.vitepress/theme/components/quickstart_demo_runtime.ts`
+  replaced its own four-times-hand-rolled memoizing loader (the one that exists because importing ADK
+  source into the VitePress module graph overflows the JS call stack on iOS WebKit) with
+  `createAdkShim(resolver)`, the resolver supplying only the docs app's URL-resolving policy.
+
+### Changed
+
+- **`@sqlite.org/sqlite-wasm` and `kysely` are now docs-site devDependencies** — used by the docs
+  site's in-browser SQLite demo tooling, never shipped in the published package. **`katex`** is now a
+  runtime `dependency` (previously absent) — it backs the math tools battery
+  (`src/batteries/tools/math/index.ts`).
+
 ## 2026-06-26
 
 ### Added

@@ -2,10 +2,10 @@
  * @module @nhtio/adk/batteries/vector/pinecone
  */
 
-import { normalizeScore } from '../helpers'
 import { BaseVectorStore } from '../contract'
 import { validateRecords } from '../validation'
 import { isInstanceOf } from '@nhtio/adk/guards'
+import { normalizeScore, sanitizeMetadata } from '../helpers'
 import { isFilterCondition, isRawFilter, isFilterGroup, evaluateFilter } from '../filters'
 import {
   E_VECTOR_STORE_DRIVER_UNAVAILABLE,
@@ -290,7 +290,7 @@ export class PineconeVectorStore extends BaseVectorStore {
       vectors.push({
         id: r.id,
         values: vector,
-        metadata: { ...r.metadata, __document: r.document ?? '' },
+        metadata: { ...sanitizeMetadata(r.metadata), __document: r.document ?? '' },
       })
     }
     try {

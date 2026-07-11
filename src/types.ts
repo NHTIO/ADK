@@ -56,7 +56,7 @@ export type {
 
 // ── Tokenizable ───────────────────────────────────────────────────────────────
 
-export type { TokenEncoding } from './lib/classes/tokenizable'
+export type { TokenEncoding, TokenEncodingId, TokenEstimatorFn } from './lib/classes/tokenizable'
 
 // ── TurnContext callback fn types ─────────────────────────────────────────────
 
@@ -179,6 +179,7 @@ export type {
   DispatchExecutorLogEntry,
   DispatchExecutorLogLevel,
   LogEvent,
+  WarningEvent,
   DispatchStartEvent,
   DispatchEndEvent,
   IterationStartEvent,

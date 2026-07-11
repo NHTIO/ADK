@@ -233,6 +233,33 @@ export interface LogEvent {
 }
 
 /**
+ * A non-fatal warning surfaced on a runner's observability bus. Distinct from `error` (which ends the
+ * turn/dispatch): a `warning` means "something degraded but we continued." The first consumer is the
+ * token-estimation contract — when a real tokenizer throws inside a runner, the estimator degrades to a
+ * char-based guesstimate and emits this instead of throwing (see `utils/estimation_context`). The event
+ * shape mirrors {@link LogEvent} so consumers can render both uniformly, with `dispatchId`/`iteration`
+ * optional because a warning can also originate from a turn-level scope (no active dispatch).
+ */
+export interface WarningEvent {
+  /** Stable identifier for the dispatch that produced the event, when one was active. */
+  dispatchId?: string
+  /** 0-based iteration index within the dispatch, when one was active. */
+  iteration?: number
+  /** When the event was emitted. */
+  emittedAt: DateTime
+  /** Which runner surfaced the warning (`'dispatch-runner'` | `'turn-runner'`), for provenance. */
+  source: string
+  /** Stable discriminator (e.g. `'token-estimation-degraded'`). */
+  kind: string
+  /** Human-readable message. */
+  message: string
+  /** The underlying error that triggered the degrade, when applicable. */
+  error?: unknown
+  /** Optional structured detail block (e.g. `{ encoding }`). */
+  payload?: Record<string, unknown>
+}
+
+/**
  * Provider-agnostic generation accounting for a single completed generation, emitted via
  * {@link DispatchExecutorHelpers.reportGenerationStats}.
  *
@@ -455,6 +482,9 @@ export type DispatchRunnerObservabilityHooks = {
   error: [[BaseException], []]
   /** Fired for every structured log event emitted by the executor via {@link DispatchExecutorHelpers.log}. */
   log: [[LogEvent], []]
+  /** Fired for a non-fatal degradation the dispatch recovered from (e.g. token-estimation fell back to a
+   * char guesstimate). Does NOT end the dispatch — distinct from `error`. */
+  warning: [[WarningEvent], []]
   /** Fired for every generation-stats record emitted via {@link DispatchExecutorHelpers.reportGenerationStats}. */
   generationStats: [[GenerationStatsEvent], []]
 }

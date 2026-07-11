@@ -24,7 +24,7 @@
  * `validateOptions` wrapper, and the five battery-scoped exception classes.
  */
 
-export { LiteRtLmAdapter } from './adapter'
+export { LiteRtLmAdapter, isEngineContextOverflowMessage } from './adapter'
 
 export {
   descriptionToChatCompletionsJsonSchema,
@@ -62,6 +62,11 @@ export {
   renderMediaToLiteRtContent,
   renderLiteRtToolResult,
   defaultRenderLiteRtToolResult,
+  // The shared artifact-handle renderer + the spooled-result structural check — exported so a host
+  // (e.g. the docs showcase) can render a tool-call chip with the EXACT handle text the model saw,
+  // instead of approximating it. Same function the executor uses → byte-identical to the model's view.
+  renderArtifactHandleBody,
+  looksLikeSpooledArtifact,
   buildLiteRtConversationInput,
   defaultBuildLiteRtConversationInput,
   createLiteRtStreamAccumulator,
@@ -100,14 +105,27 @@ export {
   resolveGenerationOptions,
   defaultResolveGenerationOptions,
   GENERATION_DEFAULTS,
+  // shared WebGPU memory observability (surface, don't impose)
+  isGpuOutOfMemoryError,
+  probeGpuBudget,
+  instrumentGpuBuffers,
 } from './helpers'
 
 export type { LiteRtStreamAccumulator } from './helpers'
 
+export type { GpuBudget, GpuBufferSample, GpuBufferInstrument } from './helpers'
+
 export type { ChatGenerationOptions, ChatSampler, ResolvedGenerationOptions } from './helpers'
 
 // Media-output seam types (shared, defined in chat_common/types).
-export type { GeneratedMediaOutput, MediaOutputExtractorFn } from '../chat_common'
+export type {
+  GeneratedMediaOutput,
+  MediaOutputExtractorFn,
+  RawGenerationObservation,
+  RawGenerationObserverFn,
+  PromptAssembledObservation,
+  PromptAssembledObserverFn,
+} from '../chat_common'
 
 export type {
   ParsedToolCall,
@@ -171,3 +189,6 @@ export {
   E_LITERT_LM_INVALID_TOOL_CALL_ARGS,
   E_UNSUPPORTED_MEDIA_MODALITY,
 } from './exceptions'
+
+// Shared on-device WebGPU OOM exception (surfaced so consumers can `isInstanceOf` it structurally).
+export { E_LLM_GPU_OUT_OF_MEMORY } from '../chat_common/exceptions'

@@ -6,9 +6,12 @@ import { validator } from '@nhtio/validation'
 import { Middleware } from '@nhtio/middleware'
 import { validateOrThrow } from './utils/validation'
 import { isError, isInstanceOf } from './utils/guards'
+import { ToolRegistry } from './classes/tool_registry'
 import { canonicalStringify } from './utils/canonical_json'
+import { SpooledArtifact } from './classes/spooled_artifact'
 import { TurnContext } from './contracts/turn_runner_context'
 import { DispatchContext } from './contracts/dispatch_context'
+import { runWithEstimationWarnings } from './utils/estimation_context'
 import {
   E_INVALID_LLM_DISPATCH_INPUT,
   E_DISPATCH_PIPELINE_ERROR,
@@ -22,6 +25,7 @@ import type { ToolCall } from './classes/tool_call'
 import type { Retrievable } from './classes/retrievable'
 import type { Tokenizable } from './classes/tokenizable'
 import type { BaseException } from './classes/base_exception'
+import type { EstimationWarning } from './utils/estimation_context'
 import type { Runner as MiddlewareRunner } from '@nhtio/middleware'
 import type { RawDispatchContext } from './contracts/dispatch_context'
 import type { TurnStreamableContent, TurnToolCallContent } from './types/turn_runner'
@@ -33,6 +37,7 @@ import type {
   DispatchExecutorLogEntry,
   DispatchExecutorLogLevel,
   LogEvent,
+  WarningEvent,
   GenerationStats,
   GenerationStatsEvent,
   ContextDelta,
@@ -41,6 +46,31 @@ import type {
   DispatchRunnerFunctionalHookRegistrations,
   DispatchRunnerObservabilityHookRegistrations,
 } from './types/dispatch_runner'
+
+/**
+ * Normalise a thrown/nacked value into an `Error` suitable for use as an exception `cause`. A strict
+ * `Error` (per {@link isError}, which is cross-realm-safe) passes through unchanged; anything else — a
+ * string, a plain object, a cross-realm error whose `instanceof Error` is false, a WASM/DOM value — is
+ * wrapped in a real `Error` whose message is the value's best string form, with the original preserved on
+ * `.cause`. This guarantees an `E_LLM_EXECUTION_EXECUTOR_ERROR` (or any wrapper) always carries a
+ * meaningful, Error-shaped cause: the true failure is never reduced to the generic default message, and
+ * downstream root-cause unwrapping / `isError` checks keep working.
+ */
+const toErrorCause = (value: unknown): Error => {
+  if (isError(value)) return value
+  let text: string
+  try {
+    text =
+      typeof value === 'string'
+        ? value
+        : value === undefined
+          ? 'undefined'
+          : (JSON.stringify(value) ?? String(value))
+  } catch {
+    text = String(value)
+  }
+  return new Error(`non-Error thrown by executor: ${text}`, { cause: value })
+}
 
 /**
  * Plain input object supplied to {@link DispatchRunner.dispatch}.
@@ -240,7 +270,9 @@ export class DispatchRunner {
     try {
       resolved = validateOrThrow(dispatchInputSchema, input, true) as typeof resolved
     } catch (err) {
-      throw new E_INVALID_LLM_DISPATCH_INPUT({ cause: isError(err) ? err : undefined })
+      throw new E_INVALID_LLM_DISPATCH_INPUT({
+        cause: isError(err) ? err : undefined,
+      })
     }
 
     if (!resolved.source && !resolved.raw) {
@@ -273,7 +305,9 @@ export class DispatchRunner {
   ): DispatchContext {
     if (source) {
       const ac = new AbortController()
-      source.abortSignal.addEventListener('abort', () => ac.abort(), { once: true })
+      source.abortSignal.addEventListener('abort', () => ac.abort(), {
+        once: true,
+      })
 
       const builtRaw: RawDispatchContext = {
         turnAbortController: ac,
@@ -354,13 +388,25 @@ export class DispatchRunner {
     // Mutation hooks → push to internal delta queue (only meaningful when source exists,
     // but registering unconditionally keeps the API uniform; queue is drained only in derived)
     ctxHooks.add('storedStandingInstruction', (v) => {
-      this.#deltaQueue.push({ op: 'store', type: 'standingInstruction', value: v })
+      this.#deltaQueue.push({
+        op: 'store',
+        type: 'standingInstruction',
+        value: v,
+      })
     })
     ctxHooks.add('mutatedStandingInstruction', (v) => {
-      this.#deltaQueue.push({ op: 'mutate', type: 'standingInstruction', value: v })
+      this.#deltaQueue.push({
+        op: 'mutate',
+        type: 'standingInstruction',
+        value: v,
+      })
     })
     ctxHooks.add('deletedStandingInstruction', (v) => {
-      this.#deltaQueue.push({ op: 'delete', type: 'standingInstruction', value: v })
+      this.#deltaQueue.push({
+        op: 'delete',
+        type: 'standingInstruction',
+        value: v,
+      })
     })
     ctxHooks.add('storedMemory', (v) => {
       this.#deltaQueue.push({ op: 'store', type: 'memory', value: v })
@@ -553,6 +599,64 @@ export class DispatchRunner {
 
   // ── Iteration loop ────────────────────────────────────────────────────────
 
+  /**
+   * Forge artifact-reader tools from the current turn's tool-call results and register them into
+   * `ctx.tools`, so the forged readers are first-class members of the tool set the whole dispatch-input plane
+   * sees (budget passes, gates, observability). This is the GENERATION step — deterministic and generic;
+   * batteries own only REPRESENTATION (rendering the declarations + resolving the model's calls).
+   *
+   * Called once per iteration before the input pipeline. Idempotent within a dispatch by construction:
+   * 1. `pruneEphemeral()` drops the previous iteration's forged readers (whose `callId` enum is now stale —
+   *    new tool calls made last iteration must widen the enum).
+   * 2. Collect the unique `SpooledArtifact` subclasses across `turnToolCalls` results, covering BOTH a single
+   *    artifact result and an array-of-artifacts result.
+   * 3. `forgeTools(ctx)` per ctor, merged with `onCollision:'keep'` so a JSON subclass's base+JSON readers
+   *    win over a plain base forge of the same names (the subclass already composes base+JSON).
+   * 4. Register each forged tool into `ctx.tools` (`overwrite:true` → idempotent re-register within a run).
+   * 5. Bind ephemeral pruning to `ack` exactly once per dispatch (the forged tools are `ephemeral:true`, so
+   *    they are pruned when the dispatch acks — the lifecycle is unchanged from the battery-local era).
+   */
+  #forgeArtifactTools(ctx: DispatchContext): void {
+    // 1. Drop stale forged readers from a prior iteration (their callId enum excludes newer calls).
+    ctx.tools.pruneEphemeral()
+
+    // 2. Collect unique SpooledArtifact subclasses producing this turn's results (single OR array results).
+    const ctors = new Set<{ forgeTools: (c: DispatchContext) => ToolRegistry }>()
+    for (const tc of ctx.turnToolCalls) {
+      const results = (tc as { results?: unknown }).results
+      const items = Array.isArray(results) ? results : [results]
+      for (const item of items) {
+        if (!SpooledArtifact.isSpooledArtifact(item)) continue
+        const ctor = (item as SpooledArtifact).constructor as unknown as {
+          forgeTools?: (c: DispatchContext) => ToolRegistry
+        }
+        if (typeof ctor.forgeTools === 'function') {
+          ctors.add(ctor as { forgeTools: (c: DispatchContext) => ToolRegistry })
+        }
+      }
+    }
+    if (ctors.size === 0) return
+
+    // 3. Forge each subclass's readers and combine. 'keep' = the first registry's tool wins on a name
+    //    collision (a JSON subclass forge composes base+JSON already, so keep it over a plain base forge).
+    const forged = ToolRegistry.merge(
+      [...ctors].map((c) => c.forgeTools(ctx)),
+      { onCollision: 'keep' }
+    )
+    if (forged.all().length === 0) return
+
+    // 4. Register the forged readers into ctx.tools so every downstream consumer (middleware, the executor's
+    //    representation step) sees the SAME set. overwrite:true keeps this idempotent across iterations.
+    for (const tool of forged.all()) {
+      ctx.tools.register(tool, true)
+      if (forged.hidden().some((h) => h.name === tool.name)) ctx.tools.hide(tool.name)
+    }
+
+    // 5. Ephemeral prune fires on ack; bind exactly once per dispatch (iteration 0) to avoid stacking
+    //    onAck subscriptions across iterations.
+    if (ctx.iteration === 0) ctx.tools.bindContext(ctx)
+  }
+
   async #runDispatch(llmCtx: DispatchContext, executor: DispatchExecutorFn): Promise<void> {
     const dispatchId = uuidv6()
     llmCtx._setDispatchId(dispatchId)
@@ -569,105 +673,141 @@ export class DispatchRunner {
     let iteration = 0
     let dispatchError: Error | undefined
 
-    try {
-      while (!llmCtx.aborted && !llmCtx.isSignalled) {
-        llmCtx._setIteration(iteration)
-        const iterationStartedAt = DateTime.now()
-        void this.#observabilityHooks
-          .runner('iterationStart')
-          .run({ dispatchId, iteration, startedAt: iterationStartedAt })
+    // Publish this dispatch's warn-sink for the duration of the run so a token estimation performed
+    // anywhere within (an executor's overflow guard, a pipeline, a gate) can DEGRADE-and-warn instead of
+    // throwing — the estimator reads the ambient sink (see utils/estimation_context). A dispatch is the
+    // INNERMOST scope, so when it runs inside a TurnRunner this sink (which carries dispatchId/iteration)
+    // takes precedence over the turn's. Non-fatal: `warning`, never `error`.
+    const emitEstimationWarning = (w: EstimationWarning): void => {
+      const event: WarningEvent = {
+        dispatchId: llmCtx.dispatchId,
+        iteration: llmCtx.iteration,
+        emittedAt: DateTime.now(),
+        source: 'dispatch-runner',
+        kind: 'token-estimation-degraded',
+        message: `token estimation for encoding "${String(w.encoding)}" failed; fell back to a char-based estimate`,
+        error: w.error,
+        payload: { encoding: w.encoding, textPreview: w.textPreview },
+      }
+      void this.#observabilityHooks.runner('warning').run(event)
+    }
 
-        await this.#runPipeline(this.#inputPipeline.runner(), llmCtx, 'input')
-        if (llmCtx.aborted || llmCtx.isSignalled) {
-          // ack mid-iteration flushes parent-mirror deltas accumulated so far;
-          // nack / abort discards them so a partial iteration cannot leak
-          // partial writes into the parent turn.
-          if (llmCtx.isAcked && !llmCtx.aborted) {
-            await this.#flush()
-          } else {
-            this.#deltaQueue.length = 0
-          }
-          break
-        }
+    await runWithEstimationWarnings(emitEstimationWarning, async () => {
+      try {
+        while (!llmCtx.aborted && !llmCtx.isSignalled) {
+          llmCtx._setIteration(iteration)
+          const iterationStartedAt = DateTime.now()
+          void this.#observabilityHooks
+            .runner('iterationStart')
+            .run({ dispatchId, iteration, startedAt: iterationStartedAt })
 
-        try {
-          await executor(llmCtx, helpers)
-        } catch (err) {
-          if (this.#isAbortError(err)) {
-            this.#deltaQueue.length = 0
+          // Forge artifact-reader tools into ctx.tools BEFORE the input pipeline, so the forged readers are
+          // first-class members of the tool set that ALL input middleware (budget/subtractive passes, gates,
+          // observability taps) can measure, evaluate, and mutate — not a battery-local set invisible to the
+          // dispatch-input plane. Runs per-iteration because ctx.turnToolCalls grows across iterations (an
+          // artifact produced in iteration N only appears in N+1). Generation is a generic core concern;
+          // batteries keep only REPRESENTATION (rendering declarations + resolving calls) and read ctx.tools.
+          this.#forgeArtifactTools(llmCtx)
+
+          await this.#runPipeline(this.#inputPipeline.runner(), llmCtx, 'input')
+          if (llmCtx.aborted || llmCtx.isSignalled) {
+            // ack mid-iteration flushes parent-mirror deltas accumulated so far;
+            // nack / abort discards them so a partial iteration cannot leak
+            // partial writes into the parent turn.
+            if (llmCtx.isAcked && !llmCtx.aborted) {
+              await this.#flush()
+            } else {
+              this.#deltaQueue.length = 0
+            }
             break
           }
-          const wrapped = new E_LLM_EXECUTION_EXECUTOR_ERROR({
-            cause: isError(err) ? err : undefined,
-          })
-          void this.#observabilityHooks.runner('error').run(wrapped as unknown as BaseException)
-          this.#deltaQueue.length = 0
-          throw wrapped
-        }
 
-        if (llmCtx.aborted || llmCtx.isSignalled) {
-          if (llmCtx.isAcked && !llmCtx.aborted) {
-            await this.#flush()
-          } else {
+          try {
+            await executor(llmCtx, helpers)
+          } catch (err) {
+            if (this.#isAbortError(err)) {
+              this.#deltaQueue.length = 0
+              break
+            }
+            // Preserve the thrown value as the cause — ALWAYS, even when it is not a strict `Error`. An
+            // executor can reject with a non-Error (a string, a cross-realm error that fails `instanceof`,
+            // a WASM/DOM value); the old `isError(err) ? err : undefined` DROPPED those, leaving a
+            // cause-less wrapper whose only text was the generic "…callback threw an error." — so the real
+            // failure was unrecoverable and undiagnosable downstream. `toErrorCause` normalises any
+            // non-Error into a real Error carrying its stringified value, keeping the `.cause` chain
+            // Error-shaped for `isError`/root-cause unwrapping.
+            const wrapped = new E_LLM_EXECUTION_EXECUTOR_ERROR({ cause: toErrorCause(err) })
+            void this.#observabilityHooks.runner('error').run(wrapped as unknown as BaseException)
             this.#deltaQueue.length = 0
+            throw wrapped
           }
-          break
+
+          if (llmCtx.aborted || llmCtx.isSignalled) {
+            if (llmCtx.isAcked && !llmCtx.aborted) {
+              await this.#flush()
+            } else {
+              this.#deltaQueue.length = 0
+            }
+            break
+          }
+
+          await this.#runPipeline(this.#outputPipeline.runner(), llmCtx, 'output')
+          await this.#flush()
+
+          const iterationEndedAt = DateTime.now()
+          void this.#observabilityHooks.runner('iterationEnd').run({
+            dispatchId,
+            iteration,
+            startedAt: iterationStartedAt,
+            endedAt: iterationEndedAt,
+            durationMs: iterationEndedAt.diff(iterationStartedAt).milliseconds,
+          })
+
+          iteration++
         }
-
-        await this.#runPipeline(this.#outputPipeline.runner(), llmCtx, 'output')
-        await this.#flush()
-
-        const iterationEndedAt = DateTime.now()
-        void this.#observabilityHooks.runner('iterationEnd').run({
-          dispatchId,
-          iteration,
-          startedAt: iterationStartedAt,
-          endedAt: iterationEndedAt,
-          durationMs: iterationEndedAt.diff(iterationStartedAt).milliseconds,
-        })
-
-        iteration++
+      } catch (err) {
+        dispatchError = isError(err) ? err : new Error(String(err))
       }
-    } catch (err) {
-      dispatchError = isError(err) ? err : new Error(String(err))
-    }
 
-    const status: DispatchEndStatus = dispatchError
-      ? 'nack'
-      : llmCtx.nackError
+      const status: DispatchEndStatus = dispatchError
         ? 'nack'
-        : llmCtx.isAcked
-          ? 'ack'
-          : 'aborted'
-    const finalError = dispatchError ?? llmCtx.nackError
+        : llmCtx.nackError
+          ? 'nack'
+          : llmCtx.isAcked
+            ? 'ack'
+            : 'aborted'
+      const finalError = dispatchError ?? llmCtx.nackError
 
-    // Parity with the thrown-executor-error path: when the dispatch ends with
-    // a nack whose cause we have not already emitted (i.e. `ctx.nack(error)`
-    // was called explicitly, rather than the executor throwing), surface the
-    // error on the observability `error` bus so observers see one unified
-    // error stream regardless of how the nack was reached.
-    if (!dispatchError && llmCtx.nackError) {
-      const nackErr = llmCtx.nackError
-      const wrapped = isInstanceOf(nackErr, 'BaseException')
-        ? (nackErr as unknown as BaseException)
-        : (new E_LLM_EXECUTION_EXECUTOR_ERROR({
-            cause: isError(nackErr) ? nackErr : undefined,
-          }) as unknown as BaseException)
-      void this.#observabilityHooks.runner('error').run(wrapped)
-    }
+      // Parity with the thrown-executor-error path: when the dispatch ends with
+      // a nack whose cause we have not already emitted (i.e. `ctx.nack(error)`
+      // was called explicitly, rather than the executor throwing), surface the
+      // error on the observability `error` bus so observers see one unified
+      // error stream regardless of how the nack was reached.
+      if (!dispatchError && llmCtx.nackError) {
+        const nackErr = llmCtx.nackError
+        const wrapped = isInstanceOf(nackErr, 'BaseException')
+          ? (nackErr as unknown as BaseException)
+          : (new E_LLM_EXECUTION_EXECUTOR_ERROR({
+              // Preserve a non-BaseException nack value as the cause too (see the executor-throw path):
+              // a raw string / cross-realm error must not be dropped to a cause-less generic wrapper.
+              cause: toErrorCause(nackErr),
+            }) as unknown as BaseException)
+        void this.#observabilityHooks.runner('error').run(wrapped)
+      }
 
-    const dispatchEndedAt = DateTime.now()
-    void this.#observabilityHooks.runner('dispatchEnd').run({
-      dispatchId,
-      status,
-      error: finalError,
-      iterations: iteration,
-      startedAt: dispatchStartedAt,
-      endedAt: dispatchEndedAt,
-      durationMs: dispatchEndedAt.diff(dispatchStartedAt).milliseconds,
+      const dispatchEndedAt = DateTime.now()
+      void this.#observabilityHooks.runner('dispatchEnd').run({
+        dispatchId,
+        status,
+        error: finalError,
+        iterations: iteration,
+        startedAt: dispatchStartedAt,
+        endedAt: dispatchEndedAt,
+        durationMs: dispatchEndedAt.diff(dispatchStartedAt).milliseconds,
+      })
+
+      if (finalError) throw finalError
     })
-
-    if (finalError) throw finalError
   }
 
   async #runPipeline(

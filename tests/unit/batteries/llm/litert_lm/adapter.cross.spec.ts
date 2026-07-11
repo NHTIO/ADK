@@ -1,7 +1,6 @@
 import { DateTime } from 'luxon'
 import { validator } from '@nhtio/validation'
 import { describe, expect, it, vi } from 'vitest'
-import { LiteRtLmAdapter, E_INVALID_LITERT_LM_OPTIONS } from '@nhtio/adk/batteries/llm/litert_lm'
 import {
   Tokenizable,
   Message,
@@ -15,9 +14,21 @@ import {
   Registry,
   inMemoryMediaReader,
 } from '@nhtio/adk/common'
+import {
+  LiteRtLmAdapter,
+  E_INVALID_LITERT_LM_OPTIONS,
+  E_LITERT_LM_CONTEXT_OVERFLOW,
+  isEngineContextOverflowMessage,
+  renderToolsAsPromptText,
+} from '@nhtio/adk/batteries/llm/litert_lm'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
-import type { LiteRtMessage, BatteryLifecycleReport } from '@nhtio/adk/batteries/llm/litert_lm'
+import type {
+  LiteRtMessage,
+  BatteryLifecycleReport,
+  RawGenerationObservation,
+  PromptAssembledObservation,
+} from '@nhtio/adk/batteries/llm/litert_lm'
 
 // ─── shared mock context / helpers (mirrors the webllm + openai battery specs) ──────────────────────
 
@@ -242,16 +253,42 @@ describe('LiteRtLmAdapter — validation', () => {
     )
   })
 
-  it('rejects k>1 under the GREEDY sampler (the runtime requires k<=1 for greedy)', () => {
-    // Caught at validation, not at generation time inside the wasm runtime (`Top-K value N must be <=1`).
-    expect(() => new LiteRtLmAdapter({ model: 'm', samplerParams: { type: 3, k: 40 } })).toThrow(
+  it('rejects samplerParams.k>1 under EVERY sampler type (WebGPU path requires k<=1)', () => {
+    // The LiteRT WebGPU sampling path IGNORES the sampler type (it always combines top-k+top-p) and
+    // requires k<=1 — so k>1 throws `Top-K value N must be <=1` at generate time for GREEDY, TOP_K, AND
+    // TOP_P alike. Caught at validation here, not deep inside the wasm runtime.
+    for (const type of [1, 2, 3] as const) {
+      expect(() => new LiteRtLmAdapter({ model: 'm', samplerParams: { type, k: 40 } })).toThrow(
+        E_INVALID_LITERT_LM_OPTIONS
+      )
+    }
+  })
+
+  it('allows samplerParams.k of 0 or 1 (the only WebGPU-valid values)', () => {
+    expect(
+      () => new LiteRtLmAdapter({ model: 'm', samplerParams: { type: 1, k: 1 } })
+    ).not.toThrow()
+    expect(
+      () => new LiteRtLmAdapter({ model: 'm', samplerParams: { type: 2, k: 0 } })
+    ).not.toThrow()
+  })
+
+  it('rejects a canonical topK>1 (WebGPU path requires topK<=1)', () => {
+    expect(() => new LiteRtLmAdapter({ model: 'm', sampler: 'top-p', topK: 40 })).toThrow(
       E_INVALID_LITERT_LM_OPTIONS
     )
   })
 
-  it('allows k>1 under the TOP_K sampler', () => {
+  it('ACCEPTS a helpers.renderArtifactHandleBody override (the wired override seam)', () => {
+    // Regression: the options validator's `helpers` schema is `.unknown(false)`, so the new override
+    // key must be explicitly allowed — otherwise a consumer passing it gets
+    // E_INVALID_LITERT_LM_OPTIONS at construction (the exact failure observed live before this fix).
     expect(
-      () => new LiteRtLmAdapter({ model: 'm', samplerParams: { type: 1, k: 64 } })
+      () =>
+        new LiteRtLmAdapter({
+          model: 'm',
+          helpers: { renderArtifactHandleBody: () => 'custom handle note' },
+        })
     ).not.toThrow()
   })
 })
@@ -311,7 +348,7 @@ describe('LiteRtLmAdapter — engine invocation', () => {
       engine: h.engine as never,
       maxTokens: 256,
       sampler: 'top-k',
-      topK: 16,
+      topK: 1, // WebGPU path requires k<=1 for all types
       topP: 0.8,
       temperature: 0.3,
     })
@@ -327,7 +364,7 @@ describe('LiteRtLmAdapter — engine invocation', () => {
     }
     // sampler:'top-k' → SamplerType.TOP_K (1); canonical knobs flow into samplerParams; maxTokens→maxOutputTokens.
     expect(cfg.sessionConfig?.samplerParams?.type).toBe(1)
-    expect(cfg.sessionConfig?.samplerParams?.k).toBe(16)
+    expect(cfg.sessionConfig?.samplerParams?.k).toBe(1)
     expect(cfg.sessionConfig?.samplerParams?.p).toBeCloseTo(0.8)
     expect(cfg.sessionConfig?.samplerParams?.temperature).toBeCloseTo(0.3)
     expect(cfg.sessionConfig?.maxOutputTokens).toBe(256)
@@ -518,6 +555,139 @@ describe('LiteRtLmAdapter — tool calls', () => {
   })
 })
 
+// ─── raw-generation observability ───────────────────────────────────────────────────────────────────
+
+describe('LiteRtLmAdapter — onRawGeneration observable', () => {
+  const echoTool = () =>
+    new Tool({
+      name: 'echo',
+      description: 'echo tool',
+      inputSchema: validator.object({ text: validator.string().required() }),
+      handler: (args: unknown) => `echoed: ${(args as { text: string }).text}`,
+    })
+
+  it('fires once per generation with rawText + the parsed reasoning/toolCalls split', async () => {
+    const seen: RawGenerationObservation[] = []
+    const h = makeEngine({
+      message: { content: 'Sure!<tool_call>{"name":"echo","arguments":{"text":"hi"}}</tool_call>' },
+    })
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      engine: h.engine as never,
+      onRawGeneration: (o: RawGenerationObservation) => seen.push(o),
+    })
+    await adapter.executor()(makeCtx({ tools: new ToolRegistry([echoTool()]) }), makeHelpers())
+
+    expect(seen).toHaveLength(1)
+    const o = seen[0]
+    // rawText is the model's COMPLETE output; cleanedText is just the residual prose.
+    expect(o.rawText).toContain('<tool_call>')
+    expect(o.rawText).toContain('Sure!')
+    expect(o.cleanedText).toBe('Sure!')
+    expect(o.toolCalls).toEqual([{ name: 'echo', arguments: { text: 'hi' } }])
+    expect(o.streamed).toBe(false)
+    expect(typeof o.streamId).toBe('string')
+  })
+
+  it('surfaces the LEAK: a tool call in a shape no parser matches stays in BOTH rawText and cleanedText', async () => {
+    // This is the whole point of the tap. The model emitted a call, but in a form the parser declines,
+    // so it silently leaks into the assistant prose. The observable is the only seam that makes the gap
+    // — rawText has the call, toolCalls is empty, cleanedText still carries it — visible to a consumer.
+    const seen: RawGenerationObservation[] = []
+    const h = makeEngine({ message: { content: 'do_thing\narg: 42' } })
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      engine: h.engine as never,
+      // No `do_thing` tool registered → loose_keyed's gate declines → the call cannot parse.
+      onRawGeneration: (o: RawGenerationObservation) => seen.push(o),
+    })
+    await adapter.executor()(makeCtx({ tools: new ToolRegistry([echoTool()]) }), makeHelpers())
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0].toolCalls).toEqual([])
+    expect(seen[0].rawText).toContain('do_thing')
+    expect(seen[0].cleanedText).toContain('do_thing') // the leak, observable
+  })
+
+  it('never lets an observer error corrupt the generation (errors are swallowed)', async () => {
+    const h = makeEngine({ message: { content: 'hello' } })
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      engine: h.engine as never,
+      onRawGeneration: () => {
+        throw new Error('observer blew up')
+      },
+    })
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })] })
+    await expect(adapter.executor()(ctx, makeHelpers())).resolves.toBeUndefined()
+    expect(ctx._stored.messages[0]?.content?.toString()).toBe('hello')
+  })
+})
+
+// ─── prompt-assembled observability (the TO tap) ─────────────────────────────────────────────────────
+
+describe('LiteRtLmAdapter — onPromptAssembled (the exact prompt sent TO the model)', () => {
+  it('fires once with the rendered preface + per-turn messages, BEFORE the engine dispatch', async () => {
+    const seen: PromptAssembledObservation[] = []
+    const h = makeEngine({ message: { content: 'hello' } })
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      engine: h.engine as never,
+      onPromptAssembled: (o: PromptAssembledObservation) => seen.push(o),
+    })
+    await adapter.executor()(
+      makeCtx({ turnMessages: [makeMessage({ content: 'ping' })] }),
+      makeHelpers()
+    )
+    expect(seen).toHaveLength(1)
+    const o = seen[0]
+    expect(o.battery).toBe('litert_lm')
+    expect(o.kind).toBe('rendered-prompt')
+    expect(o.streamed).toBe(false)
+    expect(typeof o.streamId).toBe('string')
+    // The messages handed to the engine — the ground truth the wiretap persists.
+    expect(Array.isArray(o.messages)).toBe(true)
+    // The same id correlates the TO tap with the engine's captured send.
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  it('shares one streamId between the TO tap and the FROM tap', async () => {
+    const to: PromptAssembledObservation[] = []
+    const from: RawGenerationObservation[] = []
+    const h = makeEngine({ message: { content: 'hi' } })
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      engine: h.engine as never,
+      onPromptAssembled: (o: PromptAssembledObservation) => to.push(o),
+      onRawGeneration: (o: RawGenerationObservation) => from.push(o),
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    expect(to).toHaveLength(1)
+    expect(from).toHaveLength(1)
+    expect(to[0].streamId).toBe(from[0].streamId)
+  })
+
+  it('never lets an observer error corrupt the generation (errors are swallowed)', async () => {
+    const h = makeEngine({ message: { content: 'hello' } })
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      engine: h.engine as never,
+      onPromptAssembled: () => {
+        throw new Error('observer blew up')
+      },
+    })
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })] })
+    await expect(adapter.executor()(ctx, makeHelpers())).resolves.toBeUndefined()
+    expect(ctx._stored.messages[0]?.content?.toString()).toBe('hello')
+  })
+})
+
 // ─── option layering ──────────────────────────────────────────────────────────────────────────────
 
 describe('LiteRtLmAdapter — option layering', () => {
@@ -575,6 +745,136 @@ describe('LiteRtLmAdapter — context window', () => {
       ],
     })
     await expect(adapter.executor()(ctx, makeHelpers())).rejects.toThrow(/context window/i)
+  })
+
+  // REGRESSION (the live crash): the overflow guard MUST count the rendered tool-declaration block, not
+  // just the system+timeline. With `toolDelivery:'prompt'` (the on-device Gemma path) each visible tool
+  // is rendered as its FULL JSON-Schema block — hundreds of tokens the old tally ignored, so a
+  // tool-heavy prompt sailed under the guard and blew the engine's hard cap. This test pins the fix with
+  // REAL tools → the battery's REAL renderToolsAsPromptText → a REAL Tokenizable count (no fakes): the
+  // engine is never reached (the guard throws at step 4), so no GPU/model is needed.
+  const richTool = (name: string) =>
+    new Tool({
+      name,
+      description:
+        `A tool named ${name} with a deliberately verbose, multi-field input schema so its ` +
+        `rendered JSON-Schema declaration weighs many tokens.`,
+      inputSchema: validator.object({
+        query: validator.string().min(1).max(4096).description('the search query text').required(),
+        limit: validator.number().integer().min(1).max(100).description('max results to return'),
+        filters: validator
+          .object({
+            path: validator.string().description('restrict to a documentation path prefix'),
+            since: validator.string().description('ISO date lower bound'),
+            tags: validator.array().items(validator.string()).description('tag allow-list'),
+          })
+          .description('optional structured filters'),
+        verbose: validator.boolean().description('include full bodies in the result'),
+      }),
+      handler: () => 'ok',
+    })
+
+  it('counts the rendered tool-declaration block (a tool-heavy prompt that fits WITHOUT tools overflows WITH them)', async () => {
+    const h = makeEngine({ message: { content: 'unused' } })
+    const tools = new ToolRegistry([
+      richTool('search_docs_semantic'),
+      richTool('search_docs_keyword'),
+      richTool('provide_answer'),
+      richTool('get_current_time'),
+      richTool('calculate'),
+    ])
+    // A short system prompt + short user message: the system+timeline tally alone is tiny. The ONLY way
+    // this overflows a modest window is if the rendered tool-schema block is counted too.
+    const ctx = makeCtx({
+      systemPrompt: 'You are a helpful assistant.',
+      turnMessages: [makeMessage({ content: 'hi' })],
+      tools,
+    })
+
+    // Establish the ground truth with the REAL Tokenizable + REAL renderer, so the budget is chosen
+    // relative to actual measured weights, not a magic number.
+    const enc = 'gemma' as const
+    const sysAndMsg =
+      Tokenizable.estimateTokens('You are a helpful assistant.', enc) +
+      Tokenizable.estimateTokens('hi', enc)
+    const toolBlock = Tokenizable.estimateTokens(renderToolsAsPromptText(tools.visible()), enc)
+    // Sanity: the tool block is the dominant term (this is the whole point).
+    expect(toolBlock).toBeGreaterThan(sysAndMsg)
+
+    // A window ABOVE system+message but BELOW system+message+tools: overflows ONLY because tools count.
+    const contextWindow = sysAndMsg + Math.floor(toolBlock / 2)
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      engine: h.engine as never,
+      tokenEncoding: enc,
+      contextWindow,
+    })
+    await expect(adapter.executor()(ctx, makeHelpers())).rejects.toThrow(
+      E_LITERT_LM_CONTEXT_OVERFLOW
+    )
+    // The engine was never reached — the guard fired pre-dispatch.
+    expect(h.configs).toHaveLength(0)
+  })
+
+  it('does NOT overflow the same tool-heavy prompt when the window comfortably covers the tools', async () => {
+    const h = makeEngine({ message: { content: 'ok' } })
+    const tools = new ToolRegistry([richTool('search_docs_semantic'), richTool('provide_answer')])
+    const ctx = makeCtx({
+      systemPrompt: 'You are a helpful assistant.',
+      turnMessages: [makeMessage({ content: 'hi' })],
+      tools,
+    })
+    const enc = 'gemma' as const
+    const everything =
+      Tokenizable.estimateTokens('You are a helpful assistant.', enc) +
+      Tokenizable.estimateTokens('hi', enc) +
+      Tokenizable.estimateTokens(renderToolsAsPromptText(tools.visible()), enc)
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      engine: h.engine as never,
+      autoAck: true,
+      tokenEncoding: enc,
+      contextWindow: everything + 128, // headroom above the true weight
+    })
+    await expect(adapter.executor()(ctx, makeHelpers())).resolves.toBeUndefined()
+    expect(h.configs).toHaveLength(1) // engine WAS reached — no false overflow
+  })
+})
+
+describe('LiteRtLmAdapter — engine context-cap backstop (error translation)', () => {
+  // When the pre-dispatch guard is unarmed (or undercounts), the ENGINE itself throws
+  // `Input token ids are too long. Exceeding the maximum number of tokens allowed: N >= M`. The adapter
+  // must translate that raw throw into the TYPED E_LITERT_LM_CONTEXT_OVERFLOW (via ctx.nack), so a host
+  // can catch/shed/retry instead of string-matching — and so it flows through observability as a
+  // classified error, not a generic stream error. Uses the fake engine's throwOnStream to inject the
+  // EXACT runtime message (no GPU needed to prove the translation).
+  it('translates the raw engine over-cap throw into a typed E_LITERT_LM_CONTEXT_OVERFLOW nack', async () => {
+    const h = makeEngine({
+      throwOnStream: new Error(
+        'Input token ids are too long. Exceeding the maximum number of tokens allowed: 12596 >= 12288'
+      ),
+    })
+    const adapter = new LiteRtLmAdapter({ model: 'm', stream: true, engine: h.engine as never })
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })] })
+    await adapter.executor()(ctx, makeHelpers())
+    expect(ctx.nack).toHaveBeenCalledOnce()
+    const nacked = (ctx.nack as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0]
+    expect(nacked).toBeInstanceOf(E_LITERT_LM_CONTEXT_OVERFLOW)
+    // The parsed actual/limit from the engine message are carried on the typed error.
+    expect(String((nacked as Error).message)).toMatch(/12596/)
+    expect(String((nacked as Error).message)).toMatch(/12288/)
+  })
+
+  it('isEngineContextOverflowMessage matches the runtime signature and ignores unrelated errors', () => {
+    expect(
+      isEngineContextOverflowMessage(
+        'Input token ids are too long. Exceeding the maximum number of tokens allowed: 12596 >= 12288'
+      )
+    ).toBe(true)
+    expect(isEngineContextOverflowMessage('RequestDeviceFailed: adapter lost')).toBe(false)
+    expect(isEngineContextOverflowMessage('some unrelated stream hiccup')).toBe(false)
   })
 })
 

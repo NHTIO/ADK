@@ -2,10 +2,6 @@ import { DateTime } from 'luxon'
 import { validator } from '@nhtio/validation'
 import { describe, expect, it, vi } from 'vitest'
 import {
-  TransformersJsAdapter,
-  E_INVALID_TRANSFORMERS_JS_OPTIONS,
-} from '@nhtio/adk/batteries/llm/transformers_js'
-import {
   Tokenizable,
   Message,
   Thought,
@@ -18,9 +14,18 @@ import {
   Registry,
   inMemoryMediaReader,
 } from '@nhtio/adk/common'
+import {
+  TransformersJsAdapter,
+  E_INVALID_TRANSFORMERS_JS_OPTIONS,
+  E_TRANSFORMERS_JS_CONTEXT_OVERFLOW,
+  toolsToTransformersJsTools,
+} from '@nhtio/adk/batteries/llm/transformers_js'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
-import type { BatteryLifecycleReport } from '@nhtio/adk/batteries/llm/transformers_js'
+import type {
+  BatteryLifecycleReport,
+  RawGenerationObservation,
+} from '@nhtio/adk/batteries/llm/transformers_js'
 
 // ─── shared mock context / helpers (mirrors the litert spec) ──────────────────────────────────────────
 
@@ -451,6 +456,65 @@ describe('TransformersJsAdapter — tool calls (parsed from text)', () => {
   })
 })
 
+// ─── raw-generation observability ───────────────────────────────────────────────────────────────────
+
+describe('TransformersJsAdapter — onRawGeneration observable', () => {
+  it('fires once per generation with rawText + the parsed reasoning/toolCalls split', async () => {
+    const seen: RawGenerationObservation[] = []
+    const pipe = makeFakePipeline({
+      text: 'Sure.<tool_call>{"name":"echo","arguments":{"text":"hi"}}</tool_call>',
+    })
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      pipeline: pipe as never,
+      onRawGeneration: (o: RawGenerationObservation) => seen.push(o),
+    })
+    await adapter.executor()(makeCtx({ tools: new ToolRegistry([echoTool()]) }), makeHelpers())
+
+    expect(seen).toHaveLength(1)
+    const o = seen[0]
+    expect(o.rawText).toContain('<tool_call>')
+    expect(o.cleanedText).toBe('Sure.')
+    expect(o.toolCalls).toEqual([{ name: 'echo', arguments: { text: 'hi' } }])
+    expect(o.streamed).toBe(false)
+    expect(typeof o.streamId).toBe('string')
+  })
+
+  it('surfaces the LEAK: a tool call in a shape no parser matches stays in BOTH rawText and cleanedText', async () => {
+    const seen: RawGenerationObservation[] = []
+    // A `do_thing\narg: 42` bare-keyed call to an UNREGISTERED tool → loose_keyed's gate declines.
+    const pipe = makeFakePipeline({ text: 'do_thing\narg: 42' })
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      pipeline: pipe as never,
+      onRawGeneration: (o: RawGenerationObservation) => seen.push(o),
+    })
+    await adapter.executor()(makeCtx({ tools: new ToolRegistry([echoTool()]) }), makeHelpers())
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0].toolCalls).toEqual([])
+    expect(seen[0].rawText).toContain('do_thing')
+    expect(seen[0].cleanedText).toContain('do_thing') // the leak, observable
+  })
+
+  it('never lets an observer error corrupt the generation (errors are swallowed)', async () => {
+    const pipe = makeFakePipeline({ text: 'hello' })
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      pipeline: pipe as never,
+      onRawGeneration: () => {
+        throw new Error('observer blew up')
+      },
+    })
+    const ctx = makeCtx()
+    await expect(adapter.executor()(ctx, makeHelpers())).resolves.toBeUndefined()
+    expect(ctx._stored.messages[0]?.content?.toString()).toBe('hello')
+  })
+})
+
 // ─── option layering ──────────────────────────────────────────────────────────────────────────────────
 
 describe('TransformersJsAdapter — option layering', () => {
@@ -719,5 +783,253 @@ describe('TransformersJsAdapter — media output (extractMediaOutputs seam)', ()
     expect(
       (ctx as never as { storeMediaBytes: ReturnType<typeof vi.fn> }).storeMediaBytes
     ).not.toHaveBeenCalled()
+  })
+})
+
+// ─── multimodal GPU-buffer lifecycle (the second-generate OOM regression) ──────────────────────────────
+//
+// REGRESSION: onnxruntime-web does NOT GC GPU tensors. In the manual multimodal model.generate() path
+// the battery creates the processor INPUT tensors and captures the generate OUTPUT tensor; if those
+// caller-owned GPU buffers are not disposed, the SECOND generate() on a loaded model fails with
+// "Failed to allocate memory for buffer mapping". The model matrix never caught this because every
+// cell builds a fresh adapter and generates exactly once. These tests reuse ONE adapter across TWO
+// generates and assert every caller-owned tensor was disposed.
+
+/** A fake GPU tensor: carries `location:'gpu-buffer'` and a spied `dispose()`, plus the `dims`/`slice`
+ *  the decode path reads. `slice` returns a NEW disposable tensor (mirrors the real prompt-strip). */
+const makeGpuTensor = (label: string) => {
+  const t = {
+    label,
+    location: 'gpu-buffer' as const,
+    dims: [1, 4],
+    dispose: vi.fn(),
+    slice: vi.fn(function (this: unknown) {
+      return makeGpuTensor(`${label}#slice`)
+    }),
+  }
+  return t
+}
+
+/** A fake multimodal engine whose processor returns GPU-buffer input tensors and whose model.generate
+ *  returns a GPU-buffer output tensor — every tensor a spied disposable so the test can assert frees. */
+const makeFakeMultimodalEngine = (text: string) => {
+  const created: Array<{ label: string; dispose: ReturnType<typeof vi.fn> }> = []
+  const track = <T extends { label: string; dispose: ReturnType<typeof vi.fn> }>(t: T): T => {
+    created.push(t)
+    return t
+  }
+  const processorFn = vi.fn(async () => {
+    // The processor-inputs map the adapter spreads into generate() and reads dims off of. The KEYS
+    // must stay snake_case (the transformers.js contract); the values are tracked GPU tensors.
+    return {
+      input_ids: track(makeGpuTensor('input_ids')),
+      attention_mask: track(makeGpuTensor('attention_mask')),
+      pixel_values: track(makeGpuTensor('pixel_values')),
+    }
+  })
+  const processor = Object.assign(processorFn, {
+    apply_chat_template: vi.fn(() => 'PROMPT'),
+    batch_decode: vi.fn(() => [text]),
+    tokenizer: { all_special_ids: [] },
+  })
+  const model = {
+    generate: vi.fn(async () => track(makeGpuTensor('output'))),
+  }
+  return { engine: { model, processor }, created, processor }
+}
+
+describe('TransformersJsAdapter — multimodal GPU-buffer disposal (second-generate OOM)', () => {
+  it('disposes every caller-owned GPU tensor (inputs + output) on a single generate', async () => {
+    const { engine, created } = makeFakeMultimodalEngine('a multimodal answer')
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      multimodal: { image: true },
+      multimodalEngine: engine as never,
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    // input_ids, attention_mask, pixel_values, the generate output, and the decode slice — all GPU
+    // buffers, all must be freed.
+    expect(created.length).toBeGreaterThanOrEqual(4)
+    for (const t of created) {
+      expect(t.dispose, `${t.label} was not disposed`).toHaveBeenCalled()
+    }
+  })
+
+  it('survives a SECOND generate on the SAME loaded adapter (the OOM repro)', async () => {
+    const { engine, created } = makeFakeMultimodalEngine('answer')
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      multimodal: { image: true },
+      multimodalEngine: engine as never,
+    })
+    // Two turns on one loaded adapter — the exact scenario the matrix never exercised.
+    await adapter.executor()(makeCtx(), makeHelpers())
+    const afterFirst = created.length
+    await adapter.executor()(makeCtx(), makeHelpers())
+    // The second generate created a fresh batch of tensors…
+    expect(created.length).toBeGreaterThan(afterFirst)
+    // …and EVERY tensor from BOTH generates was disposed — no buffer survives to starve the next one.
+    for (const t of created) {
+      expect(t.dispose, `${t.label} leaked across generates`).toHaveBeenCalled()
+    }
+    // The model generated twice (proving we didn't short-circuit) and processed inputs twice.
+    expect(engine.model.generate).toHaveBeenCalledTimes(2)
+  })
+
+  it('passes tool DEFINITIONS into the multimodal apply_chat_template (native tool-call cue)', async () => {
+    // REGRESSION: the multimodal path used to call apply_chat_template WITHOUT `tools`, so Gemma's
+    // template never rendered the `<|tool>…<tool|>` declarations — the model got no native cue and
+    // improvised raw JSON args no parser recognised. It must pass tools exactly like the pipeline path.
+    const { engine, processor } = makeFakeMultimodalEngine('answer')
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      multimodal: { image: true },
+      multimodalEngine: engine as never,
+    })
+    await adapter.executor()(makeCtx({ tools: new ToolRegistry([echoTool()]) }), makeHelpers())
+    expect(processor.apply_chat_template).toHaveBeenCalled()
+    const calls = processor.apply_chat_template.mock.calls as unknown as unknown[][]
+    const opts = calls[0]?.[1] as { tools?: unknown[] } | undefined
+    expect(opts?.tools, 'apply_chat_template did not receive tool definitions').toBeDefined()
+    expect(Array.isArray(opts?.tools) && opts!.tools.length).toBeGreaterThan(0)
+  })
+
+  it('omits tools from apply_chat_template when no tools are registered', async () => {
+    const { engine, processor } = makeFakeMultimodalEngine('answer')
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      autoAck: true,
+      multimodal: { image: true },
+      multimodalEngine: engine as never,
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    const calls = processor.apply_chat_template.mock.calls as unknown as unknown[][]
+    const opts = calls[0]?.[1] as { tools?: unknown[] } | undefined
+    // No registry tools → no `tools` key (don't send an empty array the template would render as a block).
+    expect(opts?.tools).toBeUndefined()
+  })
+})
+
+// ─── context window ─────────────────────────────────────────────────────────────────────────────────
+
+describe('TransformersJsAdapter — context window', () => {
+  it('throws E_TRANSFORMERS_JS_CONTEXT_OVERFLOW when the budget is exceeded', async () => {
+    const pipe = makeFakePipeline({ text: 'unused' })
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      pipeline: pipe as never,
+      tokenEncoding: 'o200k_base',
+      contextWindow: 1,
+    })
+    const ctx = makeCtx({
+      systemPrompt: 'You are a very wordy assistant with a long system prompt.',
+      turnMessages: [
+        makeMessage({
+          content: 'this is a reasonably long user message that blows the tiny budget',
+        }),
+      ],
+    })
+    await expect(adapter.executor()(ctx, makeHelpers())).rejects.toThrow(
+      E_TRANSFORMERS_JS_CONTEXT_OVERFLOW
+    )
+  })
+
+  // REGRESSION (the same class of bug that crashed LiteRT): the overflow guard MUST count the tool
+  // declarations, not just system+timeline. transformers.js feeds the visible tools to
+  // `apply_chat_template({tools})`; the reproducible dominant component is the serialized tool JSON, so
+  // the guard tallies THAT (an honest floor). This test pins it with REAL tools → the battery's REAL
+  // `toolsToTransformersJsTools` → a REAL Tokenizable count (no fakes): the pipeline is never reached.
+  const richTool = (name: string) =>
+    new Tool({
+      name,
+      description:
+        `A tool named ${name} with a deliberately verbose, multi-field input schema so its ` +
+        `serialized JSON declaration weighs many tokens.`,
+      inputSchema: validator.object({
+        query: validator.string().min(1).max(4096).description('the search query text').required(),
+        limit: validator.number().integer().min(1).max(100).description('max results to return'),
+        filters: validator
+          .object({
+            path: validator.string().description('restrict to a documentation path prefix'),
+            since: validator.string().description('ISO date lower bound'),
+            tags: validator.array().items(validator.string()).description('tag allow-list'),
+          })
+          .description('optional structured filters'),
+        verbose: validator.boolean().description('include full bodies in the result'),
+      }),
+      handler: () => 'ok',
+    })
+
+  it('counts the serialized tool declarations (a tool-heavy prompt that fits WITHOUT tools overflows WITH them)', async () => {
+    const pipe = makeFakePipeline({ text: 'unused' })
+    const tools = new ToolRegistry([
+      richTool('search_docs_semantic'),
+      richTool('search_docs_keyword'),
+      richTool('provide_answer'),
+      richTool('get_current_time'),
+      richTool('calculate'),
+    ])
+    const ctx = makeCtx({
+      systemPrompt: 'You are a helpful assistant.',
+      turnMessages: [makeMessage({ content: 'hi' })],
+      tools,
+    })
+    const enc = 'gemma' as const
+    const sysAndMsg =
+      Tokenizable.estimateTokens('You are a helpful assistant.', enc) +
+      Tokenizable.estimateTokens('hi', enc)
+    const toolBlock = Tokenizable.estimateTokens(
+      JSON.stringify(toolsToTransformersJsTools(tools.visible())),
+      enc
+    )
+    // Sanity: the tool block is the dominant term (this is the whole point).
+    expect(toolBlock).toBeGreaterThan(sysAndMsg)
+    // A window ABOVE system+message but BELOW system+message+tools: overflows ONLY because tools count.
+    const contextWindow = sysAndMsg + Math.floor(toolBlock / 2)
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      pipeline: pipe as never,
+      tokenEncoding: enc,
+      contextWindow,
+    })
+    await expect(adapter.executor()(ctx, makeHelpers())).rejects.toThrow(
+      E_TRANSFORMERS_JS_CONTEXT_OVERFLOW
+    )
+    // The pipeline was never reached — the guard fired pre-dispatch.
+    expect((pipe as unknown as { calls: unknown[] }).calls).toHaveLength(0)
+  })
+
+  it('does NOT overflow the same tool-heavy prompt when the window comfortably covers the tools', async () => {
+    const pipe = makeFakePipeline({ text: 'ok' })
+    const tools = new ToolRegistry([richTool('search_docs_semantic'), richTool('provide_answer')])
+    const ctx = makeCtx({
+      systemPrompt: 'You are a helpful assistant.',
+      turnMessages: [makeMessage({ content: 'hi' })],
+      tools,
+    })
+    const enc = 'gemma' as const
+    const everything =
+      Tokenizable.estimateTokens('You are a helpful assistant.', enc) +
+      Tokenizable.estimateTokens('hi', enc) +
+      Tokenizable.estimateTokens(JSON.stringify(toolsToTransformersJsTools(tools.visible())), enc)
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      pipeline: pipe as never,
+      autoAck: true,
+      tokenEncoding: enc,
+      contextWindow: everything + 128, // headroom above the true weight
+    })
+    await expect(adapter.executor()(ctx, makeHelpers())).resolves.toBeUndefined()
+    expect((pipe as unknown as { calls: unknown[] }).calls).toHaveLength(1) // pipeline WAS reached
   })
 })

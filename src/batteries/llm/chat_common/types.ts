@@ -16,6 +16,7 @@
  * native message/chunk objects) live in each battery's own `types.ts`, not here.
  */
 
+import type { ParsedToolCall } from './tool_parsers'
 import type {
   Tokenizable,
   Memory,
@@ -96,7 +97,15 @@ export interface JsonSchema {
  * Attribute bag rendered onto the trust envelope that wraps untrusted (third-party) content.
  */
 export interface UntrustedContentAttrs {
-  /** Per-render nonce binding the envelope's open and close markers together. */
+  /**
+   * Nonce binding the envelope's open and close markers together — it becomes part of the tag NAME
+   * (`<..._<nonce>>`) so a model mirroring the fence cannot forge a sibling's closer.
+   *
+   * FOOTGUN: this nonce MUST be unguessable AND non-path-shaped. It is typically the source record's id; a
+   * path-shaped id (e.g. `chunk-assembly-events-9`) is copied by small models as a CITATION
+   * (`/assembly/events-9`), which a doc-path validator then rejects → re-cite loop. Mint record ids with
+   * `crypto.randomUUID()`; carry page/human provenance in `source=` (rendered before `nonce=`), never in the id.
+   */
   nonce: string
   /** Content classifier rendered on the envelope. */
   kind: string
@@ -114,7 +123,15 @@ export interface UntrustedContentAttrs {
  * Attribute bag rendered onto the trust envelope that wraps trusted (first-party) content.
  */
 export interface TrustedContentAttrs {
-  /** Per-render nonce binding the envelope's open and close markers together. */
+  /**
+   * Nonce binding the envelope's open and close markers together — it becomes part of the tag NAME
+   * (`<..._<nonce>>`) so a model mirroring the fence cannot forge a sibling's closer.
+   *
+   * FOOTGUN: this nonce MUST be unguessable AND non-path-shaped. It is typically the source record's id; a
+   * path-shaped id (e.g. `chunk-assembly-events-9`) is copied by small models as a CITATION
+   * (`/assembly/events-9`), which a doc-path validator then rejects → re-cite loop. Mint record ids with
+   * `crypto.randomUUID()`; carry page/human provenance in `source=` (rendered before `nonce=`), never in the id.
+   */
   nonce: string
   /** Content classifier rendered on the envelope. */
   kind: string
@@ -138,7 +155,15 @@ export interface StandingInstructionAttrs {
  * Attribute bag rendered onto a memory block.
  */
 export interface MemoryAttrs {
-  /** Per-render nonce binding the block's open and close markers together. */
+  /**
+   * Nonce binding the block's open and close markers together — it becomes part of the tag NAME
+   * (`<..._<nonce>>`) so a model mirroring the block cannot forge a sibling's closer.
+   *
+   * FOOTGUN: this nonce MUST be unguessable AND non-path-shaped. It is typically the source record's id; a
+   * path-shaped id (e.g. `chunk-assembly-events-9`) is copied by small models as a CITATION
+   * (`/assembly/events-9`), which a doc-path validator then rejects → re-cite loop. Mint record ids with
+   * `crypto.randomUUID()`; carry page/human provenance in `source=` (rendered before `nonce=`), never in the id.
+   */
   nonce: string
   /** Origin of the memory (e.g. the producing subsystem). */
   source?: string
@@ -154,7 +179,15 @@ export interface MemoryAttrs {
  * Attribute bag rendered onto a retrievable block.
  */
 export interface RetrievableAttrs {
-  /** Per-render nonce binding the block's open and close markers together. */
+  /**
+   * Nonce binding the block's open and close markers together — it becomes part of the tag NAME
+   * (`<..._<nonce>>`) so a model mirroring the block cannot forge a sibling's closer.
+   *
+   * FOOTGUN: this nonce MUST be unguessable AND non-path-shaped. It is typically the source record's id; a
+   * path-shaped id (e.g. `chunk-assembly-events-9`) is copied by small models as a CITATION
+   * (`/assembly/events-9`), which a doc-path validator then rejects → re-cite loop. Mint record ids with
+   * `crypto.randomUUID()`; carry page/human provenance in `source=` (rendered before `nonce=`), never in the id.
+   */
   nonce: string
   /** Origin of the retrievable (e.g. the source document or system). */
   source?: string
@@ -170,7 +203,15 @@ export interface RetrievableAttrs {
  * Attribute bag rendered onto a thought block.
  */
 export interface ThoughtAttrs {
-  /** Per-render nonce binding the block's open and close markers together. */
+  /**
+   * Nonce binding the block's open and close markers together — it becomes part of the tag NAME
+   * (`<..._<nonce>>`) so a model mirroring the block cannot forge a sibling's closer.
+   *
+   * FOOTGUN: this nonce MUST be unguessable AND non-path-shaped. It is typically the source record's id; a
+   * path-shaped id (e.g. `chunk-assembly-events-9`) is copied by small models as a CITATION
+   * (`/assembly/events-9`), which a doc-path validator then rejects → re-cite loop. Mint record ids with
+   * `crypto.randomUUID()`; carry page/human provenance in `source=` (rendered before `nonce=`), never in the id.
+   */
   nonce: string
   /** Whether the thought is the model's own, a peer's, or opaque vendor reasoning. */
   kind: 'self-reasoning' | 'peer-reasoning' | 'opaque-reasoning'
@@ -284,6 +325,121 @@ export type MediaOutputExtractorFn = (
   result: unknown
 ) => GeneratedMediaOutput[] | Promise<GeneratedMediaOutput[]>
 
+// ─── Raw generation observability (the model's text BEFORE parsing) ───────────
+
+/**
+ * One observation of a battery's raw model output for a single completed generation, fired the instant
+ * the full text is in hand — AFTER envelope-token stripping + reasoning/tool-call parsing, but BEFORE
+ * the parsed result is persisted. The whole point is to expose the gap between what the model literally
+ * emitted (`rawText`) and what the battery managed to extract (`cleanedText` / `toolCalls` /
+ * `reasoning`): when a small on-device model emits a tool call in a shape no parser matches, the call
+ * silently leaks into `cleanedText` as prose, and this is the ONLY seam where that is visible.
+ *
+ * @remarks
+ * This is a pure observability tap — it returns `void`, never mutates the result, and never throws into
+ * the generation path (the adapter swallows callback errors). It fires once per terminal generation
+ * (one per non-streamed turn; one per stream at stream end), for BOTH the transformers.js and LiteRT-LM
+ * on-device batteries, at the identical point in each. Use it for parser bring-up against a new model,
+ * live debugging ("why did the agent abstain?"), or capturing ground-truth fixtures — exactly the job
+ * that previously required patching a temporary hook into the adapter.
+ */
+export interface RawGenerationObservation {
+  /**
+   * The model's complete decoded output for this generation, with non-semantic envelope/turn-boundary
+   * special tokens already stripped (the same text handed to the parsers) — i.e. what the parsers
+   * actually saw. This is the field to inspect when a tool call did not parse.
+   */
+  rawText: string
+  /**
+   * The residual prose after reasoning + tool-call extraction — what becomes the assistant message
+   * `content`. If a tool call failed to parse, its source text is still here (the leak).
+   */
+  cleanedText: string
+  /** The reasoning/thinking traces the reasoning parser extracted (empty when none / not applicable). */
+  reasoning: ReadonlyArray<string>
+  /** The tool calls the tool-call parser extracted (empty when the model emitted none, or none parsed). */
+  toolCalls: ReadonlyArray<ParsedToolCall>
+  /** Whether this generation streamed its prose to the consumer (vs. a single batch decode). */
+  streamed: boolean
+  /** The adapter's stream/message id for this generation, for correlating with other telemetry. */
+  streamId: string
+}
+
+/**
+ * Observe a battery's raw model output for one completed generation. Injectable + defaulted to absent
+ * on the on-device LLM batteries (transformers.js, LiteRT-LM), mirroring the `toolCallParser` /
+ * `reasoningParser` / `extractMediaOutputs` injection seams. Fired once per terminal generation, after
+ * parsing and before persistence; purely observational (return value ignored, errors swallowed).
+ */
+export type RawGenerationObserverFn = (observation: RawGenerationObservation) => void
+
+// ─── Prompt observability (the exact request BEFORE it is dispatched) ──────────
+
+/**
+ * One observation of the fully-assembled request a battery is about to send TO the model, fired the
+ * instant assembly completes and BEFORE the engine/HTTP dispatch. It is the mirror of
+ * {@link RawGenerationObservation}: that seam exposes the raw text coming back FROM the model; this one
+ * exposes the raw request going TO it. Together they let you read ground truth at both ends of the wire —
+ * e.g. to settle whether a "smart quote" in a rendered answer came from the model itself or from a
+ * downstream markdown renderer, you inspect the bytes here, not the DOM.
+ *
+ * @remarks
+ * This is a pure observability tap — it returns `void`, never mutates the request, and never throws into
+ * the generation path (the adapter swallows callback errors). It fires once per terminal generation
+ * (one per non-streamed turn; one per stream, at dispatch), across ALL five LLM batteries.
+ *
+ * **Handed back AS-IS — no redaction.** The observation carries the request exactly as assembled. The ADK
+ * does not scrub credentials, headers, or any other field for you: what you put on the request is what you
+ * see here, and if you route this to a persistent sink (a log, `localStorage`, a file) you may persist
+ * secrets that rode the request (an `apiKey`, `Authorization` header, etc.). That is your responsibility to
+ * handle, not the battery's — the ADK surfaces the truth and lets you decide what to do with it. (In
+ * practice the API batteries strip ADK-control keys like `apiKey` out of the wire body before this fires,
+ * but that is incidental to how the body is built, not a guarantee.)
+ */
+export interface PromptAssembledObservation {
+  /** Which battery assembled this request (e.g. `'litert_lm'`, `'openai_chat_completions'`). */
+  battery: string
+  /**
+   * The shape of the assembled request. `'rendered-prompt'` for the on-device batteries (transformers.js,
+   * LiteRT-LM), which render a preface string + a messages array for the engine; `'request-body'` for the
+   * API batteries (OpenAI-compatible, Ollama, WebLLM), which POST a JSON body.
+   */
+  kind: 'rendered-prompt' | 'request-body'
+  /**
+   * On-device leading/system content rendered ahead of the timeline (e.g. the LiteRT `preface` object,
+   * which carries the assembled system message text and — for native tool delivery — the tool list), when
+   * applicable. Its concrete shape is battery-specific; captured verbatim. Absent for the API batteries.
+   */
+  preface?: unknown
+  /**
+   * The per-turn messages exactly as handed to the engine (on-device) or placed on the wire (API): the
+   * engine's message array, or the request body's `messages`.
+   */
+  messages: unknown
+  /**
+   * The tool declarations exactly as dispatched: the rendered `<tool_definitions>` prompt text (on-device
+   * prompt-delivery) or the wire `tools` array (API / native tool delivery). Absent when no tools are sent.
+   */
+  tools?: unknown
+  /**
+   * API batteries only: the complete assembled request body, exactly as it will be sent (see the AS-IS /
+   * no-redaction note above). Absent for the on-device batteries.
+   */
+  requestBody?: unknown
+  /** Whether this generation streams its response (vs. a single batch call). */
+  streamed: boolean
+  /** The adapter's stream/message id for this generation, for correlating with other telemetry. */
+  streamId: string
+}
+
+/**
+ * Observe the fully-assembled request a battery is about to dispatch. Injectable + defaulted to absent on
+ * every LLM battery, mirroring {@link RawGenerationObserverFn}. Fired once per terminal generation, after
+ * assembly and before dispatch; purely observational (return value ignored, errors swallowed). The request
+ * is handed back AS-IS — see {@link PromptAssembledObservation} for the no-redaction contract.
+ */
+export type PromptAssembledObserverFn = (observation: PromptAssembledObservation) => void
+
 // ─── Retry config ─────────────────────────────────────────────────────────────
 
 /**
@@ -358,6 +514,27 @@ export interface ChatHelpersCommon {
       renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
     }
   ) => Promise<string>
+  /**
+   * Renders the directions-bearing "handle" body for a non-inlined {@link @nhtio/adk!SpooledArtifact}
+   * tool result: metadata (callId/kind/byteLength/lineCount) plus the forged `artifact_*` tools the
+   * model should call to read it incrementally.
+   *
+   * @remarks
+   * Optional override seam. When omitted the battery uses the shared
+   * {@link defaultRenderArtifactHandleBody}. A consumer overrides it to change WHICH reader the model
+   * is steered toward first — e.g. promoting the JSON content-readers (`artifact_json_get` /
+   * `artifact_json_keys`) ahead of the metadata-only `artifact_json_type` for a small model that grabs
+   * the first listed tool. The tool list itself comes from the artifact's `constructor.toolMethods`;
+   * an override typically reorders or re-annotates that list before delegating to the default renderer.
+   */
+  renderArtifactHandleBody?: (input: {
+    callId: string
+    artifact: unknown
+    byteLength: number
+    lineCount: number
+    estimatedTokens?: number
+    encoding?: string
+  }) => string
   /** Renders a single thought into its prompt block, optionally carrying an opaque replay payload. */
   renderThought: (content: string, attrs: ThoughtAttrs, payload?: unknown) => string
   /** Selects which thoughts to surface, by surfacing mode, self identity, and replay compatibility. */

@@ -633,13 +633,10 @@ export const renderChatCompletionsToolCallResult = async (input: {
     })
   }
 
-  // Inline path: render full body via the appropriate envelope.
-  if (!isSpooled && toolCall.inline === false) {
-    warn?.(
-      `Tool call ${toolCall.id} has inline=false but results is a Tokenizable (not a SpooledArtifact); rendering inline anyway.`
-    )
-  }
-
+  // Inline path: render full body via the appropriate envelope. A Tokenizable result (an ArtifactTool
+  // query answer, an error string) has no queryable artifact to hand back, so it always renders inline
+  // regardless of the `inline` flag — under handle-by-default (inline:false) this is the ordinary case,
+  // not a misconfiguration, so it is silent.
   let body: string
   if (isSpooled) {
     body = await (results as SpooledArtifact).asString()

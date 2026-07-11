@@ -498,12 +498,9 @@ export const renderOllamaToolCallResult = async (input: {
     })
   }
 
-  if (!isSpooled && toolCall.inline === false) {
-    warn?.(
-      `Tool call ${toolCall.id} has inline=false but results is a Tokenizable (not a SpooledArtifact); rendering inline anyway.`
-    )
-  }
-
+  // A Tokenizable result (an ArtifactTool query answer, an error string) has no queryable artifact to
+  // hand back, so it always renders inline regardless of the `inline` flag — under handle-by-default
+  // (inline:false) this is the ordinary case, not a misconfiguration, so it is silent.
   const body = isSpooled
     ? await (results as SpooledArtifact).asString()
     : (results as Tokenizable).toString()

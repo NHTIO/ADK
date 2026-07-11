@@ -11,8 +11,8 @@
  */
 
 import { isError } from '@nhtio/adk/guards'
-import { byteStoreSchema } from '@nhtio/adk/common'
 import { validator, ValidationError } from '@nhtio/validation'
+import { byteStoreSchema, TokenEncoding } from '@nhtio/adk/common'
 import { E_INVALID_OPENAI_CHAT_COMPLETIONS_OPTIONS } from './exceptions'
 import type { OpenAIChatCompletionsAdapterOptions } from './types'
 
@@ -39,19 +39,9 @@ const reasoningFieldPrecedenceSchema = validator
 
 const tokenEncodingSchema = validator
   .alternatives(
-    validator
-      .string()
-      .valid(
-        'gpt2',
-        'r50k_base',
-        'p50k_base',
-        'p50k_edit',
-        'cl100k_base',
-        'o200k_base',
-        'gemini',
-        'llama2',
-        'claude'
-      ),
+    // Derive from the canonical TokenEncoding array (single source of truth) so newly-added encodings
+    // (e.g. 'gemma') are accepted without drift between the counter and this validator.
+    validator.string().valid(...TokenEncoding),
     // `tokenEncoding?: TokenEncoding | null` — the field is OPTIONAL: a valid encoding string,
     // explicit null, or absent (undefined = "no token counting"). `.optional()` makes the
     // null/undefined disposition explicit (both allowed) per adk/require-validator-any-required,
@@ -72,6 +62,31 @@ const retrySchema = validator
     honorRetryAfter: validator.boolean().default(true),
   })
   .unknown(false)
+
+// Optional fallback tool-call parser (see OpenAIChatCompletionsAdapterOptions.localToolCallParser). A
+// bundled family name, 'auto' (try-all), 'none', or a custom ToolCallParserFn. `.optional()` — absent =
+// disabled = native-only behaviour. Names mirror chat_common's ToolCallParserName union.
+const localToolCallParserSchema = validator
+  .alternatives(
+    validator
+      .string()
+      .valid(
+        'auto',
+        'hermes',
+        'gemma',
+        'gpt_oss',
+        'pythonic',
+        'bare_pythonic',
+        'loose_keyed',
+        'llama3_json',
+        'mistral',
+        'qwen3_coder',
+        'phi',
+        'none'
+      ),
+    validator.function()
+  )
+  .optional()
 
 const helperSchema = validator.function()
 
@@ -310,6 +325,10 @@ export const openAIChatCompletionsOptionsSchema = validator
     user: validator.string().optional(),
     verbosity: validator.string().valid('low', 'medium', 'high').optional(),
     web_search_options: webSearchOptionsSchema.optional(),
+    onRawGeneration: validator.function().optional(),
+    onPromptAssembled: validator.function().optional(),
+    localToolCallParser: localToolCallParserSchema,
+    forgeToolsFilter: validator.function().optional(),
   })
   .unknown(false)
 

@@ -5,9 +5,9 @@
  */
 
 import { isError } from '@nhtio/adk/guards'
-import { byteStoreSchema } from '@nhtio/adk/common'
 import { validator, ValidationError } from '@nhtio/validation'
 import { E_INVALID_TRANSFORMERS_JS_OPTIONS } from './exceptions'
+import { byteStoreSchema, TokenEncoding } from '@nhtio/adk/common'
 import type { TransformersJsAdapterOptions } from './types'
 
 const bucketLabelSchema = validator
@@ -29,19 +29,9 @@ const reasoningFieldPrecedenceSchema = validator
 
 const tokenEncodingSchema = validator
   .alternatives(
-    validator
-      .string()
-      .valid(
-        'gpt2',
-        'r50k_base',
-        'p50k_base',
-        'p50k_edit',
-        'cl100k_base',
-        'o200k_base',
-        'gemini',
-        'llama2',
-        'claude'
-      ),
+    // Derive from the canonical TokenEncoding array so new encodings (e.g. 'gemma') are accepted without
+    // drift between the token counter and this validator.
+    validator.string().valid(...TokenEncoding),
     validator.any().valid(null).optional()
   )
   .default(null)
@@ -53,6 +43,7 @@ const helpersSchema = validator
     descriptionToChatCompletionsJsonSchema: helperSchema.optional(),
     renderUntrustedContent: helperSchema.optional(),
     renderTrustedContent: helperSchema.optional(),
+    renderArtifactHandleBody: helperSchema.optional(),
     renderStandingInstructions: helperSchema.optional(),
     renderMemories: helperSchema.optional(),
     renderRetrievables: helperSchema.optional(),
@@ -127,6 +118,12 @@ export const transformersJsOptionsSchema = validator
     // device/dtype: a scalar string OR a per-submodule Record (multimodal).
     device: validator.alternatives(validator.string(), validator.object().unknown(true)).optional(),
     dtype: validator.alternatives(validator.string(), validator.object().unknown(true)).optional(),
+    // ONNX Runtime session options, forwarded verbatim to the loader. Open object — the runtime owns the
+    // shape; we surface the lever without re-validating ORT's evolving option set.
+    sessionOptions: validator.object().unknown(true).optional(),
+    // KV-cache GPU-pin default. Left optional (NOT .default(true)) so the adapter's own `?? true` sees
+    // `undefined` vs explicit `false` distinctly; the effective default is true, applied in the adapter.
+    pinKvCacheToGpu: validator.boolean().optional(),
     onInitProgress: validator.function().optional(),
     isAvailable: validator.function().optional(),
     // ── Multimodal (opt-in) ──
@@ -182,9 +179,12 @@ export const transformersJsOptionsSchema = validator
     unsupportedMediaPolicy: unsupportedMediaPolicySchema,
     autoAck: validator.boolean().default(false),
     toolCallParser: toolCallParserSchema,
+    forgeToolsFilter: validator.function().optional(),
     reasoningParser: reasoningParserSchema,
     reasoningOrphanRecovery: validator.boolean().default(true),
     extractMediaOutputs: validator.function().optional(),
+    onRawGeneration: validator.function().optional(),
+    onPromptAssembled: validator.function().optional(),
   })
   .unknown(false)
 

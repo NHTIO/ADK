@@ -11,6 +11,7 @@
 import { DateTime } from 'luxon'
 import { describe, expect, it } from 'vitest'
 import { validator } from '@nhtio/validation'
+import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import {
   Tokenizable,
   Message,
@@ -20,8 +21,10 @@ import {
   Retrievable,
   Tool,
   ToolRegistry,
+  SpooledArtifact,
 } from '@nhtio/adk/common'
 import {
+  renderLiteRtToolResult,
   buildLiteRtConversationInput,
   renderToolsAsPromptText,
   defaultToolsToLiteRtTools,
@@ -101,6 +104,10 @@ describe('LiteRT-LM renderToolsAsPromptText', () => {
     expect(text).toContain('"city"')
     expect(text).toContain('<tool_definitions>')
     expect(text).toContain('</tool_definitions>')
+    // Instructs Gemma's OWN trained call format (`call:NAME{…}`), not pythonic `[func(arg=value)]` —
+    // teaching the model the format it already emits is what makes the auto-parser catch its output.
+    expect(text).toContain('call:tool_name{')
+    expect(text).not.toContain('[func_name(')
   })
 
   it('returns empty string when there are no tools', () => {
@@ -153,5 +160,79 @@ describe('LiteRT-LM explicit thinking flag — preface.extra_context.enable_thin
     const out = await buildLiteRtConversationInput(baseInput({ enableThinking: true }) as never)
     const ctx = (out.preface as { extra_context?: { enable_thinking?: boolean } }).extra_context
     expect(ctx?.enable_thinking).toBe(true)
+  })
+})
+
+// ─── tool-result rendering: handle-by-default ───────────────────────────────────────────────────────
+
+describe('LiteRT-LM renderLiteRtToolResult — handle-by-default', () => {
+  const spooled = (text: string, callId: string): SpooledArtifact => {
+    const store = new InMemorySpoolStore()
+    return new SpooledArtifact(store.write(callId, text))
+  }
+  const toolCall = (overrides: Record<string, unknown>): ToolCall =>
+    new ToolCall({
+      id: 'tc-1',
+      tool: 'search',
+      args: {},
+      checksum: 'sum-1',
+      isComplete: true,
+      isError: false,
+      results: new Tokenizable(''),
+      createdAt: dt('2026-01-01T12:00:00Z'),
+      updatedAt: dt('2026-01-01T12:00:00Z'),
+      completedAt: dt('2026-01-01T12:00:00Z'),
+      ...overrides,
+    })
+  const bodyOf = (item: { tool_response?: { response?: { content?: string } } }): string =>
+    item.tool_response?.response?.content ?? ''
+  const render = (tc: ToolCall, results: SpooledArtifact) =>
+    renderLiteRtToolResult({
+      toolCall: tc,
+      results,
+      tool: undefined,
+      unsupportedMediaPolicy: 'synthetic-description',
+      renderUntrustedContent: defaultRenderUntrustedContent,
+      renderTrustedContent: defaultRenderTrustedContent,
+    } as never)
+
+  it('a SpooledArtifact result with the DEFAULT ToolCall (inline:false) renders as a HANDLE, not the body', async () => {
+    const huge = 'secret-log-line '.repeat(500)
+    const results = spooled(huge, 'tc-1')
+    const out = await render(toolCall({ results }), results)
+    const body = bodyOf(out as never)
+    // The body is NOT inlined — the model gets a directions-bearing handle instead.
+    expect(body).not.toContain('secret-log-line secret-log-line')
+    expect(body).toContain('was not inlined to preserve context budget')
+    expect(body).toContain('callId: tc-1')
+    // …and the artifact's own query tools are advertised.
+    expect(body).toContain('artifact_grep')
+  })
+
+  it('inline:true opts INTO the body (the producer override)', async () => {
+    const results = spooled('the full body text', 'tc-1')
+    const out = await render(toolCall({ results, inline: true }), results)
+    const body = bodyOf(out as never)
+    expect(body).toContain('the full body text')
+    expect(body).not.toContain('was not inlined')
+  })
+
+  it('honors a consumer-supplied helpers.renderArtifactHandleBody override (not the static default)', async () => {
+    // Regression: the handle renderer was documented as overridable on the barrel but the call site
+    // used the static import, so a consumer override was silently ignored. Here we pass a custom
+    // renderer and prove its output — not the default note — is what reaches the model.
+    const results = spooled('x'.repeat(500), 'tc-1')
+    const out = await renderLiteRtToolResult({
+      toolCall: toolCall({ results }),
+      results,
+      tool: undefined,
+      unsupportedMediaPolicy: 'synthetic-description',
+      renderUntrustedContent: defaultRenderUntrustedContent,
+      renderTrustedContent: defaultRenderTrustedContent,
+      renderArtifactHandleBody: (input: { callId: string }) => `CUSTOM-HANDLE for ${input.callId}`,
+    } as never)
+    const body = bodyOf(out as never)
+    expect(body).toContain('CUSTOM-HANDLE for tc-1')
+    expect(body).not.toContain('was not inlined to preserve context budget')
   })
 })

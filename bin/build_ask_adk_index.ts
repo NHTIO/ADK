@@ -1,5 +1,6 @@
 import { remark } from 'remark'
 import { gzipSync } from 'node:zlib'
+import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { Tokenizable } from '@nhtio/adk'
 import { default as path } from 'node:path'
@@ -20,7 +21,13 @@ interface ChunkRecord {
 
 const repoRoot = path.resolve(__dirname, '..')
 const docsRoot = path.join(repoRoot, 'docs')
-const outDir = path.join(docsRoot, '.vitepress', 'dist')
+// Emit into docs/public/ (gitignored), NOT .vitepress/dist directly. VitePress copies public/ verbatim
+// into the build output and — crucially — its static server serves public/ files in EVERY mode (dev,
+// `vitepress preview`, and production Pages). A file dropped straight into dist/ after the build is only
+// served by the dev-only indexer plugin (apply:'serve'); under `vitepress preview` it 404s, which left
+// the agent's semantic search returning [] for every doc question. public/ fixes that and also survives a
+// bare `docs:build` rerun (it's a source asset, copied on each build).
+const outDir = path.join(docsRoot, 'public')
 const packageJsonPath = path.join(repoRoot, 'package.json')
 const maxTokens = 400
 const overlapTokens = 40
@@ -93,7 +100,6 @@ function splitOversize(text: string): string[] {
 async function buildChunks(file: string, raw: string): Promise<ChunkRecord[]> {
   const rel = toPosix(path.relative(docsRoot, file))
   const pageUrl = routeFromPath(rel)
-  const pageSlug = slugify(pageUrl) || 'home'
   const tree = remark().parse(cleanMarkdown(raw)) as Root
   const chunks: ChunkRecord[] = []
   let title = path.basename(rel, '.md')
@@ -107,7 +113,12 @@ async function buildChunks(file: string, raw: string): Promise<ChunkRecord[]> {
     const headingPath = [title, h2, h3].filter(Boolean)
     const anchor = headingSlug(currentHeading || h3 || h2 || title)
     for (const part of splitOversize(text)) {
-      const id = `chunk-${pageSlug}-${chunks.length + 1}`
+      // Chunk ids become the fence-envelope NONCE (tag name) when rendered to the model. They MUST be
+      // unguessable AND non-path-shaped: a path-shaped id like `chunk-<page>-<n>` gets copied by small models
+      // as a citation (e.g. `/assembly/events-9`), which the doc-path validator rejects → re-cite loop. Use a
+      // random UUID; page provenance lives in the retrievable's `source` (the pageUrl). See the fence-nonce
+      // footgun note in docs/the-loop/trust-tiers/envelopes.md.
+      const id = randomUUID()
       chunks.push({
         id,
         pageUrl,
@@ -143,25 +154,10 @@ async function buildChunks(file: string, raw: string): Promise<ChunkRecord[]> {
   return chunks
 }
 
-async function embed(contents: string[]): Promise<Float32Array> {
-  console.log(`loading @huggingface/transformers (Xenova/all-MiniLM-L6-v2)...`)
-  const transformers = await import('@huggingface/transformers')
-  // dtype q8 matches the browser-side embedder (ask_adk_embedder.ts) — index and
-  // query vectors must come from the same weights or cosine drifts.
-  const extractor = await transformers.pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
-    dtype: 'q8',
-  })
-  console.log(`extractor loaded; embedding ${contents.length} chunks at batch 32...`)
-  const vectors = new Float32Array(contents.length * 384)
-  for (let i = 0; i < contents.length; i += 32) {
-    const batch = contents.slice(i, i + 32)
-    const output: any = await extractor(batch, { pooling: 'mean', normalize: true })
-    const data = Array.from(output.data ?? output.tolist().flat()) as number[]
-    vectors.set(data, i * 384)
-    console.log(`embedded ${Math.min(i + 32, contents.length)}/${contents.length}`)
-  }
-  return vectors
-}
+// NOTE: this builder is CHUNK-ONLY. It emits the seed documents (ask-adk-index.json) so the
+// flagship agent's RAG stays in sync with the real docs, but it no longer embeds them — the
+// agent computes vectors ON-DEVICE at boot (see agent_rag.ts). This keeps the docs build fast
+// and free of a model dependency; the old `embed()` step + `ask-adk-vectors.bin` are gone.
 
 async function main() {
   const start = Date.now()
@@ -184,19 +180,13 @@ async function main() {
   }
   console.log(`chunked ${chunks.length} total in ${((Date.now() - start) / 1000).toFixed(1)}s`)
   await fs.mkdir(outDir, { recursive: true })
-  const vectors = await embed(chunks.map((c) => c.content))
   const json = JSON.stringify(chunks)
   await fs.writeFile(path.join(outDir, 'ask-adk-index.json'), json)
-  await fs.writeFile(path.join(outDir, 'ask-adk-vectors.bin'), Buffer.from(vectors.buffer))
   const jsonBytes = Buffer.byteLength(json)
-  const binBytes = vectors.byteLength
   console.log(
-    `Ask ADK index: ${chunks.length} chunks in ${((Date.now() - start) / 1000).toFixed(1)}s`
+    `Ask ADK index (chunks only): ${chunks.length} chunks in ${((Date.now() - start) / 1000).toFixed(1)}s`
   )
   console.log(`ask-adk-index.json: ${jsonBytes} bytes (${gzipSync(json).byteLength} gz)`)
-  console.log(
-    `ask-adk-vectors.bin: ${binBytes} bytes (${gzipSync(Buffer.from(vectors.buffer)).byteLength} gz)`
-  )
   console.log(
     'sample chunks:',
     chunks

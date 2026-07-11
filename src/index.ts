@@ -13,6 +13,12 @@ export const version = __VERSION__
 
 // ── Data primitives (value classes + Raw* types) ──────────────────────────────
 
+export type {
+  TokenizableEvaluator,
+  TokenEncodingId,
+  TokenEstimatorFn,
+} from './lib/classes/tokenizable'
+export { registerTokenEstimator } from './lib/classes/tokenizable'
 export {
   Tokenizable,
   TokenEncoding,
@@ -114,7 +120,9 @@ export {
   E_LLM_EXECUTION_EXECUTOR_ERROR,
   E_READER_NOT_DESCRIBABLE,
   E_NO_READER_RESOLVER,
+  E_TOKENIZABLE_EVALUATOR_INVALID,
 } from './exceptions'
+export { E_TOKEN_ESTIMATOR_SHADOWS_BUILTIN } from './lib/classes/tokenizable'
 
 // ── Types (re-exported via `export type *` form) ──────────────────────────────
 
@@ -228,6 +236,7 @@ export type {
   DispatchExecutorLogEntry,
   DispatchExecutorLogLevel,
   LogEvent,
+  WarningEvent,
   DispatchStartEvent,
   DispatchEndEvent,
   IterationStartEvent,

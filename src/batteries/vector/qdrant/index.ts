@@ -2,9 +2,9 @@
  * @module @nhtio/adk/batteries/vector/qdrant
  */
 
-import { normalizeScore } from '../helpers'
 import { BaseVectorStore } from '../contract'
 import { validateRecords } from '../validation'
+import { normalizeScore, sanitizeMetadata } from '../helpers'
 import { isFilterCondition, isRawFilter, isFilterGroup } from '../filters'
 import {
   E_VECTOR_STORE_DRIVER_UNAVAILABLE,
@@ -234,7 +234,7 @@ export class QdrantVectorStore extends BaseVectorStore {
       points.push({
         id: uuidFromId(r.id),
         vector,
-        payload: { ...r.metadata, __id: r.id, __document: r.document },
+        payload: { ...sanitizeMetadata(r.metadata), __id: r.id, __document: r.document },
       })
     }
     try {

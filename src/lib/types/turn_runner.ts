@@ -10,6 +10,7 @@ import type {
   IterationStartEvent,
   IterationEndEvent,
   LogEvent,
+  WarningEvent,
 } from './dispatch_runner'
 
 /**
@@ -309,6 +310,10 @@ export type TurnObservabilityEvents = EventMap<{
   iterationEnd: [IterationEndEvent]
   log: [LogEvent]
   error: [BaseException]
+  /** A non-fatal degradation the turn/dispatch recovered from (e.g. token-estimation fell back to a char
+   * guesstimate). Distinct from `error` — the turn continues. Bubbles up from the DispatchRunner bus AND
+   * fires for any turn-level estimation. */
+  warning: [WarningEvent]
 }>
 
 /**

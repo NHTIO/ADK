@@ -14,13 +14,13 @@
 
 import { Media } from '@nhtio/adk'
 import { isError } from '@nhtio/adk/guards'
-import { ArtifactTool, Tool } from '@nhtio/adk'
-import { Tokenizable, SpooledArtifact } from '@nhtio/adk'
+import { SpooledArtifact } from '@nhtio/adk'
 import { E_UNSUPPORTED_MEDIA_MODALITY } from './exceptions'
 import {
   neutraliseDeveloperRulesTag,
   sanitizeMimeType,
   sanitizeFilenameForDescription,
+  defaultRenderArtifactHandleBody,
 } from '../chat_common/helpers'
 import {
   descriptionToChatCompletionsJsonSchema,
@@ -37,6 +37,8 @@ import {
   renderThought,
   filterThoughts,
 } from '../openai_chat_completions/helpers'
+import type { Tokenizable } from '@nhtio/adk'
+import type { ArtifactTool, Tool } from '@nhtio/adk'
 import type { ChatCompletionsTool } from '../openai_chat_completions/types'
 import type { Message, Memory, Retrievable, Thought, ToolCall, ToolRegistry } from '@nhtio/adk'
 import type {
@@ -79,6 +81,14 @@ export {
   extractReasoningFields,
 } from '../openai_chat_completions/helpers'
 
+// The shared SpooledArtifact handle-pattern machinery + its structural guard, surfaced on the barrel
+// so consumers can override/compose it like any other render helper.
+export {
+  renderArtifactHandleBody,
+  defaultRenderArtifactHandleBody,
+  looksLikeSpooledArtifact,
+} from '../chat_common/helpers'
+
 // Re-export the shared parser layer so consumers import everything from this battery's barrel.
 export * from '../chat_common/tool_parsers'
 export * from '../chat_common/reasoning_parsers'
@@ -86,6 +96,8 @@ export * from '../chat_common/reasoning_parsers'
 export * from '../chat_common/lifecycle'
 // Re-export the shared portable generation contract (ChatGenerationOptions + resolveGenerationOptions).
 export * from '../chat_common/generation'
+// Re-export the shared WebGPU memory observability surface (budget probe, OOM detector, live instrument).
+export * from '../chat_common/gpu_budget'
 
 // ── transformers.js-native mappers ────────────────────────────────────────────────────────────────
 
@@ -170,8 +182,10 @@ const resolveMediaFallbackText = async (
  * Render a {@link @nhtio/adk!ToolCall}'s `results` into a plain-text tool message body.
  *
  * @remarks
- * transformers.js chat templates take a `tool`-role message whose `content` is a string. Materialises
- * SpooledArtifact(s) via `asString()`, applies the trust envelope, and degrades Media to text.
+ * transformers.js chat templates take a `tool`-role message whose `content` is a string. A
+ * `SpooledArtifact` result renders as a HANDLE (metadata + the forged `artifact_*` tools to read it)
+ * when its `ToolCall.inline === false` — the secure default — and inline via `asString()` only when a
+ * producer opted into `inline: true`. Applies the trust envelope and degrades Media to text.
  */
 export const renderTransformersJsToolResult = async (input: {
   toolCall: ToolCall
@@ -180,12 +194,24 @@ export const renderTransformersJsToolResult = async (input: {
   unsupportedMediaPolicy: UnsupportedMediaPolicy
   renderUntrustedContent: typeof commonRenderUntrustedContent
   renderTrustedContent: typeof commonRenderTrustedContent
+  /**
+   * Override for the artifact-handle body renderer (see {@link renderArtifactHandleBody}). Defaults to
+   * the shared {@link defaultRenderArtifactHandleBody}. The adapter threads the consumer's
+   * `helpers.renderArtifactHandleBody` here so an app can change which forged `artifact_*` reader the
+   * model is steered toward first.
+   */
+  renderArtifactHandleBody?: typeof defaultRenderArtifactHandleBody
   warn?: (msg: string) => void
 }): Promise<string> => {
   const { results, toolCall, tool } = input
   const isTrusted = tool?.trusted === true
+  const renderHandle = input.renderArtifactHandleBody ?? defaultRenderArtifactHandleBody
 
   let body: string
+  // Whether `body` is a non-inlined artifact HANDLE (vs. inlined content). Only the `kind` label on
+  // the envelope changes — the trust TIER stays the producing tool's, since a handle to a third-party
+  // artifact carries the same injection hazard as its inlined content would.
+  let isHandle = false
   if (
     Media.isMedia(results) ||
     (Array.isArray(results) && results.every((r) => Media.isMedia(r)))
@@ -195,6 +221,33 @@ export const renderTransformersJsToolResult = async (input: {
     for (const m of mediaList)
       parts.push(await resolveMediaFallbackText(m, input.unsupportedMediaPolicy, input.warn))
     body = parts.join('\n\n')
+  } else if (
+    !Array.isArray(results) &&
+    SpooledArtifact.isSpooledArtifact(results) &&
+    toolCall.inline === false
+  ) {
+    // Handle pattern: producer marked this result non-inline → emit a directions-bearing handle
+    // (metadata + the forged artifact_* tools to read it) instead of dumping the body. This is the
+    // machinery that makes the spool/thrift pattern usable. Parity with OpenAI + Ollama.
+    let byteLength = 0
+    let lineCount = 0
+    try {
+      byteLength = await results.byteLength()
+    } catch {
+      /* best-effort metadata */
+    }
+    try {
+      lineCount = await results.lineCount()
+    } catch {
+      /* best-effort metadata */
+    }
+    body = renderHandle({
+      callId: toolCall.id,
+      artifact: results,
+      byteLength,
+      lineCount,
+    })
+    isHandle = true
   } else if (Array.isArray(results)) {
     const parts: string[] = []
     for (const a of results) parts.push(await (a as SpooledArtifact).asString())
@@ -208,12 +261,12 @@ export const renderTransformersJsToolResult = async (input: {
   return isTrusted
     ? input.renderTrustedContent(body, {
         nonce: toolCall.checksum,
-        kind: 'trusted-tool-result',
+        kind: isHandle ? 'trusted-artifact-handle' : 'trusted-tool-result',
         tool: toolCall.tool,
       } as never)
     : input.renderUntrustedContent(body, {
         nonce: toolCall.checksum,
-        kind: 'tool-result',
+        kind: isHandle ? 'artifact-handle' : 'tool-result',
         tool: toolCall.tool,
       } as never)
 }

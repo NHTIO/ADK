@@ -31,9 +31,15 @@ import {
   E_OPENAI_CHAT_COMPLETIONS_STREAM_ERROR,
   E_OPENAI_CHAT_COMPLETIONS_STREAM_STALLED,
   E_OPENAI_CHAT_COMPLETIONS_REQUEST_TIMEOUT,
+  toolsToChatCompletionsTools,
+  descriptionToChatCompletionsJsonSchema,
 } from '@nhtio/adk/batteries/llm/openai_chat_completions'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
+import type {
+  RawGenerationObservation,
+  PromptAssembledObservation,
+} from '@nhtio/adk/batteries/llm/openai_chat_completions'
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -978,6 +984,99 @@ describe('OpenAIChatCompletionsAdapter — context window enforcement', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
+  // REGRESSION (same class as the LiteRT crash): the overflow tally MUST include the tool DECLARATIONS.
+  // OpenAI serializes `tools` server-side into the model's format, so we tally the wire `tools` JSON as
+  // an honest FLOOR. Uses REAL tools → the battery's REAL toolsToChatCompletionsTools → a REAL
+  // Tokenizable count (no fakes): the fetch is never reached (guard fires pre-dispatch).
+  const richTool = (name: string) =>
+    new Tool({
+      name,
+      description:
+        `A tool named ${name} with a deliberately verbose, multi-field input schema so its ` +
+        `serialized JSON declaration weighs many tokens.`,
+      inputSchema: validator.object({
+        query: validator.string().min(1).max(4096).description('the search query text').required(),
+        limit: validator.number().integer().min(1).max(100).description('max results to return'),
+        filters: validator
+          .object({
+            path: validator.string().description('restrict to a documentation path prefix'),
+            since: validator.string().description('ISO date lower bound'),
+            tags: validator.array().items(validator.string()).description('tag allow-list'),
+          })
+          .description('optional structured filters'),
+        verbose: validator.boolean().description('include full bodies in the result'),
+      }),
+      handler: () => 'ok',
+    })
+
+  it('tool-declaration-heavy overflow throws CONTEXT_OVERFLOW with perBucket.tools counted', async () => {
+    const fetchFn = vi.fn()
+    const tools = new ToolRegistry([
+      richTool('search_docs_semantic'),
+      richTool('search_docs_keyword'),
+      richTool('provide_answer'),
+      richTool('get_current_time'),
+      richTool('calculate'),
+    ])
+    const enc = 'cl100k_base' as const
+    const sysAndMsg =
+      Tokenizable.estimateTokens('You are a helpful assistant.', enc) +
+      Tokenizable.estimateTokens('hi', enc)
+    const toolBlock = Tokenizable.estimateTokens(
+      JSON.stringify(
+        toolsToChatCompletionsTools(tools.visible(), { descriptionToChatCompletionsJsonSchema })
+      ),
+      enc
+    )
+    // Sanity: the tool declarations are the dominant term.
+    expect(toolBlock).toBeGreaterThan(sysAndMsg)
+    // A window ABOVE system+message but BELOW system+message+tools: overflows ONLY because tools count.
+    const contextWindow = sysAndMsg + Math.floor(toolBlock / 2)
+    const adapter = new OpenAIChatCompletionsAdapter({
+      model: 'm',
+      fetch: fetchFn as never,
+      stream: false,
+      tokenEncoding: enc,
+      contextWindow,
+    })
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })], tools })
+    let thrown: unknown
+    try {
+      await adapter.executor()(ctx, makeHelpers())
+    } catch (e) {
+      thrown = e
+    }
+    expect(thrown).toBeInstanceOf(E_OPENAI_CHAT_COMPLETIONS_CONTEXT_OVERFLOW)
+    // The perBucket detail carries the tools tally (proves it was counted, not ignored).
+    expect((thrown as Error).message).toContain('tools')
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('does NOT overflow the same tool-heavy prompt when the window covers the tools', async () => {
+    const fetchFn = vi.fn(async () => validNonStreamingResponse())
+    const tools = new ToolRegistry([richTool('search_docs_semantic'), richTool('provide_answer')])
+    const enc = 'cl100k_base' as const
+    const everything =
+      Tokenizable.estimateTokens('You are a helpful assistant.', enc) +
+      Tokenizable.estimateTokens('hi', enc) +
+      Tokenizable.estimateTokens(
+        JSON.stringify(
+          toolsToChatCompletionsTools(tools.visible(), { descriptionToChatCompletionsJsonSchema })
+        ),
+        enc
+      )
+    const adapter = new OpenAIChatCompletionsAdapter({
+      model: 'm',
+      fetch: fetchFn as never,
+      stream: false,
+      tokenEncoding: enc,
+      contextWindow: everything + 256,
+    })
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })], tools })
+    await adapter.executor()(ctx, makeHelpers())
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
   it('handle rendering keeps the request under a tight ceiling for inline:false SpooledArtifact', async () => {
     const fetchFn = vi.fn(async () => validNonStreamingResponse())
     const adapter = new OpenAIChatCompletionsAdapter({
@@ -985,7 +1084,11 @@ describe('OpenAIChatCompletionsAdapter — context window enforcement', () => {
       fetch: fetchFn as never,
       stream: false,
       tokenEncoding: 'cl100k_base',
-      contextWindow: 800,
+      // The overflow guard now counts tool DECLARATIONS too — including the forged artifact-reader tools
+      // an inline:false SpooledArtifact injects. The window must sit ABOVE (handle + reader-tool schemas)
+      // but well BELOW the ~6.5k tokens the inlined body would need, so the point still holds: the handle
+      // + reader tools fit, the inlined body would not.
+      contextWindow: 3000,
     })
     const huge = 'huge-content '.repeat(2000)
     const spool = makeSpooled(huge, 'tc-handle-1')
@@ -1121,7 +1224,9 @@ describe('OpenAIChatCompletionsAdapter — context window enforcement', () => {
       fetch: fetchFn as never,
       stream: false,
       tokenEncoding: 'cl100k_base',
-      contextWindow: 800,
+      // Above (handle + forged reader-tool declarations, now counted), below the inlined body — same
+      // rationale as the tight-ceiling test above.
+      contextWindow: 3000,
     })
     const huge = 'overflow-source '.repeat(2000)
     const spool = makeSpooled(huge, 'tc-flip-1')
@@ -2486,6 +2591,7 @@ describe('OpenAIChatCompletionsAdapter — structured observability hooks (helpe
       'standingInstructions',
       'systemPrompt',
       'timeline',
+      'tools',
     ])
   })
 
@@ -3149,6 +3255,96 @@ describe('OpenAIChatCompletionsAdapter — tool_choice + forged artifact-tools g
     const hits = helpers._logs.filter((l) => l.kind === 'tool-choice-forged-artifact')
     expect(hits).toHaveLength(0)
     expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('OpenAIChatCompletionsAdapter — wire observability (TO + FROM taps)', () => {
+  it('onPromptAssembled fires once with the wire body/messages/tools, BEFORE the POST', async () => {
+    const seen: PromptAssembledObservation[] = []
+    const fetchFn = vi.fn(async () => validNonStreamingResponse('hi'))
+    const adapter = new OpenAIChatCompletionsAdapter({
+      model: 'm',
+      fetch: fetchFn as never,
+      stream: false,
+      onPromptAssembled: (o: PromptAssembledObservation) => seen.push(o),
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    expect(seen).toHaveLength(1)
+    const o = seen[0]
+    expect(o.battery).toBe('openai_chat_completions')
+    expect(o.kind).toBe('request-body')
+    expect(Array.isArray(o.messages)).toBe(true)
+    // The full assembled body is surfaced AS-IS (the model field is the wire body's).
+    expect((o.requestBody as { model?: string }).model).toBe('m')
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('onRawGeneration fires once with the provider content + tool calls (FROM parity)', async () => {
+    const seen: RawGenerationObservation[] = []
+    const fetchFn = vi.fn(async () => validNonStreamingResponse('the answer'))
+    const adapter = new OpenAIChatCompletionsAdapter({
+      model: 'm',
+      fetch: fetchFn as never,
+      stream: false,
+      onRawGeneration: (o: RawGenerationObservation) => seen.push(o),
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    expect(seen).toHaveLength(1)
+    expect(seen[0].rawText).toBe('the answer')
+    expect(seen[0].streamed).toBe(false)
+  })
+
+  it('shares one streamId between the TO and FROM taps', async () => {
+    const to: PromptAssembledObservation[] = []
+    const from: RawGenerationObservation[] = []
+    const fetchFn = vi.fn(async () => validNonStreamingResponse('x'))
+    const adapter = new OpenAIChatCompletionsAdapter({
+      model: 'm',
+      fetch: fetchFn as never,
+      stream: false,
+      onPromptAssembled: (o: PromptAssembledObservation) => to.push(o),
+      onRawGeneration: (o: RawGenerationObservation) => from.push(o),
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    expect(to[0]?.streamId).toBe(from[0]?.streamId)
+  })
+
+  it('both hooks are STRIPPED from the wire body (never sent to the provider)', async () => {
+    let sentBody: unknown
+    const fetchFn = vi.fn(async (_url: unknown, init: { body?: string }) => {
+      sentBody = JSON.parse(init.body ?? '{}')
+      return validNonStreamingResponse('ok')
+    })
+    const adapter = new OpenAIChatCompletionsAdapter({
+      model: 'm',
+      fetch: fetchFn as never,
+      stream: false,
+      onPromptAssembled: () => {},
+      onRawGeneration: () => {},
+    })
+    await adapter.executor()(makeCtx(), makeHelpers())
+    expect(sentBody).toBeDefined()
+    expect('onPromptAssembled' in (sentBody as object)).toBe(false)
+    expect('onRawGeneration' in (sentBody as object)).toBe(false)
+  })
+
+  it('observer errors are swallowed (never corrupt the generation)', async () => {
+    const fetchFn = vi.fn(async () => validNonStreamingResponse('safe'))
+    const adapter = new OpenAIChatCompletionsAdapter({
+      model: 'm',
+      fetch: fetchFn as never,
+      stream: false,
+      autoAck: true,
+      onPromptAssembled: () => {
+        throw new Error('TO observer blew up')
+      },
+      onRawGeneration: () => {
+        throw new Error('FROM observer blew up')
+      },
+    })
+    const ctx = makeCtx()
+    await expect(adapter.executor()(ctx, makeHelpers())).resolves.toBeUndefined()
+    expect(ctx._stored.messages[0]?.content?.toString()).toBe('safe')
   })
 })
 

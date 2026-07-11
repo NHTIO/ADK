@@ -35,6 +35,11 @@ import { availableVerbs } from './validate'
 import { validator } from '@nhtio/validation'
 import { VERB_INDEX, foldVerb } from './verbs'
 import { E_INVALID_MEDIA_PIPELINE_CONFIG } from './exceptions'
+// Documented exception (see CONTRIBUTING.md → Design Decisions → #13 Battery design): this module
+// mints ADK `Tool` instances (`new Tool(...)`), calls `Media` static factories (`Media.isMedia`,
+// `Media.toolGenerated`), and hands `SpooledJsonArtifact` to the forge as a constructor value
+// (`artifactConstructor: () => SpooledJsonArtifact`) — all genuine runtime construction, not
+// type-position use, so these stay value imports.
 import { Tool, Media, SpooledJsonArtifact } from '@nhtio/adk/common'
 import type { MediaPipeline } from './index'
 import type { EngineRegistry } from './registry'

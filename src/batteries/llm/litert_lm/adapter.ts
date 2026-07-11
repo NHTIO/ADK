@@ -25,6 +25,7 @@ import { sha256 } from 'js-sha256'
 import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
 import { emitLifecycle } from '../chat_common/lifecycle'
+import { E_LLM_GPU_OUT_OF_MEMORY } from '../chat_common/exceptions'
 import { stripEnvelopeSpecialTokens } from '../chat_common/helpers'
 import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
 import { resolveToolCallParser } from '../chat_common/tool_parsers'
@@ -32,9 +33,9 @@ import { resolveGenerationOptions } from '../chat_common/generation'
 import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { resolveReasoningParser } from '../chat_common/reasoning_parsers'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
+import { isGpuOutOfMemoryError, probeGpuBudget } from '../chat_common/gpu_budget'
 import {
   Tokenizable,
-  ToolRegistry,
   ToolCall,
   Message,
   Thought,
@@ -65,6 +66,7 @@ import {
   defaultToolsToLiteRtTools,
   defaultRenderToolsAsPromptText,
   defaultRenderLiteRtToolResult,
+  defaultRenderArtifactHandleBody,
   defaultBuildLiteRtConversationInput,
   defaultCreateLiteRtStreamAccumulator,
   renderMediaToLiteRtContent,
@@ -147,6 +149,7 @@ interface ResolvedHelpers {
   toolsToLiteRtTools: typeof defaultToolsToLiteRtTools
   renderToolsAsPromptText: typeof defaultRenderToolsAsPromptText
   renderLiteRtToolResult: typeof defaultRenderLiteRtToolResult
+  renderArtifactHandleBody: typeof defaultRenderArtifactHandleBody
   buildLiteRtConversationInput: typeof defaultBuildLiteRtConversationInput
   createLiteRtStreamAccumulator: typeof defaultCreateLiteRtStreamAccumulator
 }
@@ -200,6 +203,9 @@ const resolveHelpers = (
     renderLiteRtToolResult:
       (src.renderLiteRtToolResult as ResolvedHelpers['renderLiteRtToolResult']) ??
       defaultRenderLiteRtToolResult,
+    renderArtifactHandleBody:
+      (src.renderArtifactHandleBody as ResolvedHelpers['renderArtifactHandleBody']) ??
+      defaultRenderArtifactHandleBody,
     buildLiteRtConversationInput:
       (src.buildLiteRtConversationInput as ResolvedHelpers['buildLiteRtConversationInput']) ??
       defaultBuildLiteRtConversationInput,
@@ -230,6 +236,53 @@ interface AssembledLiteRtToolCall {
   name: string
   args: Record<string, unknown>
   argsWellFormed: boolean
+}
+
+/**
+ * Does this raw engine message report an INPUT context-cap overflow — the prompt's token ids exceed the
+ * engine's fixed `maxNumTokens`? The LiteRT-web runtime throws e.g. `Input token ids are too long.
+ * Exceeding the maximum number of tokens allowed: 12596 >= 12288`. Matched so the raw throw can be
+ * translated into the typed {@link E_LITERT_LM_CONTEXT_OVERFLOW} instead of the generic stream error —
+ * this is the ENGINE BACKSTOP that fires when the optional pre-dispatch guard is unarmed or undercounts.
+ * Exported so a host can classify a thrown/caught error the same way.
+ */
+export const isEngineContextOverflowMessage = (message: string): boolean =>
+  /input token ids are too long|exceeding the maximum number of tokens/i.test(message)
+
+/**
+ * Translate a generation/load throw into the right battery exception:
+ * - a typed {@link E_LITERT_LM_CONTEXT_OVERFLOW} when the engine reports an input context-cap overflow
+ *   (parsed `actual >= limit` numbers when present), so a host can `catch` it and shed/retry — this is
+ *   the backstop for the optional pre-dispatch guard;
+ * - a typed, catchable {@link @nhtio/adk/batteries!E_LLM_GPU_OUT_OF_MEMORY} when the message matches a
+ *   known WebGPU exhaustion signature (surface, don't impose);
+ * - else the generic {@link E_LITERT_LM_STREAM_ERROR}.
+ *
+ * @param err - The raw thrown value.
+ * @param contextNote - A short human-readable note carried on the OOM error's message.
+ */
+const toLiteRtGenerationError = (
+  err: unknown,
+  contextNote: string
+):
+  | InstanceType<typeof E_LITERT_LM_CONTEXT_OVERFLOW>
+  | InstanceType<typeof E_LLM_GPU_OUT_OF_MEMORY>
+  | InstanceType<typeof E_LITERT_LM_STREAM_ERROR> => {
+  const message = isError(err) ? err.message : String(err)
+  if (isEngineContextOverflowMessage(message)) {
+    // Parse the engine's `actual >= limit` pair when present so the typed error carries real numbers the
+    // host can act on; fall back to 0/0 with the raw message as the breakdown otherwise.
+    const m = /(\d+)\s*>=\s*(\d+)/.exec(message)
+    const actual = m ? Number(m[1]) : 0
+    const limit = m ? Number(m[2]) : 0
+    return new E_LITERT_LM_CONTEXT_OVERFLOW([actual, limit, 'engine', message])
+  }
+  if (isGpuOutOfMemoryError(message)) {
+    return new E_LLM_GPU_OUT_OF_MEMORY([message, contextNote], {
+      cause: isError(err) ? err : undefined,
+    })
+  }
+  return new E_LITERT_LM_STREAM_ERROR([message])
 }
 
 /**
@@ -313,6 +366,26 @@ export class LiteRtLmAdapter {
     this.reset()
   }
 
+  /**
+   * Free the WebGPU buffer cache by deleting the engine, then reload the same model.
+   *
+   * @remarks
+   * The consumer-facing lever for the ONNX Runtime Web WebGPU buffer-freelist high-water-mark (see
+   * {@link @nhtio/adk/batteries!probeGpuBudget}). The pool is flushed only when the engine's sessions are
+   * released; there is no public flag to flush it mid-life, so the supported way to reclaim the retained
+   * working-set without permanently unloading is to delete the engine and load again. This is exactly
+   * `dispose()` then `preload()`, surfaced as a named, intentional operation (e.g. an application
+   * offering a "free GPU memory" action after a {@link @nhtio/adk/batteries!E_LLM_GPU_OUT_OF_MEMORY}).
+   * NOT invoked automatically — the ADK surfaces the lever and leaves the decision to the consumer.
+   * Re-incurs the cold-load cost. Idempotent.
+   *
+   * @param overrides - Optional option overrides applied to the reload (same as {@link preload}).
+   */
+  async recycle(overrides?: Partial<LiteRtLmAdapterOptions>): Promise<void> {
+    await this.dispose()
+    await this.preload(overrides)
+  }
+
   /** Build the LiteRT `EngineSettings` from the merged adapter options. */
   #engineSettings(merged: LiteRtLmAdapterOptions): LiteRtEngineSettings {
     const settings: LiteRtEngineSettings = {
@@ -366,7 +439,12 @@ export class LiteRtLmAdapter {
           onInitProgress: merged.onInitProgress,
         })
         this.#engine = engine
-        emitLifecycle(merged, 'litert_lm', modelLabel, 'ready', { detail: 'engine ready' })
+        emitLifecycle(merged, 'litert_lm', modelLabel, 'ready', {
+          detail: 'engine ready',
+          // Surface the WebGPU budget (LiteRT-LM is WebGPU-only) so the consumer can relate its context
+          // window to the device's per-allocation ceiling — observability, never an imposed cap.
+          gpuBudget: await probeGpuBudget(),
+        })
         return engine
       } catch (err) {
         this.#enginePromise = undefined
@@ -416,11 +494,18 @@ export class LiteRtLmAdapter {
 
   /** Map the resolved canonical sampler → LiteRT `samplerParams` (`type` enum + k/p/temperature). */
   #samplerParams(gen: ResolvedGenerationOptions): LiteRtSamplerParametersOption {
-    // SamplerType: 1=TOP_K, 2=TOP_P, 3=GREEDY. GREEDY is argmax/top-1 → k MUST be 1 (runtime invariant).
+    // SamplerType: 1=TOP_K, 2=TOP_P, 3=GREEDY. CRITICAL LiteRT-web invariant: on the WebGPU sampling
+    // path the runtime IGNORES `type` (it always combines top-k + top-p) and the WebGPU TopK sampler
+    // REQUIRES `k <= 1` — passing the canonical default (topK 40) or any k>1 throws
+    // `Top-K value N must be <= 1` at generate time (grounded in runtime/proto/sampler_params.proto:
+    // "type … Ignored on the GPU path"). This battery is WebGPU-only, so we clamp k to 1 for EVERY
+    // sampler type and let `p`/`temperature` drive diversity. (The validator additionally REJECTS an
+    // explicit topK>1 so a caller learns the constraint rather than being silently clamped.)
+    const k = Math.min(gen.topK, 1)
     if (gen.sampler === 'top-k') {
       return {
         type: 1,
-        k: gen.topK,
+        k,
         p: gen.topP,
         temperature: gen.temperature,
         ...(gen.seed !== undefined ? { seed: gen.seed } : {}),
@@ -429,7 +514,7 @@ export class LiteRtLmAdapter {
     if (gen.sampler === 'top-p') {
       return {
         type: 2,
-        k: gen.topK,
+        k,
         p: gen.topP,
         temperature: gen.temperature,
         ...(gen.seed !== undefined ? { seed: gen.seed } : {}),
@@ -481,32 +566,14 @@ export class LiteRtLmAdapter {
         orphanRecovery: merged.reasoningOrphanRecovery,
       })
 
-      // 2. Forge artifact-query tools from prior turn's spooled artifacts; merge into ctx.tools.
-      let mergedRegistry: ToolRegistry = ctx.tools
-      const artifactCtors = new Set<{ forgeTools: (c: DispatchContext) => ToolRegistry }>()
-      for (const tc of ctx.turnToolCalls) {
-        const r = tc.results
-        const arr = Array.isArray(r) ? r : [r]
-        for (const item of arr) {
-          if (SpooledArtifact.isSpooledArtifact(item)) {
-            const ctor = (item as SpooledArtifact).constructor as unknown as {
-              forgeTools?: (c: DispatchContext) => ToolRegistry
-            }
-            if (typeof ctor.forgeTools === 'function')
-              artifactCtors.add(ctor as { forgeTools: (c: DispatchContext) => ToolRegistry })
-          }
-        }
-      }
-      if (artifactCtors.size > 0) {
-        const registries = [ctx.tools, ...[...artifactCtors].map((c) => c.forgeTools(ctx))]
-        mergedRegistry = ToolRegistry.merge(registries, { onCollision: 'keep' })
-        mergedRegistry.bindContext(ctx)
-      }
+      // 2. Artifact-reader tools are forged by the DispatchRunner CORE into `ctx.tools` before the input
+      //    pipeline runs (generation is a generic core concern; this battery owns only representation).
+      //    Read the pre-forged `ctx.tools` directly — no local merge, no bindContext here.
 
       // 3. Pre-render persisted tool-call results into LiteRT tool_response content items.
       const renderedToolCallResults = new Map<string, LiteRtMessageContentItem>()
       for (const tc of ctx.turnToolCalls) {
-        const tool = mergedRegistry.get(tc.tool)
+        const tool = ctx.tools.get(tc.tool)
         const item = await h.renderLiteRtToolResult({
           toolCall: tc,
           results: tc.results,
@@ -514,6 +581,7 @@ export class LiteRtLmAdapter {
           unsupportedMediaPolicy,
           renderUntrustedContent: h.renderUntrustedContent,
           renderTrustedContent: h.renderTrustedContent,
+          renderArtifactHandleBody: h.renderArtifactHandleBody,
           warn: (m) => helpers.log.warn({ kind: 'litert-render-warning', message: m }),
         })
         renderedToolCallResults.set(tc.id, item)
@@ -523,22 +591,67 @@ export class LiteRtLmAdapter {
       if (merged.tokenEncoding && merged.contextWindow !== undefined) {
         const enc = merged.tokenEncoding
         const tally = (s: string): number => new Tokenizable(s).estimateTokens(enc)
-        let total = tally(ctx.systemPrompt.toString())
-        for (const si of ctx.standingInstructions) total += tally(si.toString())
-        for (const m of ctx.turnMemories) total += tally(m.content.toString())
-        for (const r of ctx.turnRetrievables) total += tally((await r.contentString?.()) ?? '')
-        for (const m of ctx.turnMessages) total += tally(m.content?.toString() ?? '')
-        for (const t of ctx.turnThoughts) total += tally(t.content.toString())
+        // For Tokenizable-backed fields, measure the Tokenizable ITSELF with the live `ctx` (not a temp
+        // built from its coerced string): a DYNAMIC value resolves against ctx, so `estimateTokens(enc,
+        // ctx)` counts EXACTLY the string that `render(ctx)` will assemble below — keeping this guard's
+        // total honest for evaluatable content. A static value counts identically to before.
+        const tallyTok = (t: Tokenizable): number => t.estimateTokens(enc, ctx)
+        // Per-bucket accounting so the overflow exception carries a real breakdown (its `perBucket` arg,
+        // documented for middleware shed-targeting) instead of a single lumped number. A subtractive pass
+        // must measure each bucket the SAME way this guard does; a per-bucket split is what lets a
+        // pass↔guard disagreement be pinned to the exact bucket rather than inferred.
+        const b = {
+          system: 0,
+          standingInstructions: 0,
+          memories: 0,
+          retrievables: 0,
+          messages: 0,
+          thoughts: 0,
+          toolResults: 0,
+          tools: 0,
+        }
+        b.system = tallyTok(ctx.systemPrompt as Tokenizable)
+        for (const si of ctx.standingInstructions)
+          b.standingInstructions += tallyTok(si as Tokenizable)
+        for (const m of ctx.turnMemories) b.memories += tallyTok(m.content as Tokenizable)
+        for (const r of ctx.turnRetrievables)
+          b.retrievables += tally((await r.contentString?.()) ?? '')
+        for (const m of ctx.turnMessages)
+          b.messages += m.content ? tallyTok(m.content as Tokenizable) : 0
+        for (const t of ctx.turnThoughts) b.thoughts += tallyTok(t.content as Tokenizable)
         for (const item of renderedToolCallResults.values()) {
           const tr = (item as { tool_response?: { response?: { content?: string } } }).tool_response
-          total += tally(tr?.response?.content ?? '')
+          b.toolResults += tally(tr?.response?.content ?? '')
         }
+        let total =
+          b.system +
+          b.standingInstructions +
+          b.memories +
+          b.retrievables +
+          b.messages +
+          b.thoughts +
+          b.toolResults
+        // The TOOL DECLARATIONS are part of the dispatched prompt too — and for the default
+        // `toolDelivery:'prompt'` path they are the FULL JSON-Schema block rendered by
+        // `renderToolsAsPromptText`, often the single largest bucket (hundreds of tokens for a handful of
+        // tools). Omitting them made this guard undercount by exactly that block and let a tool-heavy
+        // prompt sail past the check and blow the engine's hard cap. Tally the EXACT string that
+        // buildLiteRtConversationInput renders into the system message (same visible()/toolDelivery/
+        // renderer), so the guard sees what the model sees. (Native delivery sends `preface.tools`; its
+        // weight is model/runtime-dependent — the on-device Gemma path is prompt-delivery, so that is the
+        // case that matters here.)
+        const toolDelivery = merged.toolDelivery ?? 'prompt'
+        if (toolDelivery === 'prompt') {
+          const visibleTools = ctx.tools.visible()
+          if (visibleTools.length > 0) b.tools = tally(h.renderToolsAsPromptText(visibleTools))
+        }
+        total += b.tools
         if (total > merged.contextWindow) {
           throw new E_LITERT_LM_CONTEXT_OVERFLOW([
             total,
             merged.contextWindow,
             String(enc),
-            `system+buckets+timeline=${total}`,
+            `system=${b.system} standingInstructions=${b.standingInstructions} memories=${b.memories} retrievables=${b.retrievables} messages=${b.messages} thoughts=${b.thoughts} toolResults=${b.toolResults} tools=${b.tools}`,
           ])
         }
       }
@@ -547,6 +660,12 @@ export class LiteRtLmAdapter {
       // Resolve the portable generation contract once so thinking + modality flags are consistent with
       // what #sessionConfig sends to the runtime (canonical-wins over the native flags).
       const gen = self.#gen(merged)
+      // A short, user-facing note carried on a GPU-OOM error so the application can show WHY it failed
+      // and what to change. We surface the budget/window relationship, never silently cap it.
+      const oomNote =
+        merged.contextWindow !== undefined
+          ? `The configured context window (${merged.contextWindow} tokens, max ${gen.maxTokens} output) exceeded the available GPU memory. Reduce the context window or max output tokens and retry, recycle the adapter to free the WebGPU buffer cache, or switch to a smaller model.`
+          : `The request exceeded the available GPU memory. Reduce the context window or max output tokens and retry, recycle the adapter to free the WebGPU buffer cache, or switch to a smaller model.`
       const { preface, messages: turnMessages } = await h.buildLiteRtConversationInput({
         systemPrompt: ctx.systemPrompt,
         standingInstructions: ctx.standingInstructions,
@@ -555,7 +674,11 @@ export class LiteRtLmAdapter {
         messages: ctx.turnMessages,
         thoughts: ctx.turnThoughts,
         toolCalls: ctx.turnToolCalls,
-        tools: mergedRegistry,
+        tools: ctx.tools,
+        // The live dispatch context, threaded so DYNAMIC (evaluatable) Tokenizables resolve against it at
+        // assembly (`.render(ctx)`), matching what the overflow guard above counted with the same ctx.
+        // Static Tokenizables ignore it — no behavioral change for the common case.
+        renderCtx: ctx,
         renderedToolCallResults,
         bucketOrder: merged.bucketOrder ?? [
           'standingInstructions',
@@ -601,7 +724,9 @@ export class LiteRtLmAdapter {
           ? { enableConstrainedDecoding: merged.enableConstrainedDecoding }
           : {}),
         ...(merged.filterChannelContentFromKvCache !== undefined
-          ? { filterChannelContentFromKvCache: merged.filterChannelContentFromKvCache }
+          ? {
+              filterChannelContentFromKvCache: merged.filterChannelContentFromKvCache,
+            }
           : {}),
       }
 
@@ -610,12 +735,39 @@ export class LiteRtLmAdapter {
         const engine = await self.#resolveEngine(merged)
         conversation = await engine.createConversation(conversationConfig as never)
       } catch (err) {
-        ctx.nack(new E_LITERT_LM_STREAM_ERROR([isError(err) ? err.message : String(err)]))
+        ctx.nack(toLiteRtGenerationError(err, oomNote))
         return
       }
 
       const spoolStore = merged.spoolStore ?? new InMemorySpoolStore()
       const stream = merged.stream ?? true
+
+      // One id for this whole generation — correlates the TO tap (onPromptAssembled) with the FROM tap
+      // (onRawGeneration) and the reported message. Minted here so both the streaming and non-streaming
+      // paths below reuse it instead of generating their own.
+      const dispatchStreamId = uuidv6()
+
+      // Prompt-assembled observability tap: surface the EXACT prompt bytes going TO the model, the instant
+      // assembly finished (above) and before the engine dispatch (below). Mirror of onRawGeneration.
+      // Handed back AS-IS — no redaction — and swallow callback errors so a misbehaving observer can never
+      // corrupt the generation path.
+      if (merged.onPromptAssembled) {
+        try {
+          merged.onPromptAssembled({
+            battery: 'litert_lm',
+            kind: 'rendered-prompt',
+            // The assembled preface object verbatim — carries the system message text (prompt-delivery
+            // folds the tool block in here) and, for native delivery, the tool list on `preface.tools`.
+            preface,
+            messages: turnMessages,
+            tools: (preface as { tools?: unknown })?.tools,
+            streamed: stream,
+            streamId: dispatchStreamId,
+          })
+        } catch {
+          /* observer errors are non-fatal */
+        }
+      }
 
       // Wire abort → conversation.cancel().
       const onAbort = (): void => {
@@ -633,7 +785,7 @@ export class LiteRtLmAdapter {
 
       // ── Tool execution + persistence (args already an object — no JSON.parse) ──
       const executeAndPersistToolCall = async (call: AssembledLiteRtToolCall): Promise<void> => {
-        const tool = mergedRegistry.get(call.name)
+        const tool = ctx.tools.get(call.name)
         const completedAt = nowIso()
 
         if (!call.argsWellFormed) {
@@ -643,7 +795,11 @@ export class LiteRtLmAdapter {
           ])
           const results = new Tokenizable(err.message)
           helpers.reportToolCall(call.id, { tool: call.name, args: {} })
-          helpers.reportToolCall(call.id, { results, isError: true, isComplete: true })
+          helpers.reportToolCall(call.id, {
+            results,
+            isError: true,
+            isComplete: true,
+          })
           await ctx.storeToolCall(
             new ToolCall({
               id: call.id,
@@ -662,7 +818,7 @@ export class LiteRtLmAdapter {
         }
 
         if (!tool) {
-          const available = mergedRegistry
+          const available = ctx.tools
             .all()
             .map((t) => t.name)
             .sort()
@@ -672,7 +828,11 @@ export class LiteRtLmAdapter {
               : `Tool not found: ${call.name}. No tools are available this turn.`
           const results = new Tokenizable(errText)
           helpers.reportToolCall(call.id, { tool: call.name, args: call.args })
-          helpers.reportToolCall(call.id, { results, isError: true, isComplete: true })
+          helpers.reportToolCall(call.id, {
+            results,
+            isError: true,
+            isComplete: true,
+          })
           await ctx.storeToolCall(
             new ToolCall({
               id: call.id,
@@ -728,7 +888,11 @@ export class LiteRtLmAdapter {
           }
           results = new Tokenizable(detailMsg)
         }
-        helpers.reportToolCall(call.id, { results, isError: toolHadError, isComplete: true })
+        helpers.reportToolCall(call.id, {
+          results,
+          isError: toolHadError,
+          isComplete: true,
+        })
         const completedAt2 = nowIso()
         await ctx.storeToolCall(
           new ToolCall({
@@ -740,6 +904,10 @@ export class LiteRtLmAdapter {
             isError: toolHadError,
             results,
             fromArtifactTool: isArtifactTool,
+            // ArtifactTool results are the documented exception: they inline the slice the model queried
+            // from a prior artifact (handing back a handle to a query result would be recursion). Every
+            // other result keeps the secure default (inline:false → handle).
+            inline: isArtifactTool,
             createdAt: completedAt2,
             updatedAt: completedAt2,
             completedAt: completedAt2,
@@ -758,7 +926,7 @@ export class LiteRtLmAdapter {
       // Parse the full generated text → reasoning + clean prose + tool calls, then persist.
       // LiteRT-LM (v0.13.1) is text-only: tool calls + reasoning arrive as text in `content`, in the
       // model family's format, parsed here via the shared parser layer.
-      const toolNames = mergedRegistry.visible().map((t) => t.name)
+      const toolNames = ctx.tools.visible().map((t) => t.name)
       // Run the optional media-output extractor over the raw LiteRT generation result, persisting each
       // generated media via `ctx.storeMediaBytes` and building first-party `Media`. Returns [] when no hook
       // is configured (today's text-only output, unchanged).
@@ -795,6 +963,24 @@ export class LiteRtLmAdapter {
         const reasoned = reasoningParser(fullText)
         const parsed = toolCallParser(reasoned.cleanedText, { toolNames })
         const cleanText = parsed.cleanedText
+
+        // Raw-generation observability tap: surface what the model emitted vs. what parsed, before any
+        // persistence. Purely observational — swallow callback errors so a misbehaving observer can
+        // never corrupt the generation path.
+        if (merged.onRawGeneration) {
+          try {
+            merged.onRawGeneration({
+              rawText: fullText,
+              cleanedText: cleanText,
+              reasoning: reasoned.reasoning,
+              toolCalls: parsed.calls,
+              streamed: streamedProse,
+              streamId,
+            })
+          } catch {
+            /* observer errors are non-fatal */
+          }
+        }
 
         // Drop empty/whitespace traces — a model's no-think artifact carries no information.
         for (const trace of reasoned.reasoning) {
@@ -848,7 +1034,7 @@ export class LiteRtLmAdapter {
       // ── Streaming path ──
       if (stream) {
         const accumulator = h.createLiteRtStreamAccumulator()
-        const streamId = uuidv6()
+        const streamId = dispatchStreamId
         let proseStopped = false
         let streamedProse = false
 
@@ -858,8 +1044,10 @@ export class LiteRtLmAdapter {
             turnMessages as never
           ) as ReadableStream<LiteRtMessage>
         } catch (err) {
-          emitLifecycle(merged, 'litert_lm', lifecycleModel, 'error', { error: err })
-          ctx.nack(new E_LITERT_LM_STREAM_ERROR([isError(err) ? err.message : String(err)]))
+          emitLifecycle(merged, 'litert_lm', lifecycleModel, 'error', {
+            error: err,
+          })
+          ctx.nack(toLiteRtGenerationError(err, oomNote))
           return
         }
 
@@ -889,8 +1077,10 @@ export class LiteRtLmAdapter {
           }
         } catch (err) {
           if (ctx.abortSignal.aborted) return
-          emitLifecycle(merged, 'litert_lm', lifecycleModel, 'error', { error: err })
-          ctx.nack(new E_LITERT_LM_STREAM_ERROR([isError(err) ? err.message : String(err)]))
+          emitLifecycle(merged, 'litert_lm', lifecycleModel, 'error', {
+            error: err,
+          })
+          ctx.nack(toLiteRtGenerationError(err, oomNote))
           return
         }
 
@@ -905,8 +1095,10 @@ export class LiteRtLmAdapter {
       try {
         final = (await conversation.sendMessage(turnMessages as never)) as LiteRtMessage
       } catch (err) {
-        emitLifecycle(merged, 'litert_lm', lifecycleModel, 'error', { error: err })
-        ctx.nack(new E_LITERT_LM_STREAM_ERROR([isError(err) ? err.message : String(err)]))
+        emitLifecycle(merged, 'litert_lm', lifecycleModel, 'error', {
+          error: err,
+        })
+        ctx.nack(toLiteRtGenerationError(err, oomNote))
         return
       }
       const contentText =
@@ -919,7 +1111,7 @@ export class LiteRtLmAdapter {
                 .join('')
             : ''
       const nonStreamMedia = await collectGeneratedMedia(final)
-      await finishFromText(contentText, uuidv6(), false, nonStreamMedia)
+      await finishFromText(contentText, dispatchStreamId, false, nonStreamMedia)
       emitLifecycle(merged, 'litert_lm', lifecycleModel, 'complete')
     }
   }
