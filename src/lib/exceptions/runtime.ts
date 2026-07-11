@@ -614,7 +614,7 @@ export const E_NO_READER_RESOLVER = createException<[string]>(
  * branch, which must itself return a string. Inside a runner the throw rides the nack → error seam (a
  * dispatch error / banner); outside a runner it propagates as the real bug it is.
  *
- * The single printf argument describes the failure ("threw" or "returned a non-string (<type>)"); the
+ * The single printf argument describes the failure ("threw" or "returned a non-string (`type`)"); the
  * original error, when the evaluator threw, is attached on `cause`.
  *
  * @group Primitive Validation
