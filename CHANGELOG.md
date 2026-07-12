@@ -61,6 +61,44 @@ upgrading.
     BYO `Tool` over the adapter (byo-tools pattern), a direct call outside the tool-call loop, or a
     courtesy write to `Media.stash` that an LLM battery's `fallback-stash` `UnsupportedMediaPolicy` reads
     automatically.
+- **New battery domain: `isolation` — a transport-agnostic protocol substrate for running heavy or
+  untrusted work off the main thread (Web Worker) or out of process (node `child_process`), instead of
+  hand-rolling the spawn/request-response/crash-recovery plumbing per callsite.** Declare a service once
+  with {@link defineIsolatedService} (`methods`/`streams`/`events`), implement it guest-side via
+  {@link serveIsolated}/{@link serveIsolatedOverPort}, and drive it host-side via
+  {@link createIsolatedService} — over a real browser Web Worker ({@link spawnIsolated}/
+  {@link createWorkerTransport}, `@nhtio/adk/batteries/isolation`) or a real node `child_process`
+  ({@link forkIsolated}/{@link createChildProcessTransport}, the node-only deep import
+  `@nhtio/adk/batteries/isolation/child_process` — not re-exported from the main barrel or the batteries
+  aggregate because it imports `node:child_process` directly).
+  - **`child_process` over `worker_threads`, deliberately**: threads share the host's address space, so a
+    native-addon segfault or V8 fatal error inside one can take the whole host process down with it; a
+    real OS child process only kills itself, surfacing to the host as an ordinary `'exit'`/`'error'`
+    event. `forkIsolated` pins `serialization: 'advanced'` by default so the tiered codec's opaque
+    containers (`TypedArray`/`ArrayBuffer`/`DataView`/`Date`/`RegExp`/`Map`/`Set`) round-trip faithfully
+    rather than silently degrading under node's default JSON-style IPC serialization.
+  - **Crash containment and recovery**: a transport-reported crash rejects in-flight calls/streams with
+    `E_ISOLATED_CRASHED`, flips `state` to `'crashed'`, and fans out to `.onCrash(...)` subscribers;
+    recover via manual `.recycle()` or `autoRespawn: { policy }`, a sliding-window {@link createCrashPolicy}
+    generalizing the flagship agent's hand-rolled `GpuLossPolicy` into a domain-neutral decider either
+    transport's crash can consult.
+  - **This exact pattern was hand-rolled three separate times in this repo before the battery shipped**:
+    the flagship's 582-line LiteRT-LM worker pair, the media battery's `BinaryExecutor` seam, and the
+    specialists' `createPipeline` factory seams — the battery generalizes all three into one spec-first
+    substrate. Proven by refit, not by assertion: a `CreateLiteRtLmEngine`-typed factory over
+    `forkIsolated` drives a LiteRT-shaped guest end-to-end
+    (`tests/functional/batteries/isolation/litert_refit.node.spec.ts`, plus a Web Worker variant), and
+    the REAL, unmodified {@link TransformersJsEmbeddingsAdapter} runs its feature-extraction pipeline
+    out-of-process through its public `createPipeline` injection seam
+    (`tests/functional/batteries/isolation/embeddings_pipeline.node.spec.ts`).
+  - **`isolateFunction`** is a separate Blob-URL escape hatch for running an in-memory function value in a
+    throwaway Worker without writing a guest file — an explicit, opt-in, `eval`-equivalent trust surface
+    gated behind the literal `{ allowSourceRehydration: true }` acknowledgement, both at the type level and
+    at runtime.
+  - New docs section `docs/batteries/isolation/` (hub, browser, node, recipes) covers the thesis, both
+    transports' full option surfaces, and four end-to-end recipes: the LiteRT-LM worker pair refit,
+    isolated embeddings over a real adapter unchanged, custom classes crossing the wire via
+    `@nhtio/encoder`'s custom-encodable protocol, and wiring an observability dashboard.
 
 ## 2026-07-07
 

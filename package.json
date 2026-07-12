@@ -52,6 +52,7 @@
     "llama-tokenizer-js": "^1.2.2",
     "luxon": "^3.7.2",
     "mdast-util-to-string": "^4.0.0",
+    "neotraverse": "^0.6.18",
     "remark": "^15.0.1",
     "remark-frontmatter": "^5.0.0",
     "remark-gfm": "^4.0.1",

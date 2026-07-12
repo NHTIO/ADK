@@ -1,14 +1,113 @@
 import { resolve } from 'path'
+import { existsSync } from 'fs'
+import { createRequire } from 'module'
 import { readFile } from 'fs/promises'
 import { getEntries } from './bin/utils'
 import { defineConfig, loadEnv } from 'vite'
 import { playwright } from '@vitest/browser-playwright'
 import { dtsComplex } from '@nhtio/vite-plugins/dts_complex'
-import type { UserConfig } from 'vite'
+import type { Plugin, UserConfig } from 'vite'
 
 const LIB_NAME = '@nhtio/adk'
 const BASE_DIR = resolve(__dirname)
 const SRC_DIR = resolve(BASE_DIR, 'src')
+
+// remark's transitive dep resolves to `index.dom.js` under the `browser` export condition, which
+// calls `document.createElement()` at import time — fatal inside a real Web Worker (the isolation
+// battery specs load `@nhtio/adk` source in a module Worker; workers have no `document`). Pin the
+// worker-safe non-DOM build (the package's own `worker`/`default` condition) — it works identically
+// on the page. Resolved through remark's own dependency chain because pnpm does not hoist
+// transitive deps to the root node_modules.
+const decodeNamedCharacterReferencePath = createRequire(
+  createRequire(createRequire(resolve(BASE_DIR, 'package.json')).resolve('remark')).resolve(
+    'remark-parse'
+  )
+).resolve('decode-named-character-reference')
+
+/**
+ * Dev-server middleware that serves PREBUNDLED isolation-battery worker fixtures at
+ * `/@isolation-worker/<fixture>.js`.
+ *
+ * Why not let the Vite dev server's native module-Worker support serve them? WebKit. Its worker
+ * module loader recurses per import edge and stack-overflows (`RangeError: Maximum call stack size
+ * exceeded`) on the deep un-bundled ESM graph the dev server serves for `@nhtio/adk` source
+ * (empirically: a worker importing `@nhtio/adk/guards` alone loads fine, `@nhtio/validation` alone
+ * loads fine, both together crash before a single line of fixture code runs — chromium and firefox
+ * handle the identical graph fine). Bundling to a single flat file sidesteps the recursion
+ * entirely; this is the browser analogue of WP3's esbuild-wasm prebundle for `child_process.fork()`
+ * (`tests/_fixtures/isolation/prebundle_child.ts`).
+ */
+const isolationWorkerPrebundle = (): Plugin => {
+  const PREFIX = '/@isolation-worker/'
+  const fixtureDir = resolve(BASE_DIR, 'tests/_fixtures/isolation')
+  const cache = new Map<string, Promise<string>>()
+  const bundle = async (name: string): Promise<string> => {
+    const esbuild = await import('esbuild-wasm')
+    const entry = resolve(fixtureDir, `${name}.ts`)
+    if (!existsSync(entry)) throw new Error(`unknown isolation worker fixture: ${name}`)
+    const result = await esbuild.build({
+      entryPoints: [entry],
+      bundle: true,
+      platform: 'browser',
+      format: 'esm',
+      target: 'es2022',
+      write: false,
+      alias: {
+        // The wide `guards`/`factories` barrels re-export from modules with top-level side effects
+        // (tokenizer instantiation and friends), so esbuild cannot tree-shake them — bundling them
+        // drags in ~19MB of tokenizer tables the isolation battery never touches. Alias the two
+        // barrels straight to the concrete implementation modules that define everything isolation
+        // actually imports (isInstanceOf/isError/isObject and createException, respectively).
+        '@nhtio/adk/guards': resolve(SRC_DIR, 'lib/utils/guards.ts'),
+        '@nhtio/adk/factories': resolve(SRC_DIR, 'lib/utils/exceptions.ts'),
+        '@nhtio/adk': SRC_DIR,
+        'knex': resolve(BASE_DIR, 'tests/_fixtures/knex_browser_stub.ts'),
+        'decode-named-character-reference': decodeNamedCharacterReferencePath,
+      },
+      // The codec's `@nhtio/encoder` peer is a LAZY dynamic import that only runs when a value
+      // escalates past the raw tier — the specs never do, so leave it external rather than inflate
+      // the bundle (the guest's availability probe handles the unresolvable bare specifier).
+      external: ['@nhtio/encoder', '@nhtio/encoder/type_guards'],
+      logLevel: 'silent',
+    })
+    const out = result.outputFiles?.[0]
+    if (!out) throw new Error(`esbuild produced no output for ${entry}`)
+    return out.text
+  }
+  return {
+    name: 'adk:isolation-worker-prebundle',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        // Vite's `new URL('/...', import.meta.url)` asset transform re-roots the absolute path under
+        // `/@fs/` in the served module, so accept the prefix at either position.
+        const url = (req.url ?? '').replace(/^\/@fs/, '')
+        if (!url.startsWith(PREFIX)) return next()
+        const name = url.slice(PREFIX.length).replace(/\.js(\?.*)?$/, '')
+        if (!/^[a-z0-9_]+$/.test(name)) {
+          res.statusCode = 400
+          res.end('bad isolation worker fixture name')
+          return
+        }
+        let job = cache.get(name)
+        if (!job) {
+          job = bundle(name)
+          cache.set(name, job)
+        }
+        job.then(
+          (code) => {
+            res.setHeader('content-type', 'text/javascript')
+            res.end(code)
+          },
+          (err) => {
+            cache.delete(name)
+            res.statusCode = 500
+            res.end(String(err))
+          }
+        )
+      })
+    },
+  }
+}
 const externals = new Set<string>([
   'node:util',
   'node:path',
@@ -16,6 +115,7 @@ const externals = new Set<string>([
   'node:url',
   'node:fs',
   'node:fs/promises',
+  'node:child_process',
   'knex',
   'stream',
   'buffer',
@@ -86,6 +186,7 @@ export default defineConfig(async ({ mode }) => {
   )
   return {
     plugins: [
+      isolationWorkerPrebundle(),
       oncePerBuild(
         dtsComplex({
           bundledDependencies,
@@ -205,7 +306,9 @@ export default defineConfig(async ({ mode }) => {
             alias: {
               // The root mainFields override skips package `browser` fields; exceljs needs
               // its browser bundle in this project (the Node entry touches `process`).
-              exceljs: resolve(BASE_DIR, 'node_modules/exceljs/dist/exceljs.min.js'),
+              'exceljs': resolve(BASE_DIR, 'node_modules/exceljs/dist/exceljs.min.js'),
+              // See the const's doc comment near the top of this file — worker-safe non-DOM build.
+              'decode-named-character-reference': decodeNamedCharacterReferencePath,
             },
           },
           test: {

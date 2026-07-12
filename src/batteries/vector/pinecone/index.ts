@@ -115,7 +115,7 @@ export class PineconeVectorStore extends BaseVectorStore {
       if (present.length > 0) {
         let listed = new Set<string>()
         try {
-          const lr = await this.#index!.listPaginated({ namespace: physicalNs, limit: 100 })
+          const lr = await this.#index!.listPaginated({ namespace: physicalNs, limit: 99 })
           listed = new Set((lr.vectors ?? []).map((v: any) => v.id))
         } catch {
           listed = new Set()
@@ -132,7 +132,7 @@ export class PineconeVectorStore extends BaseVectorStore {
       if (absent.length > 0) {
         let listed = new Set<string>()
         try {
-          const lr = await this.#index!.listPaginated({ namespace: physicalNs, limit: 1000 })
+          const lr = await this.#index!.listPaginated({ namespace: physicalNs, limit: 99 })
           listed = new Set((lr.vectors ?? []).map((v: any) => v.id))
         } catch {
           listed = new Set()
@@ -228,7 +228,7 @@ export class PineconeVectorStore extends BaseVectorStore {
       do {
         const lr = await this.#index!.listPaginated({
           namespace: physicalNs,
-          limit: 1000,
+          limit: 99,
           startingToken: page.next,
         })
         if (lr.vectors) ids.push(...lr.vectors.map((v: any) => v.id))
@@ -381,7 +381,7 @@ export class PineconeVectorStore extends BaseVectorStore {
       do {
         // Get all IDs without filter - Pinecone v7 listPaginated without filter works
         const listRes = await this.#index!.listPaginated({
-          limit: 100,
+          limit: 99,
           startingToken: page.next,
           namespace: physicalNs,
         })
@@ -459,7 +459,7 @@ export class PineconeVectorStore extends BaseVectorStore {
         const ids: string[] = []
         do {
           const listRes = await this.#index!.listPaginated({
-            limit: 1000,
+            limit: 99,
             startingToken: page.next,
             namespace: physicalNs,
           })
@@ -515,7 +515,7 @@ export class PineconeVectorStore extends BaseVectorStore {
         do {
           const lr = await this.#index!.listPaginated({
             namespace: physicalNs,
-            limit: 1000,
+            limit: 99,
             startingToken: page.next,
           })
           if (lr.vectors) allIds.push(...lr.vectors.map((v: any) => v.id))

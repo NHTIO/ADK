@@ -74,6 +74,9 @@ importers:
       moo:
         specifier: ^0.5.3
         version: 0.5.3
+      neotraverse:
+        specifier: ^0.6.18
+        version: 0.6.18
       oracledb:
         specifier: ^6.0.0
         version: 6.10.0
@@ -5862,6 +5865,10 @@ packages:
   neo4j-driver@6.1.0:
     resolution: {integrity: sha512-9OJDMmaSCwwEQAIU5UL5N0YOqmKpB6rya0e87UwX6TEDvmqNlBX8ezHNiIvqIV+KRJSRYRi6NPMLtFLWRliVNw==}
     engines: {node: '>=18.0.0'}
+
+  neotraverse@0.6.18:
+    resolution: {integrity: sha512-Z4SmBUweYa09+o6pG+eASabEpP6QkQ70yHj351pQoEXIs8uHbaU2DWVmzBANKgflPa47A50PtB2+NgRpQvr7vA==}
+    engines: {node: '>= 10'}
 
   next-tick@1.1.0:
     resolution: {integrity: sha512-CXdUiJembsNjuToQvxayPZF9Vqht7hewsvy2sOWafLvi2awflj9mOC6bHIg50orX8IJvWKY9wYQ/zB2kogPslQ==}
@@ -13608,6 +13615,8 @@ snapshots:
       neo4j-driver-bolt-connection: 6.1.0
       neo4j-driver-core: 6.1.0
       rxjs: 7.8.2
+
+  neotraverse@0.6.18: {}
 
   next-tick@1.1.0: {}
 
