@@ -35,6 +35,9 @@ export type BatteryLifecycleBattery =
   | 'litert_lm'
   | 'webllm'
   | 'transformers_js_embed'
+  | 'transformers_js_stt'
+  | 'transformers_js_caption'
+  | 'tesseract_js_ocr'
 
 /** A single normalized lifecycle report. */
 export interface BatteryLifecycleReport {

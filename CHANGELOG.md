@@ -15,6 +15,53 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-07-12
+
+### Added
+
+- **New battery domain: `specialists` — on-device speech-to-text, OCR, and image captioning, each a
+  narrow single-purpose model turning one modality into TEXT for any text-only LLM.** Three adapters:
+  {@link TransformersJsSttAdapter} (`@nhtio/adk/batteries/specialists/stt/transformers_js`, Whisper-family
+  ASR via `@huggingface/transformers`, `transcribe(input, opts?) → { text, segments? }`),
+  {@link TesseractJsOcrAdapter} (`@nhtio/adk/batteries/specialists/ocr/tesseract_js`, pure-WASM
+  `tesseract.js`, `recognize(input, opts?) → { text, confidence? }`), and
+  {@link TransformersJsCaptionAdapter} (`@nhtio/adk/batteries/specialists/caption/transformers_js`,
+  transformers.js's `image-to-text` pipeline, `describe(input, opts?) → { text }`). All three mirror the
+  embeddings adapters' construct-once/`preload`/`reset`/`dispose` shape and are ENVIRONMENT-NEUTRAL —
+  `isAvailable()` is always `true`, no WebGPU or platform gate — proven against real weights in both Node
+  and a headed, real-GPU Chromium session
+  (`tests/functional/batteries/specialists/specialists.webgpu.spec.ts`).
+  - **Zero-core-import at the structural-contract layer**, the same posture as the `thrift`/`compact`
+    context batteries: `SpecialistMediaLike`/`SpecialistAudioInput`/`SpecialistImageInput`
+    (`src/batteries/specialists/_shared`) are locally-declared duck types a real `@nhtio/adk` `Media`
+    satisfies without either side importing the other. STT resamples any input — pre-decoded PCM at any
+    sample rate, or an encoded container via an injectable `DecodeAudioFn` (default: lazy `audio-decode`
+    peer + downmix-to-mono) — to 16kHz mono before the pipeline call; the linear-interpolation resampler
+    and the mono-downmix helper were lifted into a shared `lib/utils/audio` module rather than duplicated
+    per adapter.
+  - **OCR's cached-worker posture is a deliberate divergence from the media battery's own `tesseract_js`
+    engine**: one `TesseractJsOcrAdapter` holds a single warm worker across every `recognize()` call
+    (construct-once, single-flight resolution) instead of booting a fresh worker per call. tesseract.js v7
+    has no safe way to re-language an already-booted worker, so a per-call `languages` override that
+    doesn't match the constructor's set throws `E_TESSERACT_JS_OCR_ENGINE_ERROR` rather than silently
+    switching; `reset()` and `dispose()` are aliases here (both terminate the worker — no lighter tier
+    exists for a live WASM worker).
+  - **Composition, proven**: `tests/functional/batteries/specialists/specialist_compose.node.spec.ts`
+    feeds Whisper's transcript of `speech.wav` ("The quick brown fox jumps over the lazy dog.") and
+    Tesseract's OCR of `sample_ocr.png` ("HELLO OCR\n123") to a separate text-only Llama-3.2-1B, which
+    grounds its answer ("Fox") on that text alone — the pattern this domain exists to enable, not just
+    each specialist's own accuracy.
+  - **Deliberately no agent integration and no cloud engines.** Same posture as the embeddings batteries:
+    the adapter is the whole product — no `Tool` class, no forged tool, no `TurnRunnerConfig` wiring. And
+    unlike the LLM/vector batteries (which abstract a real, converged wire contract), the cloud
+    STT/OCR/vision landscape has no such convergence — every vendor's API has its own auth model, request
+    shape, and SDK, with nothing worth abstracting — so this domain draws the line at on-device only, on
+    all three adapters, full stop. New docs section `docs/batteries/specialists/` (overview + one
+    reference page per adapter) covers the thesis and the three ways a consumer actually wires one in: a
+    BYO `Tool` over the adapter (byo-tools pattern), a direct call outside the tool-call loop, or a
+    courtesy write to `Media.stash` that an LLM battery's `fallback-stash` `UnsupportedMediaPolicy` reads
+    automatically.
+
 ## 2026-07-07
 
 ### Security

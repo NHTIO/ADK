@@ -28,5 +28,6 @@
 export * from './llm'
 export * from './tools'
 export * from './embeddings'
+export * from './specialists'
 export * from './vector'
 export * from './context'

@@ -17,9 +17,16 @@
 
 import { argOf } from '../runtime'
 import { E_MEDIA_STEP_FAILED } from '../exceptions'
+// Accepted-shared-runtime tier (see CONTRIBUTING.md → Design Decisions → #13 Battery design):
+// pure, class-free resample primitive shared with the specialists `_shared` battery — no core
+// class coupling, so this deep relative reach is accepted as-is, not re-exported through a shim.
+import { resampleTo } from '../../../lib/utils/audio'
 import { PCM_MIME, pcmToBytes, bytesToPcm } from '../contracts'
 import type { MutateRequest } from '../contracts'
 import type { StepImpl, StepContext, StepResult } from '../runtime'
+
+// Re-exported for existing importers (`resampleTo` used to be defined locally in this module).
+export { resampleTo }
 
 const fail = (verb: string, message: string): never => {
   throw new E_MEDIA_STEP_FAILED([verb, message])
@@ -126,22 +133,6 @@ const imageStep: StepImpl = async (ctx) => {
 }
 
 // ── audio ────────────────────────────────────────────────────────────────────
-
-/** Downmix to mono and linearly resample to the target rate. Pure, cross-env. */
-export const resampleTo = (pcm: Float32Array, fromRate: number, toRate: number): Float32Array => {
-  if (fromRate === toRate) return pcm
-  const ratio = fromRate / toRate
-  const outLength = Math.floor(pcm.length / ratio)
-  const out = new Float32Array(outLength)
-  for (let i = 0; i < outLength; i++) {
-    const pos = i * ratio
-    const left = Math.floor(pos)
-    const right = Math.min(left + 1, pcm.length - 1)
-    const frac = pos - left
-    out[i] = pcm[left] * (1 - frac) + pcm[right] * frac
-  }
-  return out
-}
 
 const ASR_SAMPLE_RATE = 16_000
 

@@ -20,6 +20,7 @@
  */
 
 import { isError } from '@nhtio/adk/guards'
+import { downmixToMono } from '../../../lib/utils/audio'
 import { pcmToBytes, PCM_MIME, EMPTY_MIME } from '../contracts'
 import { E_INVALID_MEDIA_PIPELINE_CONFIG } from '../exceptions'
 import type { MediaEngine, ConvertRequest, ConvertResult } from '../contracts'
@@ -123,18 +124,7 @@ export const audioDecodeEngine = (options: AudioDecodeEngineOptions = {}): Media
     const decode = await getDecode()
     const buffer = await decode(request.bytes)
     const channels = channelsOf(buffer)
-    let pcm: Float32Array
-    if (channels.length <= 1) {
-      pcm = channels[0]
-    } else {
-      // Downmix to mono by averaging channels.
-      const length = channels[0].length
-      const mono = new Float32Array(length)
-      for (const data of channels) {
-        for (let i = 0; i < length; i++) mono[i] += data[i] / channels.length
-      }
-      pcm = mono
-    }
+    const pcm = downmixToMono(channels)
     return {
       outputs: [
         { bytes: pcmToBytes(pcm), mimeType: PCM_MIME, meta: { sampleRate: buffer.sampleRate } },
