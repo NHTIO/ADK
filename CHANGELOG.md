@@ -263,7 +263,7 @@ upgrading.
   head-to-head against a naive-recency baseline across five model/window cells on a shared 94-turn
   corpus: thrift is the lightest arm nearly everywhere and never collapses, while compact tops the
   two cells where real context pressure meets a paid summarizer budget (kimi-k2.5 @ 128k, 1.48 vs.
-  1.13 3-judge; gemma-31b @ 128k, 2-judge pool pending its third judge) — documented in full,
+  1.13; gemma-31b @ 128k, 1.48 vs. 1.35 — both 3-judge) — documented in full,
   including the naive baseline's 0.08 collapse on the kimi cell and per-cell dispatch/summarizer-
   overhead tables, in the new `docs/batteries/context/` pages.
 
