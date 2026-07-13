@@ -99,6 +99,39 @@ upgrading.
     transports' full option surfaces, and four end-to-end recipes: the LiteRT-LM worker pair refit,
     isolated embeddings over a real adapter unchanged, custom classes crossing the wire via
     `@nhtio/encoder`'s custom-encodable protocol, and wiring an observability dashboard.
+- **New battery domain: `generation` — text-to-image generation and image editing, three engines behind one
+  shared contract, for agents that PRODUCE media instead of just consuming it.** Every engine exposes the
+  same `generate(prompt, opts?)` / `edit(inputs, prompt, opts?)` → `Promise<GeneratedMediaOutput[]>`
+  contract over the same `BaseGenerationAdapterOptions{ model: string }` base (required, no default,
+  mirroring the embeddings batteries): {@link OpenAIGenerationAdapter}
+  (`@nhtio/adk/batteries/generation/openai`, raw `fetch` against `/v1/images/generations` +
+  `/v1/images/edits`, multipart edits, `responseFormatMode` tri-state for the `dall-e`/`gpt-image` split),
+  {@link GeminiGenerationAdapter} (`@nhtio/adk/batteries/generation/gemini`, raw `fetch` against the native
+  `generateContent` REST surface, probe-confirmed image-parts-first/text-last part ordering for `edit()`,
+  refusals surfaced as a thrown malformed-response error with the refusal text embedded), and
+  {@link TransformersJsGenerationAdapter} (`@nhtio/adk/batteries/generation/transformers_js`, EXPERIMENTAL
+  on-device text→image via DeepSeek Janus's `MultiModalityCausalLM.generate_images()` — the only
+  image-generation surface transformers.js exposes, no `pipeline('text-to-image')` task exists — real
+  knobs cross-verified against the installed package's own sampler/config source).
+  - **`edit()` support is not uniform across engines**: OpenAI and Gemini both support it (multipart form
+    data vs. inline base64 image parts, respectively); the transformers.js engine always throws
+    `E_TRANSFORMERS_JS_GENERATION_UNSUPPORTED_OPERATION(['edit', reason])` — Janus is text-conditioned
+    generation only, with no image-conditioned edit/inpaint entry point in the installed API.
+  - **Live-verified through the same LB gateway topology the other cloud batteries use**: both engines'
+    `.cross.spec.ts` specs route through the repo's own polyglot LB rather than each vendor's API directly,
+    authenticating via a gateway-style `Authorization: Bearer` header instead of each adapter's own native
+    scheme (`x-goog-api-key` for Gemini, its own `Authorization: Bearer` for OpenAI). The OpenAI-shaped
+    live spec only exercises `generate()` — probing the gateway's `/v1/images/edits` route returned a 404
+    (the gateway does not implement OpenAI-shaped image edits, only generations) — while the Gemini live
+    spec proves both `generate()` and `edit()` (including a real pixel-level recolor of a fixture image)
+    through that same gateway.
+  - **Deliberately no agent integration**, the same posture as every other domain in this family: the
+    adapter is the whole product — no `Tool` class, no forged tool, no `TurnRunnerConfig` wiring.
+    `GenerationImageInput` accepts a real `Media` instance structurally (`{ mimeType, asBytes() }`), zero
+    import coupling either direction. New docs section `docs/batteries/generation/` (hub, one reference
+    page per engine, recipes) covers the shared contract, each engine's full wire behavior, and how to wire
+    a `generate`/`edit` call into a BYO `Tool`, an edit-tool consuming an inbound `Media` attachment, a
+    courtesy `Media.stash` caption, and running the on-device engine behind `forkIsolated`.
 
 ## 2026-07-07
 

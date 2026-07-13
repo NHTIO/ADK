@@ -314,7 +314,18 @@ async function main() {
       parsed[Object.keys(labelToArm).find((L) => labelToArm[L] === arm)] ?? null
     // The 3 committee judges are independent models — score this turn CONCURRENTLY (parallel judges),
     // then move to the next turn. Contestant models are still processed one script-run at a time.
-    const parsedByJudge = await Promise.all(JUDGES.map((j) => askJudge(j, block).then(parseScores)))
+    // askAndParse retries when a judge returns a NON-EMPTY answer that nonetheless parses to all-null
+    // (i.e. it ignored the "output exactly SCORE_A/B/C" instruction and emitted prose/tool-dumps instead
+    // — observed with thinking models that reason past the output contract). askJudge only retries on
+    // EMPTY output, so this all-null case slips through as a silently-dropped turn without this guard.
+    const askAndParse = async (j) => {
+      for (let a = 0; a < 3; a++) {
+        const parsed = parseScores(await askJudge(j, block))
+        if (parsed.A != null || parsed.B != null || parsed.C != null) return parsed
+      }
+      return { A: null, B: null, C: null }
+    }
+    const parsedByJudge = await Promise.all(JUDGES.map((j) => askAndParse(j)))
     JUDGES.forEach((judge, ji) => {
       const parsed = parsedByJudge[ji]
       turnResult.judges[judge] = {

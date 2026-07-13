@@ -37,6 +37,7 @@ export type BatteryLifecycleBattery =
   | 'transformers_js_embed'
   | 'transformers_js_stt'
   | 'transformers_js_caption'
+  | 'transformers_js_generation'
   | 'tesseract_js_ocr'
 
 /** A single normalized lifecycle report. */
