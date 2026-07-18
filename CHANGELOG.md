@@ -15,6 +15,13 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-07-13
+
+### Added
+
+- **New battery domain: `tts` — text-to-speech synthesis generating audio from text.** Two new engines under the shared contract `synthesize(text, opts?) → Promise<GeneratedMediaOutput>`: a model-backed {@link TransformersJsTtsAdapter} (`@nhtio/adk/batteries/tts/transformers_js`, MMS-VITS / SpeechT5 via `@huggingface/transformers`), and a zero-config, node-only {@link NativeTtsAdapter} (`@nhtio/adk/batteries/tts/native`) that shells out to macOS `say`, Linux `espeak-ng`, or Windows PowerShell.
+- **New embeddings battery: Ollama.** A fourth engine ships under the shared embeddings shape, targeting Ollama's native `/api/embed` endpoint. The new {@link OllamaEmbeddingsAdapter} (`@nhtio/adk/batteries/embeddings/ollama`) supports `baseURL`, `truncate`, `keepAlive`, and runtime `options`, with zero environment constraints (runs in Node, browser, edge).
+
 ## 2026-07-12
 
 ### Added

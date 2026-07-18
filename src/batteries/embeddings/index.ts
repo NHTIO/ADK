@@ -21,6 +21,24 @@
 
 export { OpenAIEmbeddingsAdapter } from './openai'
 
+export { OllamaEmbeddingsAdapter } from './ollama'
+export { ollamaEmbeddingsOptionsSchema } from './ollama'
+export { validateOptions as validateOllamaEmbeddingsOptions } from './ollama'
+
+export type {
+  OllamaEmbeddingsAdapterOptions,
+  OllamaEmbeddingsRuntimeOptions,
+  OllamaEmbeddingsRequestBody,
+  OllamaEmbeddingsResponseBody,
+} from './ollama'
+
+export {
+  E_INVALID_OLLAMA_EMBEDDINGS_OPTIONS,
+  E_OLLAMA_EMBEDDINGS_HTTP_ERROR,
+  E_OLLAMA_EMBEDDINGS_REQUEST_TIMEOUT,
+  E_OLLAMA_EMBEDDINGS_MALFORMED_RESPONSE,
+} from './ollama'
+
 export { applyEmbeddingPrefix } from './openai'
 
 export { openAIEmbeddingsOptionsSchema } from './openai'
