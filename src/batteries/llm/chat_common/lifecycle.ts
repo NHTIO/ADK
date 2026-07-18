@@ -39,6 +39,7 @@ export type BatteryLifecycleBattery =
   | 'transformers_js_caption'
   | 'transformers_js_generation'
   | 'transformers_js_tts'
+  | 'local_diffusion_generation'
   | 'tesseract_js_ocr'
 
 /** A single normalized lifecycle report. */
@@ -53,9 +54,13 @@ export interface BatteryLifecycleReport {
   at: string
   /** Human-readable detail, e.g. `'booting WebGPU runtime'`. */
   detail?: string
-  /** Normalized download/load progress in `0..1`, when the provider reports it (the `loading` phase). */
+  /**
+   * Normalized progress in `0..1`, when the provider reports it. Emitted during the `loading` phase
+   * (weights download/compile) and — for engines that stream per-step generation progress, e.g. the
+   * diffusion denoise loop — during the `generating` phase as well.
+   */
   progress?: number
-  /** The provider's own progress payload, passed through verbatim (the `loading` phase). */
+  /** The provider's own progress payload, passed through verbatim (the `loading` or `generating` phase). */
   raw?: unknown
   /** The failure, populated only when `phase === 'error'`. */
   error?: unknown
@@ -90,7 +95,11 @@ export interface BatteryLifecycleHooks {
   onCompiling?: BatteryLifecycleCallback
   /** Engine/pipeline resolved and cached, before the first generation. */
   onReady?: BatteryLifecycleCallback
-  /** Immediately before the provider generate call (fires per turn). */
+  /**
+   * The generate call is in progress (fires per turn). Fires once immediately before the provider call
+   * for most engines; engines that stream per-step generation progress (e.g. a diffusion denoise loop)
+   * fire it REPEATEDLY during generation, each carrying a `progress` in `0..1`.
+   */
   onGenerating?: BatteryLifecycleCallback
   /** After the turn's output is parsed + persisted, before `ack` (fires per turn). */
   onComplete?: BatteryLifecycleCallback

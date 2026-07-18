@@ -15,6 +15,12 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-07-18
+
+### Added
+
+- **New generation engine: `local_diffusion` — a BYO-inference-subprocess image-generation engine over a stdio line protocol.** The Node-only {@link LocalDiffusionGenerationAdapter} (`@nhtio/adk/batteries/generation/local_diffusion`, subpath-only — excluded from the environment-neutral generation aggregate) drives a user-supplied inference subprocess over a stdin/stdout line protocol (modeled on DiffusionBee), so a consumer can run a local Stable-Diffusion checkpoint without the ADK bundling Python/torch. Same `generate`/`edit` → `Promise<GeneratedMediaOutput[]>` contract as the other generation engines, plus streamed per-step progress (`dnpr` → the `generating` lifecycle phase), best-effort cancellation (`AbortSignal` → advisory `__stop__`, with `reset()`/`dispose()` as the hard stop), single-flight admission, `outputDir`-contained cleanup of backend-written files, and both inline-base64 and file-path image results. Ships the protocol + a documented Python reference backend; the consumer supplies the process.
+
 ## 2026-07-13
 
 ### Added
