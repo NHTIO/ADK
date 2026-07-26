@@ -707,3 +707,150 @@ export const singleOllamaStreamCassette = (
     },
   ],
 })
+
+// ─── Anthropic native /v1/messages builders ───────────────────────────────────
+
+/** Minimal Anthropic text block builder input. */
+export interface AnthropicThinkingBlockSpec {
+  thinking: string
+  signature: string
+}
+
+/** Minimal Anthropic tool-use block builder input. */
+export interface AnthropicToolUseSpec {
+  id: string
+  name: string
+  input: Record<string, unknown>
+}
+
+/** Programmatically build a non-streaming Anthropic `/v1/messages` response object. */
+export const buildAnthropicMessagesResponse = (input: {
+  id?: string
+  model?: string
+  content?: string
+  thinking?: ReadonlyArray<AnthropicThinkingBlockSpec>
+  redactedThinking?: ReadonlyArray<{ data: string }>
+  toolUses?: ReadonlyArray<AnthropicToolUseSpec>
+  stopReason?: string | null
+  stopSequence?: string | null
+  stopDetails?: unknown
+  usage?: Record<string, unknown>
+}): Record<string, unknown> => {
+  const content: Array<Record<string, unknown>> = []
+  for (const block of input.thinking ?? []) {
+    content.push({ type: 'thinking', thinking: block.thinking, signature: block.signature })
+  }
+  for (const block of input.redactedThinking ?? []) {
+    content.push({ type: 'redacted_thinking', data: block.data })
+  }
+  if ((input.content ?? '').length > 0) {
+    content.push({ type: 'text', text: input.content ?? '' })
+  }
+  for (const tool of input.toolUses ?? []) {
+    content.push({ type: 'tool_use', id: tool.id, name: tool.name, input: tool.input })
+  }
+  return {
+    id: input.id ?? 'msg_anthem_1',
+    type: 'message',
+    role: 'assistant',
+    model: input.model ?? 'claude-opus-5',
+    content,
+    stop_reason: input.stopReason ?? 'end_turn',
+    stop_sequence: input.stopSequence ?? null,
+    ...(input.stopDetails !== undefined ? { stop_details: input.stopDetails } : {}),
+    usage: input.usage ?? { input_tokens: 11, output_tokens: 2 },
+  }
+}
+
+const anthropicEventFrame = (event: Record<string, unknown>): SSEFrame => ({
+  raw: `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`,
+})
+
+/**
+ * Programmatically build named-event SSE frames for a streaming Anthropic `/v1/messages` response.
+ * Unlike OpenAI-style data-only SSE, Anthropic keys off the `event:` line, so every frame is
+ * emitted verbatim as `{ raw }`.
+ */
+export const buildAnthropicStreamFrames = (input: {
+  id?: string
+  model?: string
+  events?: ReadonlyArray<Record<string, unknown>>
+  stopReason?: string | null
+  stopSequence?: string | null
+  stopDetails?: unknown
+  usageStart?: Record<string, unknown>
+  usageDelta?: Record<string, unknown>
+  includeMessageStart?: boolean
+  includeMessageDelta?: boolean
+  includeMessageStop?: boolean
+}): SSEFrame[] => {
+  const model = input.model ?? 'claude-opus-5'
+  const frames: SSEFrame[] = []
+  if (input.includeMessageStart !== false) {
+    frames.push(
+      anthropicEventFrame({
+        type: 'message_start',
+        message: {
+          id: input.id ?? 'msg_anthem_stream_1',
+          type: 'message',
+          role: 'assistant',
+          model,
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: input.usageStart ?? { input_tokens: 9, output_tokens: 0 },
+        },
+      })
+    )
+  }
+  for (const event of input.events ?? []) {
+    frames.push(anthropicEventFrame(event))
+  }
+  if (input.includeMessageDelta !== false) {
+    frames.push(
+      anthropicEventFrame({
+        type: 'message_delta',
+        delta: {
+          stop_reason: input.stopReason ?? 'end_turn',
+          stop_sequence: input.stopSequence ?? null,
+          ...(input.stopDetails !== undefined ? { stop_details: input.stopDetails } : {}),
+        },
+        usage: input.usageDelta ?? { output_tokens: 2 },
+      })
+    )
+  }
+  if (input.includeMessageStop !== false) {
+    frames.push(anthropicEventFrame({ type: 'message_stop' }))
+  }
+  return frames
+}
+
+/** One-liner cassette for a single non-streaming Anthropic `/v1/messages` response. */
+export const singleAnthropicResponseCassette = (
+  name: string,
+  input: Parameters<typeof buildAnthropicMessagesResponse>[0]
+): Cassette => ({
+  name,
+  interactions: [
+    {
+      label: 'single-anthropic-response',
+      request: { method: 'POST' },
+      response: { body: buildAnthropicMessagesResponse(input) },
+    },
+  ],
+})
+
+/** One-liner cassette for a single streaming Anthropic `/v1/messages` response. */
+export const singleAnthropicStreamCassette = (
+  name: string,
+  input: Parameters<typeof buildAnthropicStreamFrames>[0]
+): Cassette => ({
+  name,
+  interactions: [
+    {
+      label: 'single-anthropic-stream',
+      request: { method: 'POST' },
+      response: { sse: buildAnthropicStreamFrames(input) },
+    },
+  ],
+})

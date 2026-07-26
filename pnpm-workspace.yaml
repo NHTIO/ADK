@@ -21,6 +21,25 @@ allowBuilds:
 minimumReleaseAge: 4320
 minimumReleaseAgeExclude:
   - '@nhtio/*'
+  # @anthropic-ai/sdk is excluded because its publish chain defeats the specific
+  # threat the cooldown exists for, and this was verified rather than assumed:
+  #   - Published by a GitHub Actions TRUSTED PUBLISHER via OIDC
+  #     (_npmUser: npm-oidc-no-reply@github.com). There is no long-lived npm
+  #     token to steal, which is the vector every recent worm campaign used.
+  #   - Registry signature AND SLSA provenance attestation both verify
+  #     (`npm audit signatures` → "verified registry signatures" +
+  #     "verified attestations").
+  #   - The provenance attests the tarball was built by GitHub's hosted runner
+  #     from anthropics/anthropic-sdk-typescript, workflow create-releases.yml,
+  #     commit 3b45cd3b69c956ac63384fdb09ce1d8109f3fa80 — and the GitHub release
+  #     sdk-v0.115.0 targets that SAME commit. Chain closes end to end.
+  #   - Zero install scripts (no preinstall/install/postinstall), so nothing
+  #     executes at install time. Two runtime deps. MIT.
+  # Re-verify on a major bump with:
+  #   npm view @anthropic-ai/sdk@<v> --json   (check dist.signatures + _npmUser.trustedPublisher)
+  #   npm audit signatures                    (in a scratch install)
+  #   curl the dist.attestations.url          (confirm repo + workflow + commit)
+  - '@anthropic-ai/sdk'
 
 overrides:
   npm-run-path: 5.3.0

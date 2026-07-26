@@ -30,6 +30,7 @@ Use batteries when the default behavior matches the product:
 
 - `@nhtio/adk/batteries/llm/openai_chat_completions` for OpenAI-compatible Chat Completions endpoints.
 - `@nhtio/adk/batteries/llm/webllm_chat_completions` for browser-local WebLLM execution.
+- `@nhtio/adk/batteries/llm/anthropic_messages` for the native Anthropic Messages API.
 - `@nhtio/adk/batteries` and category paths for prebuilt tool instances.
 - `@nhtio/adk/batteries/storage/*` only for `SpooledArtifact` byte storage.
 

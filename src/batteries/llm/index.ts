@@ -60,6 +60,67 @@ export {
 } from './litert_lm'
 export type { LiteRtLmAdapterOptions, LiteRtLmEngine, LiteRtLmConversation } from './litert_lm'
 
+export { AnthropicMessagesAdapter } from './anthropic_messages'
+export { anthropicMessagesOptionsSchema } from './anthropic_messages'
+export { validateOptions as validateAnthropicMessagesOptions } from './anthropic_messages'
+export {
+  E_INVALID_ANTHROPIC_MESSAGES_OPTIONS,
+  E_ANTHROPIC_MESSAGES_CONTEXT_OVERFLOW,
+  E_ANTHROPIC_MESSAGES_HTTP_ERROR,
+  E_ANTHROPIC_MESSAGES_STREAM_ERROR,
+  E_ANTHROPIC_MESSAGES_STREAM_STALLED,
+  E_ANTHROPIC_MESSAGES_REQUEST_TIMEOUT,
+  E_ANTHROPIC_MESSAGES_INVALID_TOOL_CALL_ARGS,
+  E_ANTHROPIC_MESSAGES_UNSUPPORTED_MEDIA_MODALITY,
+} from './anthropic_messages'
+export type {
+  AnthropicModel,
+  AnthropicMessageCreateParams,
+  AnthropicMessageCreateParamsBase,
+  AnthropicMessageParam,
+  AnthropicMessage,
+  AnthropicContentBlock,
+  AnthropicContentBlockParam,
+  AnthropicTextBlockParam,
+  AnthropicImageBlockParam,
+  AnthropicDocumentBlockParam,
+  AnthropicToolResultBlockParam,
+  AnthropicToolUseBlock,
+  AnthropicToolUseBlockParam,
+  AnthropicTool,
+  AnthropicToolChoice,
+  AnthropicThinkingConfigParam,
+  AnthropicThinkingBlock,
+  AnthropicThinkingBlockParam,
+  AnthropicRedactedThinkingBlock,
+  AnthropicRedactedThinkingBlockParam,
+  AnthropicRawMessageStreamEvent,
+  AnthropicRawMessageStartEvent,
+  AnthropicRawMessageDeltaEvent,
+  AnthropicRawMessageStopEvent,
+  AnthropicRawContentBlockStartEvent,
+  AnthropicRawContentBlockDeltaEvent,
+  AnthropicRawContentBlockStopEvent,
+  AnthropicRawContentBlockDelta,
+  AnthropicUsage,
+  AnthropicMessageDeltaUsage,
+  AnthropicStopReason,
+  AnthropicRefusalStopDetails,
+  AnthropicOutputConfig,
+  AnthropicJSONOutputFormat,
+  AnthropicCacheControlEphemeral,
+  AnthropicMessageCountTokensParams,
+  AnthropicMessageTokensCount,
+  AnthropicThinkingReplayPayload,
+  AnthropicCacheBreakpoints,
+  AnthropicCacheTtl,
+  AnthropicMessagesHelpers,
+  AnthropicMessagesAdapterOptions,
+  AnthropicMessagesCountTokensInput,
+  AnthropicMessagesCountTokensRequestInput,
+  AnthropicMessagesCountTokensDeps,
+} from './anthropic_messages'
+
 export { TransformersJsAdapter } from './transformers_js'
 export { transformersJsOptionsSchema } from './transformers_js'
 export { validateOptions as validateTransformersJsOptions } from './transformers_js'
