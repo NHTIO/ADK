@@ -575,6 +575,164 @@ describe('AnthropicMessagesAdapter — non-streaming + streaming execution', () 
   })
 })
 
+// Regression: work item #2. A thinking block with EMPTY text killed the whole turn client-side — no
+// HTTP error, no 4xx. `hasThinking`/`sawThinking` are set from block PRESENCE, so an empty-text block
+// took the persist path with `combinedThinking === ''`, and Thought's schema rejected the empty string.
+// The throw escaped through the executor callback as the opaque `E_LLM_EXECUTION_EXECUTOR_ERROR`.
+// `redacted_thinking` makes it DETERMINISTIC rather than occasional: it never contributes text at all.
+describe('AnthropicMessagesAdapter — empty thinking blocks must not kill the turn', () => {
+  it('persists a signed thinking block whose text is EMPTY (non-streaming)', async () => {
+    const helpers = makeHelpers()
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'think' })] })
+
+    await new AnthropicMessagesAdapter({
+      apiKey: 'sk-ant-test-key',
+      model: 'claude-opus-5',
+      maxTokens: 64,
+      stream: false,
+      fetch: cassetteFetch(
+        singleAnthropicResponseCassette('empty-thinking-body', {
+          thinking: [{ thinking: '', signature: 'sig-empty' }],
+          content: 'the visible answer',
+        })
+      ) as never,
+    }).executor()(ctx, helpers)
+
+    expect(ctx.nack).not.toHaveBeenCalled()
+    expect(ctx._stored.thoughts).toHaveLength(1)
+    expect(ctx._stored.thoughts[0]!.content.toString()).toBe('')
+    // The signature is the whole point — dropping the thought to dodge validation would lose it and
+    // break signed-thinking replay.
+    expect(ctx._stored.thoughts[0]!.payload).toMatchObject({
+      variant: 'thinking',
+      thinking: '',
+      signature: 'sig-empty',
+    })
+    expect(ctx._stored.thoughts[0]!.replayCompatibility).toBe('anthropic-messages-thinking-v1')
+    expect(ctx._stored.messages.map((m) => m.content?.toString())).toEqual(['the visible answer'])
+  })
+
+  it('persists a signed thinking block whose text is EMPTY (streaming)', async () => {
+    const helpers = makeHelpers()
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'think' })] })
+
+    await new AnthropicMessagesAdapter({
+      apiKey: 'sk-ant-test-key',
+      model: 'claude-opus-5',
+      maxTokens: 64,
+      stream: true,
+      fetch: cassetteFetch(
+        singleAnthropicStreamCassette('empty-thinking-stream', {
+          events: [
+            {
+              type: 'content_block_start',
+              index: 0,
+              content_block: { type: 'thinking', thinking: '' },
+            },
+            // Signature arrives with NO preceding thinking_delta — signed, but textless.
+            {
+              type: 'content_block_delta',
+              index: 0,
+              delta: { type: 'signature_delta', signature: 'sig-empty' },
+            },
+            { type: 'content_block_stop', index: 0 },
+          ],
+          stopReason: 'end_turn',
+        })
+      ) as never,
+    }).executor()(ctx, helpers)
+
+    expect(ctx.nack).not.toHaveBeenCalled()
+    expect(ctx._stored.thoughts).toHaveLength(1)
+    expect(ctx._stored.thoughts[0]!.content.toString()).toBe('')
+    expect(ctx._stored.thoughts[0]!.payload).toMatchObject({
+      variant: 'thinking',
+      thinking: '',
+      signature: 'sig-empty',
+    })
+  })
+
+  it('persists a redacted_thinking-only response, which NEVER contributes text (non-streaming)', async () => {
+    const helpers = makeHelpers()
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'think' })] })
+
+    await new AnthropicMessagesAdapter({
+      apiKey: 'sk-ant-test-key',
+      model: 'claude-opus-5',
+      maxTokens: 64,
+      stream: false,
+      fetch: cassetteFetch(
+        singleAnthropicResponseCassette('redacted-only-body', {
+          redactedThinking: [{ data: 'encrypted-blob' }],
+          content: 'the visible answer',
+        })
+      ) as never,
+    }).executor()(ctx, helpers)
+
+    expect(ctx.nack).not.toHaveBeenCalled()
+    expect(ctx._stored.thoughts).toHaveLength(1)
+    expect(ctx._stored.thoughts[0]!.content.toString()).toBe('')
+    expect(ctx._stored.thoughts[0]!.payload).toMatchObject({
+      variant: 'redacted_thinking',
+      data: 'encrypted-blob',
+    })
+  })
+
+  it('persists a redacted_thinking-only response, which NEVER contributes text (streaming)', async () => {
+    const helpers = makeHelpers()
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'think' })] })
+
+    await new AnthropicMessagesAdapter({
+      apiKey: 'sk-ant-test-key',
+      model: 'claude-opus-5',
+      maxTokens: 64,
+      stream: true,
+      fetch: cassetteFetch(
+        singleAnthropicStreamCassette('redacted-only-stream', {
+          events: [
+            {
+              type: 'content_block_start',
+              index: 0,
+              content_block: { type: 'redacted_thinking', data: 'encrypted-blob' },
+            },
+            { type: 'content_block_stop', index: 0 },
+          ],
+          stopReason: 'end_turn',
+        })
+      ) as never,
+    }).executor()(ctx, helpers)
+
+    expect(ctx.nack).not.toHaveBeenCalled()
+    expect(ctx._stored.thoughts).toHaveLength(1)
+    expect(ctx._stored.thoughts[0]!.content.toString()).toBe('')
+    expect(ctx._stored.thoughts[0]!.payload).toMatchObject({
+      variant: 'redacted_thinking',
+      data: 'encrypted-blob',
+    })
+  })
+
+  it('still carries real thinking text through when the model DOES emit prose', async () => {
+    const helpers = makeHelpers()
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'think' })] })
+
+    await new AnthropicMessagesAdapter({
+      apiKey: 'sk-ant-test-key',
+      model: 'claude-opus-5',
+      maxTokens: 64,
+      stream: false,
+      fetch: cassetteFetch(
+        singleAnthropicResponseCassette('nonempty-thinking-body', {
+          thinking: [{ thinking: 'let me reason', signature: 'sig-real' }],
+          content: 'answer',
+        })
+      ) as never,
+    }).executor()(ctx, helpers)
+
+    expect(ctx._stored.thoughts).toHaveLength(1)
+    expect(ctx._stored.thoughts[0]!.content.toString()).toBe('let me reason')
+  })
+})
+
 describe('AnthropicMessagesAdapter — stop reasons + transport error translation', () => {
   it('handles all seven normal stop reasons on non-streaming and streaming paths', async () => {
     const refusal = { type: 'refusal', refusal: 'safety' }

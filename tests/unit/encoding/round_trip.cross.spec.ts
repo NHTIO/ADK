@@ -79,6 +79,32 @@ describe('encoding round-trip — Tier A value objects', () => {
     expect(decoded.content.toString()).toBe('reasoning trace')
     expect(Identity.isIdentity(decoded.identity)).toBe(true)
   })
+
+  // An opaque-mode Thought may legitimately have NO prose (a signed-but-textless provider thinking
+  // block). Decode re-validates through the constructor, so the emptyable-content rule has to survive
+  // the round trip or replay data dies on rehydration.
+  it('Thought with EMPTY content round-trips when an opaque replay payload carries the meaning', () => {
+    const decoded = roundTrip(
+      new Thought({
+        id: 'th-empty',
+        content: '',
+        identity: 'assistant',
+        payload: { variant: 'thinking', thinking: '', signature: 'sig-1', prefixFingerprint: 'fp' },
+        replayCompatibility: 'anthropic-messages-thinking-v1',
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-01-01T00:00:00.000Z',
+      })
+    )
+    expect(Thought.isThought(decoded)).toBe(true)
+    expect(decoded.content.toString()).toBe('')
+    expect(decoded.payload).toEqual({
+      variant: 'thinking',
+      thinking: '',
+      signature: 'sig-1',
+      prefixFingerprint: 'fp',
+    })
+    expect(decoded.replayCompatibility).toBe('anthropic-messages-thinking-v1')
+  })
 })
 
 describe('encoding round-trip — Tier B containers', () => {

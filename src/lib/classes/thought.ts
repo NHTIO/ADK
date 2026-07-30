@@ -20,8 +20,16 @@ import type { AdkEncodableSnapshot } from './encodable'
 export interface RawThought {
   /** Stable unique identifier for this thought. */
   id: string
-  /** The reasoning content as a plain string or an existing {@link @nhtio/adk!Tokenizable} instance. */
-  content: string | Tokenizable
+  /**
+   * The reasoning content as a plain string or an existing {@link @nhtio/adk!Tokenizable} instance.
+   *
+   * @remarks
+   * Required and non-empty in plain-text mode. In opaque mode ({@link RawThought.payload} present) it
+   * may be empty or omitted — the payload carries the meaning — and resolves to an empty
+   * {@link @nhtio/adk!Tokenizable}. `Thought.content` is therefore ALWAYS a `Tokenizable`, never
+   * `undefined`, so readers need no guard.
+   */
+  content?: string | Tokenizable
   /**
    * The identity of the agent who produced this thought.
    *
@@ -102,7 +110,7 @@ export interface RawThought {
  */
 interface ResolvedThought {
   id: string
-  content: Tokenizable
+  content?: string | Tokenizable
   identity: string | RawIdentity | Identity
   payload?: unknown
   replayCompatibility?: string
@@ -116,10 +124,25 @@ interface ResolvedThought {
  * @remarks
  * Validates all fields of {@link RawThought}:
  * - `id` — required non-empty string.
- * - `content` — required string or {@link @nhtio/adk!Tokenizable}, via {@link @nhtio/adk!Tokenizable.schema}.
+ * - `content` — string or {@link @nhtio/adk!Tokenizable}, via {@link @nhtio/adk!Tokenizable.emptyableSchema}.
+ *   Required and non-empty in plain-text mode; may be empty or omitted in opaque mode (see the
+ *   content-OR-payload rule below).
  * - `identity` — optional string, {@link @nhtio/adk!RawIdentity}, or {@link @nhtio/adk!Identity}; defaults to
  *   `'assistant'` when omitted.
  * - `createdAt` / `updatedAt` — required datetime-parseable values, normalised to `DateTime`.
+ *
+ * Cross-field rule — a thought must carry meaning through EITHER its prose OR an opaque replay
+ * `payload`. A NULLISH payload (`undefined` or `null`) carries no replay data and so counts as ABSENT
+ * for both halves of the rule:
+ * - `payload` ABSENT (plain-text mode) — `content` is REQUIRED and must be non-empty. The prose is
+ *   the only thing the thought has; an empty one is indistinguishable from a bug.
+ * - `payload` PRESENT (opaque mode) — `content` may be empty or omitted, and resolves to an empty
+ *   {@link @nhtio/adk!Tokenizable}. The payload is what round-trips to the wire; `content` is kept only
+ *   for token-accounting and human/observer inspection (see {@link RawThought.payload}), so a
+ *   signed-but-textless provider thinking block is legitimate. Rejecting it would discard the
+ *   payload's replay data — strictly worse than storing a thought with no prose.
+ *
+ * A present `payload` additionally REQUIRES a present `replayCompatibility`.
  *
  * Throws {@link @nhtio/adk!E_INVALID_INITIAL_THOUGHT_VALUE} (via the {@link Thought} constructor) when
  * validation fails.
@@ -127,7 +150,8 @@ interface ResolvedThought {
 const rawThoughtSchema = validator
   .object<RawThought>({
     id: validator.string().required(),
-    content: Tokenizable.schema.required(),
+    // Emptiness is adjudicated by the cross-field rule below, which needs to see `payload` to decide.
+    content: Tokenizable.emptyableSchema.optional(),
     identity: validator.alternatives(validator.string(), Identity.schema).default('assistant'),
     payload: validator.any().optional(),
     replayCompatibility: validator.string().min(1).optional(),
@@ -136,11 +160,25 @@ const rawThoughtSchema = validator
   })
   .custom((value, helpers) => {
     const v = value as RawThought
-    if (
-      v.payload !== undefined &&
-      (v.replayCompatibility === undefined || v.replayCompatibility === null)
-    ) {
+    // A NULLISH payload carries no replay data, so it is opaque mode in NEITHER rule below. `null`
+    // reaches here easily — JSON round-tripping, a serializer normalising absent fields, a provider
+    // mapper assigning a nullish thinking block — and treating it as "present" would both demand a
+    // pointless `replayCompatibility` and, worse, waive the content requirement for a thought that has
+    // no prose AND no payload: the exact state the either-or exists to forbid.
+    const hasPayload = v.payload !== undefined && v.payload !== null
+    if (hasPayload && (v.replayCompatibility === undefined || v.replayCompatibility === null)) {
       return helpers.error('any.invalid')
+    }
+    // content-OR-payload: only an opaque thought may go without prose. A Tokenizable counts as
+    // present without being unwrapped — a dynamic one would evaluate its callback just to be measured,
+    // and its emptiness is not knowable until prompt-assembly anyway.
+    if (!hasPayload) {
+      const hasContent = Tokenizable.isTokenizable(v.content)
+        ? true
+        : typeof v.content === 'string' && v.content.length > 0
+      if (!hasContent) {
+        return helpers.error('any.invalid')
+      }
     }
     return value
   })
@@ -153,7 +191,9 @@ const rawThoughtSchema = validator
  * the visible conversation) and never shown to end users directly. Carries an `identity` so
  * reasoning traces can be attributed to a specific agent in multi-agent conversations.
  * Constructed from a {@link RawThought} via `rawThoughtSchema`. The `content` field is always
- * a {@link @nhtio/adk!Tokenizable} so token cost can be estimated inline.
+ * a {@link @nhtio/adk!Tokenizable} so token cost can be estimated inline — including when the raw input
+ * omitted it or supplied `''`, which is legal in opaque-replay mode and resolves to an empty
+ * {@link @nhtio/adk!Tokenizable}.
  */
 export class Thought {
   /**
@@ -180,7 +220,13 @@ export class Thought {
 
   /** Stable unique identifier for this thought. */
   declare readonly id: string
-  /** The reasoning content as a {@link @nhtio/adk!Tokenizable} for inline token estimation. */
+  /**
+   * The reasoning content as a {@link @nhtio/adk!Tokenizable} for inline token estimation.
+   *
+   * @remarks
+   * Never `undefined` — an opaque thought constructed without prose carries an empty
+   * {@link @nhtio/adk!Tokenizable} here, so readers need no presence guard.
+   */
   declare readonly content: Tokenizable
   /** The identity of the agent who produced this thought. */
   declare readonly identity: Identity
@@ -219,9 +265,12 @@ export class Thought {
       throw new E_INVALID_INITIAL_THOUGHT_VALUE({ cause: isError(err) ? err : undefined })
     }
     this.#id = resolved.id
+    // Absent content is legal only in opaque mode (enforced by rawThoughtSchema). Resolve it to an
+    // EMPTY Tokenizable rather than leaving it undefined so `content` stays a total field — every
+    // reader can call `.toString()` / measure it without a guard.
     this.#content = Tokenizable.isTokenizable(resolved.content)
       ? resolved.content
-      : new Tokenizable(resolved.content)
+      : new Tokenizable(resolved.content ?? '')
     const rawIdentity = resolved.identity
     this.#identity = Identity.isIdentity(rawIdentity)
       ? rawIdentity

@@ -146,6 +146,88 @@ describe('Thought', () => {
     })
   })
 
+  // A thought carries meaning through EITHER its prose OR an opaque replay payload. Opaque-mode
+  // thoughts are documented to keep `content` only for token-accounting and observer inspection —
+  // the model never sees it (see RawThought.payload) — so a textless-but-signed thinking block is a
+  // legitimate thing for a provider to return. Rejecting it discarded the payload's signature and
+  // broke replay; the Anthropic Messages battery hit exactly this and lost whole turns to it.
+  describe('content is emptyable in opaque mode (content-OR-payload)', () => {
+    const opaque = {
+      payload: { variant: 'thinking', thinking: '', signature: 'sig', prefixFingerprint: 'fp' },
+      replayCompatibility: 'anthropic-messages-thinking-v1',
+    }
+
+    it('accepts empty-string content when a replay payload carries the meaning', () => {
+      const t = new Thought({ ...validRaw(), content: '', ...opaque })
+      expect(t.content.toString()).toBe('')
+      expect(t.payload).toEqual(opaque.payload)
+    })
+
+    it('accepts ABSENT content when a replay payload carries the meaning', () => {
+      const r = { ...validRaw(), ...opaque } as Partial<ReturnType<typeof validRaw>>
+      delete r.content
+      const t = new Thought(r as ReturnType<typeof validRaw>)
+      expect(t.content.toString()).toBe('')
+    })
+
+    it('keeps content a total Tokenizable — never undefined — so consumers need no guard', () => {
+      const r = { ...validRaw(), ...opaque } as Partial<ReturnType<typeof validRaw>>
+      delete r.content
+      const t = new Thought(r as ReturnType<typeof validRaw>)
+      expect(Tokenizable.isTokenizable(t.content)).toBe(true)
+    })
+
+    it('accepts an empty Tokenizable content in opaque mode', () => {
+      const t = new Thought({ ...validRaw(), content: new Tokenizable(''), ...opaque })
+      expect(t.content.toString()).toBe('')
+    })
+
+    it('still REJECTS empty content in plain-text mode (no payload to carry meaning)', () => {
+      expect(() => new Thought({ ...validRaw(), content: '' })).toThrow(
+        E_INVALID_INITIAL_THOUGHT_VALUE
+      )
+    })
+
+    it('still REJECTS empty content when replayCompatibility is set but no payload exists', () => {
+      expect(
+        () => new Thought({ ...validRaw(), content: '', replayCompatibility: 'plain-text' })
+      ).toThrow(E_INVALID_INITIAL_THOUGHT_VALUE)
+    })
+
+    // A NULLISH payload carries no replay data, so it must not buy the content waiver. `null` reaches
+    // here easily — JSON round-tripping, a serializer that normalises absent fields, a provider mapper
+    // assigning a nullish thinking block — and an `=== undefined` test would wave it through, yielding a
+    // thought with neither prose NOR payload: the exact state this either-or exists to forbid.
+    it('REJECTS empty content when payload is explicitly null (carries no replay data)', () => {
+      expect(
+        () =>
+          new Thought({
+            ...validRaw(),
+            content: '',
+            payload: null,
+            replayCompatibility: 'anthropic-messages-thinking-v1',
+          })
+      ).toThrow(E_INVALID_INITIAL_THOUGHT_VALUE)
+    })
+
+    it('REJECTS absent content when payload is explicitly null', () => {
+      const r = {
+        ...validRaw(),
+        payload: null,
+        replayCompatibility: 'anthropic-messages-thinking-v1',
+      } as Partial<ReturnType<typeof validRaw>>
+      delete r.content
+      expect(() => new Thought(r as ReturnType<typeof validRaw>)).toThrow(
+        E_INVALID_INITIAL_THOUGHT_VALUE
+      )
+    })
+
+    it('still ACCEPTS a null payload alongside real prose (plain-text mode)', () => {
+      const t = new Thought({ ...validRaw(), payload: null })
+      expect(t.content.toString()).toBe('reasoning about the next step')
+    })
+  })
+
   describe('Thought.isThought', () => {
     it('returns true for Thought instances', () => {
       expect(Thought.isThought(new Thought(validRaw()))).toBe(true)

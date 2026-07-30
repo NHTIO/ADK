@@ -15,6 +15,47 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-07-29
+
+### Fixed
+
+- **An empty thinking block no longer kills the turn** (`@nhtio/adk/batteries/llm/anthropic_messages`,
+  {@link Thought}). When Anthropic returned a thinking block whose text was empty, the adapter built a
+  {@link Thought} with `content: ''` — and `Thought`'s schema rejected the empty string, throwing out of
+  the dispatch executor callback and aborting the whole agent turn. The failure was entirely
+  client-side: the API call succeeded and the crash happened while persisting the response, so there
+  was no HTTP error and no 4xx to point at. Any consumer with thinking enabled could lose a turn
+  non-deterministically, depending only on whether the model happened to emit an empty thinking block;
+  a response whose only thinking block was `redacted_thinking` (which by definition carries no
+  plaintext) failed every time.
+
+  {@link Thought} now validates `content` and `payload` as an **either-or**: a thought must carry
+  meaning through its prose *or* through an opaque replay payload.
+  - `payload` **absent** (plain-text mode) — `content` stays REQUIRED and non-empty, exactly as before.
+    The prose is the only thing the thought has, so an empty one is indistinguishable from a bug.
+  - `payload` **present** (opaque mode) — `content` may now be empty or omitted. This is what the
+    opaque-mode contract already promised: the payload is what round-trips to the wire, and `content`
+    is kept only for token-accounting and human/observer inspection. A signed-but-textless thinking
+    block still carries a replayable `signature`, so discarding the thought to dodge validation would
+    have silently broken signed-thinking replay — strictly worse than storing a thought with no prose.
+
+  `Thought.content` remains a `Tokenizable` in every case and is never `undefined` (absent input
+  resolves to an empty `Tokenizable`), so no reader needs a presence guard and no existing consumer
+  changes. `RawThought.content` is now optional at the type level, which affects only code that *reads*
+  a `RawThought` and assumes presence; constructing one is unchanged. New
+  {@link Tokenizable.emptyableSchema} backs the emptyable field — {@link Tokenizable.schema} stays
+  strict, so an empty `systemPrompt`, standing instruction, `Identity.representation`, or
+  `Memory.content` is still a validation error.
+
+- **`E_LLM_EXECUTION_EXECUTOR_ERROR` now names the underlying failure in its own `message`.** The cause
+  chain was already preserved, but the wrapper's text was the static `The LLM execution executor
+  callback threw an error.` — so a consumer logging `err.message` (the common case) got no signal at
+  all, not even the category of failure: a client-side validation error read identically to a transport
+  failure, an engine abort, or a bug in the executor. The cause's message is now appended after the
+  static text, which is retained as the prefix so existing log greps and string matches keep working.
+  Nothing is appended when the cause adds nothing, so unchanged cases stay byte-for-byte identical, and
+  `.cause` is untouched.
+
 ## 2026-07-18
 
 ### Added

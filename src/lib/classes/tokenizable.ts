@@ -195,6 +195,29 @@ const stringOrTokenizableSchema = validator.alternatives(
   })
 )
 
+/**
+ * Backing schema for {@link Tokenizable.emptyableSchema}.
+ *
+ * @remarks
+ * Identical to {@link stringOrTokenizableSchema} except that the EMPTY string is accepted. Joi
+ * strings disallow `''` by default, so the strict fragment rejects it while a `new Tokenizable('')`
+ * instance sails through the custom branch — an inconsistency that only shows up once a caller
+ * legitimately has nothing to put in the field.
+ *
+ * Deliberately a SEPARATE fragment rather than relaxing the strict one: `Tokenizable.schema` also
+ * backs `systemPrompt`, `standingInstructions`, `Identity.representation`, and `Memory.content`,
+ * where an empty value is meaningless and should stay a validation error. Opt in per-field.
+ */
+const emptyableStringOrTokenizableSchema = validator.alternatives(
+  validator.string().allow(''),
+  validator.custom((value, helpers) => {
+    if (Tokenizable.isTokenizable(value)) {
+      return value
+    }
+    return helpers.error('any.invalid')
+  })
+)
+
 // Lazily-initialised singletons — tokenizers are expensive to load so we defer
 // until first use and reuse across all Tokenizable instances thereafter.
 let geminiTokenizerInstance: ReturnType<typeof geminiFromPreTrained> | undefined
@@ -265,6 +288,19 @@ export class Tokenizable {
    * `systemPrompt` and each item in `standingInstructions` in `turnContextSchema`.
    */
   public static schema = stringOrTokenizableSchema
+
+  /**
+   * Variant of {@link Tokenizable.schema} that additionally accepts the EMPTY string.
+   *
+   * @remarks
+   * For fields where "present but empty" is a legitimate state rather than a mistake — e.g.
+   * {@link @nhtio/adk!Thought.content} in opaque-replay mode, where the meaning lives in the vendor
+   * `payload` and the prose is only kept for token-accounting and observer inspection.
+   *
+   * Do NOT reach for this by default. {@link Tokenizable.schema} stays strict precisely because an
+   * empty system prompt or a blank standing instruction is a bug worth failing on.
+   */
+  public static emptyableSchema = emptyableStringOrTokenizableSchema
 
   declare toJSON: () => string
   declare toString: () => string

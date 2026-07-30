@@ -73,6 +73,58 @@ const toErrorCause = (value: unknown): Error => {
 }
 
 /**
+ * Build an {@link @nhtio/adk!E_LLM_EXECUTION_EXECUTOR_ERROR} whose own `message` names the underlying
+ * failure, with the original preserved on `.cause`.
+ *
+ * @remarks
+ * The cause CHAIN being intact is not the same as the failure being diagnosable: the overwhelmingly
+ * common consumer habit is to log `err.message`, and a static wrapper text gives such a caller no
+ * signal at all — not even the category of failure. A client-side validation error inside a battery
+ * looked identical to a transport failure, an engine abort, or a bug in the executor itself.
+ *
+ * The static text is kept as the PREFIX so existing log greps and string matches keep working; the
+ * cause text is joined to it with `: ` — the static text's own trailing period is dropped first, so the
+ * result reads as one sentence instead of two run together. Appending is skipped when the cause adds
+ * nothing (no message, or a message identical to the prefix) so the common case is byte-for-byte
+ * unchanged.
+ *
+ * `cause.message` is NOT assumed to be a string, and coercing it is NOT assumed to succeed. `isError`
+ * (and therefore `toErrorCause`) accepts anything Error-SHAPED via a cross-realm prototype check and
+ * never validates `message`'s type, so a duck-typed or cross-realm error can carry a non-string
+ * `message`. Two ways that bites, both verified:
+ * - a bare `.trim()` on a non-string throws a TypeError;
+ * - even a type-guarded `String()` throws when `message` is an object with a hostile
+ *   `toString`/`Symbol.toPrimitive`.
+ *
+ * Either one escapes this helper, so NO wrapper is returned: the `runner('error')` observability hook
+ * never fires and both the executor error and its cause chain are lost — the exact failure class this
+ * helper exists to make diagnosable. Enrichment is therefore best-effort: any failure to derive text
+ * falls back to the bare static message, because a wrapper with a terse message beats no wrapper.
+ *
+ * `message` is assigned post-construction rather than passed in: the exception is produced by
+ * `createException`, whose constructor takes only {@link @nhtio/adk!ExceptionOptions} (no message
+ * override), and widening that public signature is not worth the reach of this change.
+ */
+const executorError = (value: unknown): BaseException => {
+  const cause = toErrorCause(value)
+  const wrapped = new E_LLM_EXECUTION_EXECUTOR_ERROR({ cause }) as unknown as BaseException
+  const base = wrapped.message
+  let detail = ''
+  try {
+    const rawDetail: unknown = cause.message
+    detail = (typeof rawDetail === 'string' ? rawDetail : String(rawDetail ?? '')).trim()
+  } catch {
+    // Hostile `message` (throwing toString / Symbol.toPrimitive). Keep the static text and move on —
+    // never let enrichment be the reason the caller loses the real error.
+    detail = ''
+  }
+  if (detail.length > 0 && detail !== base) {
+    wrapped.message = `${base.replace(/\.$/, '')}: ${detail}`
+  }
+  return wrapped
+}
+
+/**
  * Plain input object supplied to {@link DispatchRunner.dispatch}.
  *
  * @remarks
@@ -735,9 +787,10 @@ export class DispatchRunner {
             // cause-less wrapper whose only text was the generic "…callback threw an error." — so the real
             // failure was unrecoverable and undiagnosable downstream. `toErrorCause` normalises any
             // non-Error into a real Error carrying its stringified value, keeping the `.cause` chain
-            // Error-shaped for `isError`/root-cause unwrapping.
-            const wrapped = new E_LLM_EXECUTION_EXECUTOR_ERROR({ cause: toErrorCause(err) })
-            void this.#observabilityHooks.runner('error').run(wrapped as unknown as BaseException)
+            // Error-shaped for `isError`/root-cause unwrapping — and `executorError` additionally names
+            // the failure in the wrapper's OWN message, for the many callers that only log `.message`.
+            const wrapped = executorError(err)
+            void this.#observabilityHooks.runner('error').run(wrapped)
             this.#deltaQueue.length = 0
             throw wrapped
           }
@@ -787,11 +840,9 @@ export class DispatchRunner {
         const nackErr = llmCtx.nackError
         const wrapped = isInstanceOf(nackErr, 'BaseException')
           ? (nackErr as unknown as BaseException)
-          : (new E_LLM_EXECUTION_EXECUTOR_ERROR({
-              // Preserve a non-BaseException nack value as the cause too (see the executor-throw path):
-              // a raw string / cross-realm error must not be dropped to a cause-less generic wrapper.
-              cause: toErrorCause(nackErr),
-            }) as unknown as BaseException)
+          : // Preserve a non-BaseException nack value as the cause too (see the executor-throw path):
+            // a raw string / cross-realm error must not be dropped to a cause-less generic wrapper.
+            executorError(nackErr)
         void this.#observabilityHooks.runner('error').run(wrapped)
       }
 
