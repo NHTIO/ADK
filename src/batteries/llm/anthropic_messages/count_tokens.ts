@@ -5,22 +5,17 @@
  */
 
 import { validateOptions } from './validation'
+import { APIError } from '@anthropic-ai/sdk/core/error'
 import { default as Anthropic } from '@anthropic-ai/sdk'
+import { isInstanceOf, isObject } from '@nhtio/adk/guards'
+import { translateAnthropicError } from './error_translation'
 import { DispatchContext, isDispatchContext } from '@nhtio/adk'
-import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
 import {
   computeBackoff,
   sleepWithJitter,
   parseRetryAfter,
   linkAbortSignals,
 } from '../../../lib/utils/retry'
-import {
-  APIError,
-  APIConnectionError,
-  APIConnectionTimeoutError,
-  APIUserAbortError,
-  AnthropicError,
-} from '@anthropic-ai/sdk/core/error'
 import {
   E_ANTHROPIC_MESSAGES_CONTEXT_OVERFLOW,
   E_ANTHROPIC_MESSAGES_HTTP_ERROR,
@@ -65,7 +60,6 @@ import type {
 const ANTHROPIC_MESSAGES_STASH_KEY = 'anthropicMessages' as const
 const SDK_TIMEOUT_MARGIN_MS = 30_000
 const SDK_TIMEOUT_SENTINEL_MS = 24 * 60 * 60 * 1000
-const CONTEXT_OVERFLOW_PHRASE = 'prompt is too long'
 const UNSUPPORTED_OUTPUT_SCHEMA_KEYWORDS = [
   'minLength',
   'maxLength',
@@ -182,40 +176,6 @@ const resolveHelpers = (
     buildAnthropicMessagesHistory:
       src.buildAnthropicMessagesHistory ?? defaultBuildAnthropicMessagesHistory,
   }
-}
-
-const translateAnthropicError = (
-  err: unknown,
-  retriableStatuses: ReadonlyArray<number>
-):
-  | { kind: 'abort' }
-  | { kind: 'timeout' }
-  | { kind: 'context-overflow'; message: string }
-  | { kind: 'retriable'; status: number; message: string }
-  | { kind: 'fatal'; status: number; message: string } => {
-  if (isInstanceOf(err, 'APIUserAbortError', APIUserAbortError)) return { kind: 'abort' }
-  if (isInstanceOf(err, 'APIConnectionTimeoutError', APIConnectionTimeoutError)) {
-    return { kind: 'timeout' }
-  }
-  if (isInstanceOf(err, 'APIConnectionError', APIConnectionError)) {
-    return { kind: 'retriable', status: 0, message: err.message }
-  }
-  if (isInstanceOf(err, 'APIError', APIError)) {
-    const status = typeof err.status === 'number' ? err.status : 0
-    const bodyText = isObject(err.error) ? JSON.stringify(err.error) : String(err.error ?? '')
-    if (status === 400 && bodyText.toLowerCase().includes(CONTEXT_OVERFLOW_PHRASE)) {
-      return { kind: 'context-overflow', message: bodyText }
-    }
-    if (retriableStatuses.includes(status)) {
-      return { kind: 'retriable', status, message: bodyText || err.message }
-    }
-    return { kind: 'fatal', status, message: bodyText || err.message }
-  }
-  const message = isError(err) ? err.message : String(err)
-  if (isInstanceOf(err, 'AnthropicError', AnthropicError)) {
-    return { kind: 'fatal', status: 0, message }
-  }
-  return { kind: 'fatal', status: 0, message }
 }
 
 const collectUnsupportedSchemaKeywords = (value: unknown, acc: Set<string>): void => {
@@ -452,7 +412,10 @@ export const countAnthropicMessagesTokensWithResolvedOptions = async (
       return { inputTokens: raw.input_tokens, raw }
     } catch (err) {
       if (timeoutHandle !== undefined) clearTimeout(timeoutHandle)
-      const classified = translateAnthropicError(err, retryCfg.retriableStatuses)
+      const classified = translateAnthropicError(err, retryCfg.retriableStatuses, {
+        resolveErrorStatus: resolved.resolveErrorStatus,
+        warn: (msg) => log.warn({ kind: 'anthropic-resolve-error-status', message: msg }),
+      })
       if (classified.kind === 'abort') {
         disposeLink()
         return {

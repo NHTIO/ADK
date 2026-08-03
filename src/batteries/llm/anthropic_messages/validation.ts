@@ -204,6 +204,9 @@ export const anthropicMessagesOptionsSchema = validator
     streamIdleTimeoutMs: validator.number().integer().min(0).default(0),
     requestTimeoutMs: validator.number().integer().min(0).default(0),
     retry: retrySchema.default({}),
+    // Consumer hook; validated as a function only. Its RETURN value is range-checked at call time
+    // in error_translation.ts, because a schema cannot police what a function does at runtime.
+    resolveErrorStatus: validator.function().optional(),
     bucketOrder: bucketOrderSchema,
     contextWindow: validator.number().integer().min(1).optional(),
     selfIdentity: validator.string().min(1).default('assistant'),

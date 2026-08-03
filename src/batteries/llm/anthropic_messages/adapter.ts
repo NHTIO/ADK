@@ -64,8 +64,10 @@ import { DateTime } from 'luxon'
 import { sha256 } from 'js-sha256'
 import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
+import { APIError } from '@anthropic-ai/sdk/core/error'
 import { default as Anthropic } from '@anthropic-ai/sdk'
 import { countAnthropicMessagesTokens } from './count_tokens'
+import { translateAnthropicError } from './error_translation'
 import { resolveToolCallParser } from '../chat_common/tool_parsers'
 import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
 import { canonicalStringify } from '../../../lib/utils/canonical_json'
@@ -85,13 +87,6 @@ import {
   Media,
   ArtifactTool,
 } from '@nhtio/adk/common'
-import {
-  AnthropicError,
-  APIError,
-  APIConnectionError,
-  APIConnectionTimeoutError,
-  APIUserAbortError,
-} from '@anthropic-ai/sdk/core/error'
 import {
   E_INVALID_ANTHROPIC_MESSAGES_OPTIONS,
   E_ANTHROPIC_MESSAGES_CONTEXT_OVERFLOW,
@@ -410,44 +405,6 @@ const extractGenerationStats = (input: {
   }
   if (typeof input.finishReason === 'string') stats.finishReason = input.finishReason
   return stats
-}
-
-// ─── SDK error → ADK exception translation ─────────────────────────────────────
-
-const CONTEXT_OVERFLOW_PHRASE = 'prompt is too long'
-
-const translateAnthropicError = (
-  err: unknown,
-  retriableStatuses: ReadonlyArray<number>
-):
-  | { kind: 'abort' }
-  | { kind: 'timeout' }
-  | { kind: 'context-overflow'; message: string }
-  | { kind: 'retriable'; status: number; message: string }
-  | { kind: 'fatal'; status: number; message: string } => {
-  if (isInstanceOf(err, 'APIUserAbortError', APIUserAbortError)) return { kind: 'abort' }
-  if (isInstanceOf(err, 'APIConnectionTimeoutError', APIConnectionTimeoutError)) {
-    return { kind: 'timeout' }
-  }
-  if (isInstanceOf(err, 'APIConnectionError', APIConnectionError)) {
-    return { kind: 'retriable', status: 0, message: err.message }
-  }
-  if (isInstanceOf(err, 'APIError', APIError)) {
-    const status = typeof err.status === 'number' ? err.status : 0
-    const bodyText = isObject(err.error) ? JSON.stringify(err.error) : String(err.error ?? '')
-    if (status === 400 && bodyText.toLowerCase().includes(CONTEXT_OVERFLOW_PHRASE)) {
-      return { kind: 'context-overflow', message: bodyText }
-    }
-    if (retriableStatuses.includes(status)) {
-      return { kind: 'retriable', status, message: bodyText || err.message }
-    }
-    return { kind: 'fatal', status, message: bodyText || err.message }
-  }
-  const message = isError(err) ? err.message : String(err)
-  if (isInstanceOf(err, 'AnthropicError', AnthropicError)) {
-    return { kind: 'fatal', status: 0, message }
-  }
-  return { kind: 'fatal', status: 0, message }
 }
 
 // ─── Adapter class ─────────────────────────────────────────────────────────────
@@ -823,7 +780,11 @@ export class AnthropicMessagesAdapter {
         } catch (err) {
           if (timeoutHandle !== undefined) clearTimeout(timeoutHandle)
           if (ctx.abortSignal.aborted) return
-          const classified = translateAnthropicError(err, retryCfg.retriableStatuses)
+          const classified = translateAnthropicError(err, retryCfg.retriableStatuses, {
+            resolveErrorStatus: merged.resolveErrorStatus,
+            warn: (msg) =>
+              helpers.log.warn({ kind: 'anthropic-resolve-error-status', message: msg }),
+          })
           if (classified.kind === 'abort') return
           if (classified.kind === 'timeout') {
             helpers.log.warn({
@@ -1347,7 +1308,11 @@ export class AnthropicMessagesAdapter {
             ctx.nack(new E_ANTHROPIC_MESSAGES_STREAM_STALLED([idleMs]))
             return
           }
-          const classified = translateAnthropicError(err, retryCfg.retriableStatuses)
+          const classified = translateAnthropicError(err, retryCfg.retriableStatuses, {
+            resolveErrorStatus: merged.resolveErrorStatus,
+            warn: (msg) =>
+              helpers.log.warn({ kind: 'anthropic-resolve-error-status', message: msg }),
+          })
           if (classified.kind === 'abort') return
           if (classified.kind === 'context-overflow') {
             ctx.nack(

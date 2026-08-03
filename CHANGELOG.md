@@ -15,6 +15,44 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-08-02
+
+### Added
+
+- **`resolveErrorStatus` on the Anthropic Messages battery — a seam for recovering an HTTP status the
+  SDK never saw** (`@nhtio/adk/batteries/llm/anthropic_messages`). Unlike the Ollama and OpenAI
+  batteries, which read `response.status` off a raw `fetch` and therefore always observe the real
+  code, this battery classifies from the SDK's `APIError`. When a gateway terminates the HTTP request
+  itself and reports the upstream failure *inside the response body*, `err.status` is absent, coerces
+  to `0`, matches nothing in `retry.retriableStatuses`, and the error is classified **fatal** — so a
+  transient upstream `529 overloaded_error` failed on first occurrence with `retry.maxAttempts` never
+  consulted. The symptom is a distinctive `Anthropic Messages HTTP error 0: 529 {...}`, where the `0`
+  is the coercion and the real status sits in the body.
+
+  The new optional {@link AnthropicMessagesAdapterOptions.resolveErrorStatus} hook receives
+  `{ error, bodyText, sdkStatus }` and returns a status to classify against, or `undefined` to
+  decline. The resolved status is what reaches `retriableStatuses`, the
+  `E_ANTHROPIC_MESSAGES_HTTP_ERROR` payload, and the log line — so a recovered `529` is reported as
+  `529`, not `0`. It runs before both the context-overflow body-text check and retriable
+  classification. A resolver that throws, returns a non-integer, or returns a value outside 100–599
+  is ignored with a warning and treated as declining, so a misbehaving hook can never replace the
+  real upstream error with one from the diagnostic path.
+
+  **The ADK deliberately ships no default parser and no behaviour change.** A gateway's error
+  envelope is the consumer's knowledge, not the ADK's; a built-in regex would risk reading a
+  three-digit request id — or a genuine deterministic `4xx` — as a retriable status. Without a
+  resolver, classification is byte-for-byte what it was before this release, including a statusless
+  `APIError` remaining fatal. Consumers behind such a gateway opt in explicitly.
+
+### Fixed
+
+- **`countTokens()` shared the same statusless-`APIError` misclassification.** The token-count path
+  carried a byte-identical private copy of the error classifier, so the defect above existed there
+  too and was not covered by the original report. Both paths now share one
+  `translateAnthropicError` (exported, along with `CONTEXT_OVERFLOW_PHRASE` and the
+  `AnthropicErrorClassification` type), which is why a single fix now reaches both instead of
+  silently leaving one wrong.
+
 ## 2026-07-29
 
 ### Fixed

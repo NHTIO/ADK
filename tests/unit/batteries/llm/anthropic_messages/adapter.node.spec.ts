@@ -30,6 +30,7 @@ import type { DispatchContext } from '@nhtio/adk/types'
 import type { Cassette } from '../../../../_fixtures/cassette'
 import type { DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
 import type { RawGenerationObservation } from '@nhtio/adk/batteries/llm/chat_common'
+import type { AnthropicMessagesErrorStatusInput } from '@nhtio/adk/batteries/llm/anthropic_messages'
 
 const dt = (iso: string) => DateTime.fromISO(iso, { zone: 'utc' })
 
@@ -730,6 +731,96 @@ describe('AnthropicMessagesAdapter — empty thinking blocks must not kill the t
 
     expect(ctx._stored.thoughts).toHaveLength(1)
     expect(ctx._stored.thoughts[0]!.content.toString()).toBe('let me reason')
+  })
+})
+
+// Regression: work item #3. A gateway that terminates the HTTP request itself and reports the
+// upstream failure only in the RESPONSE BODY leaves `err.status` absent → coerced to 0 → matches no
+// retriable status → fatal, so `retry.maxAttempts` is never consulted. These pin the WIRING (option
+// survives validation, reaches the classifier, changes real retry behaviour); error_translation
+// .node.spec.ts pins the classifier itself.
+describe('AnthropicMessagesAdapter — resolveErrorStatus recovers a body-only status', () => {
+  const gatewayBody = {
+    type: 'error',
+    error: { type: 'server_error', message: 'upstream returned 529' },
+  }
+  // The gateway answers with a status the ADK does NOT treat as retriable (500), while the real,
+  // retriable upstream status (529) appears only inside the body.
+  const threeGatewayErrors = (name: string): Cassette => ({
+    name,
+    interactions: Array.from({ length: 3 }, () => ({
+      response: buildErrorResponse({ status: 500, body: gatewayBody }),
+    })),
+  })
+
+  it('WITHOUT a resolver the request is not retried (documents the shipped default)', async () => {
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })] })
+    const fetchFn = vi.fn(cassetteFetch(threeGatewayErrors('gw-529-default')))
+    await new AnthropicMessagesAdapter({
+      apiKey: 'sk-ant-test-key',
+      model: 'claude-opus-5',
+      maxTokens: 32,
+      stream: false,
+      retry: { maxAttempts: 3, baseDelayMs: 0 },
+      fetch: fetchFn as never,
+    }).executor()(ctx, makeHelpers())
+    expect(fetchFn.mock.calls).toHaveLength(1)
+    expect(ctx.nack).toHaveBeenCalled()
+  })
+
+  it('WITH a resolver the same failure is retried up to maxAttempts', async () => {
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })] })
+    const fetchFn = vi.fn(cassetteFetch(threeGatewayErrors('gw-529-resolver')))
+    await new AnthropicMessagesAdapter({
+      apiKey: 'sk-ant-test-key',
+      model: 'claude-opus-5',
+      maxTokens: 32,
+      stream: false,
+      retry: { maxAttempts: 3, baseDelayMs: 0 },
+      resolveErrorStatus: ({ bodyText }: AnthropicMessagesErrorStatusInput) => {
+        const m = /upstream returned (\d{3})/.exec(bodyText)
+        return m ? Number(m[1]) : undefined
+      },
+      fetch: fetchFn as never,
+    }).executor()(ctx, makeHelpers())
+    expect(fetchFn.mock.calls).toHaveLength(3)
+  })
+
+  it('a recovered status is REPORTED, so the nack says 529 rather than 0', async () => {
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })] })
+    await new AnthropicMessagesAdapter({
+      apiKey: 'sk-ant-test-key',
+      model: 'claude-opus-5',
+      maxTokens: 32,
+      stream: false,
+      retry: { maxAttempts: 1, baseDelayMs: 0 },
+      resolveErrorStatus: () => 529,
+      fetch: cassetteFetch(threeGatewayErrors('gw-529-reported')) as never,
+    }).executor()(ctx, makeHelpers())
+    const nacked = (ctx.nack as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]?.[0]
+    expect(String((nacked as Error).message)).toContain('529')
+    expect(String((nacked as Error).message)).not.toMatch(/HTTP error 500\b/)
+  })
+
+  it('a throwing resolver does not replace the real upstream error', async () => {
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'hi' })] })
+    const helpers = makeHelpers()
+    await new AnthropicMessagesAdapter({
+      apiKey: 'sk-ant-test-key',
+      model: 'claude-opus-5',
+      maxTokens: 32,
+      stream: false,
+      retry: { maxAttempts: 1, baseDelayMs: 0 },
+      resolveErrorStatus: () => {
+        throw new Error('resolver blew up')
+      },
+      fetch: cassetteFetch(threeGatewayErrors('gw-529-throw')) as never,
+    }).executor()(ctx, helpers)
+    const nacked = (ctx.nack as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]?.[0]
+    expect(String((nacked as Error).message)).toContain('529')
+    expect(helpers.log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'anthropic-resolve-error-status' })
+    )
   })
 })
 

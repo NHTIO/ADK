@@ -133,6 +133,8 @@ export type {
   AnthropicMessagesHelpers,
   AnthropicMessagesAdapterOptions,
   AnthropicMessagesCountTokensInput,
+  AnthropicMessagesErrorStatusInput,
+  AnthropicMessagesErrorStatusResolver,
 } from './types'
 export type {
   AnthropicMessagesCountTokensRequestInput,
@@ -140,6 +142,9 @@ export type {
 } from './count_tokens'
 
 export { anthropicMessagesOptionsSchema, validateOptions } from './validation'
+
+export { translateAnthropicError, CONTEXT_OVERFLOW_PHRASE } from './error_translation'
+export type { AnthropicErrorClassification } from './error_translation'
 
 export {
   E_INVALID_ANTHROPIC_MESSAGES_OPTIONS,

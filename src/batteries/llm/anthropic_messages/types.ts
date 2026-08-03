@@ -311,6 +311,39 @@ export interface AnthropicMessagesHelpers extends ChatHelpersCommon {
 }
 
 /**
+ * Input handed to an {@link AnthropicMessagesErrorStatusResolver}.
+ */
+export interface AnthropicMessagesErrorStatusInput {
+  /** The raw SDK error being classified — an `APIError` instance. */
+  error: unknown
+  /**
+   * The error body as text: `JSON.stringify(err.error)` when the SDK parsed an object, else its
+   * string form. Empty string when the SDK captured no body.
+   */
+  bodyText: string
+  /**
+   * The status the SDK reported, already coerced: `err.status` when numeric, otherwise `0`.
+   * A resolver typically returns `undefined` immediately unless this is `0`.
+   */
+  sdkStatus: number
+}
+
+/**
+ * Recovers an HTTP status the Anthropic SDK could not observe.
+ *
+ * @remarks
+ * See {@link AnthropicMessagesAdapterOptions.resolveErrorStatus} for when this is called, why the
+ * ADK ships no default implementation, and the contract for declining. Return an HTTP status
+ * (100–599) to classify against, or `undefined` to leave `sdkStatus` in force.
+ *
+ * @param input - The error, its body text, and the SDK-reported status.
+ * @returns An HTTP status to classify against, or `undefined` to decline.
+ */
+export type AnthropicMessagesErrorStatusResolver = (
+  input: AnthropicMessagesErrorStatusInput
+) => number | undefined
+
+/**
  * Configuration options for the Anthropic Messages adapter.
  */
 export interface AnthropicMessagesAdapterOptions {
@@ -330,6 +363,50 @@ export interface AnthropicMessagesAdapterOptions {
   requestTimeoutMs?: number
   /** Configures ADK-owned request retry behavior. */
   retry?: ChatCompletionsRetryConfig
+  /**
+   * Recovers an HTTP status the Anthropic SDK could not observe, so retry classification can see it.
+   *
+   * @remarks
+   * Unlike the Ollama and OpenAI batteries — which read `response.status` off a raw `fetch` and
+   * therefore always see the real code — this battery classifies from the SDK's `APIError`. When a
+   * gateway terminates the HTTP request itself and reports the upstream failure *inside the response
+   * body*, `err.status` is absent, is coerced to `0`, matches nothing in
+   * {@link @nhtio/adk/batteries/llm/chat_common!ChatCompletionsRetryConfig.retriableStatuses}, and the
+   * error is classified fatal — so a transient upstream `529 overloaded_error` fails on first
+   * occurrence with retry never consulted.
+   *
+   * The ADK deliberately ships **no** body parser: the shape of a gateway's error envelope is the
+   * consumer's knowledge, not the ADK's, and guessing it with a built-in regex risks reading a
+   * three-digit request id — or a genuine deterministic `4xx` — as a retriable status. This hook is
+   * the seam for a consumer who *does* know their gateway.
+   *
+   * Called only for SDK `APIError`s, before retriable/fatal classification and before the
+   * context-overflow body-text check. Return an HTTP status to classify against, or `undefined` to
+   * decline — declining leaves `sdkStatus` in force, so a resolver that does not recognise a body is
+   * a no-op rather than a hazard. A returned value outside 100–599 is ignored with a warning. The
+   * resolved status is what reaches `retriableStatuses`, the `E_ANTHROPIC_MESSAGES_HTTP_ERROR`
+   * payload, and the log line — so a recovered `529` is reported as `529`, not `0`.
+   *
+   * Must not throw; a throwing resolver is caught, warned about, and treated as declining.
+   *
+   * @example
+   * ```ts
+   * new AnthropicMessagesAdapter({
+   *   model, maxTokens,
+   *   retry: { maxAttempts: 4 },
+   *   // This gateway reports the upstream status in the body and nowhere else.
+   *   resolveErrorStatus: ({ bodyText, sdkStatus }) => {
+   *     if (sdkStatus !== 0) return undefined
+   *     const m = /upstream returned (\d{3})/.exec(bodyText)
+   *     return m ? Number(m[1]) : undefined
+   *   },
+   * })
+   * ```
+   *
+   * @defaultValue `undefined` — no recovery; a statusless `APIError` stays fatal, preserving the
+   *   behaviour of adapters built before this hook existed.
+   */
+  resolveErrorStatus?: AnthropicMessagesErrorStatusResolver
   /** Determines order of system-prompt content buckets in history assembly. */
   bucketOrder?: ChatCompletionsBucketOrder
   /** Size of the model's token context window for the ADK guard. */
