@@ -33,3 +33,9 @@ docs/.vitepress/config.mts.timestamp-*
 !.env.test.example
 # Tesseract language data downloaded at runtime by the multi-model-compose test (tesseractJsEngine)
 *.traineddata
+# Local working data — never published. Anchored to the repo root so a `data/` directory nested
+# inside src/ or tests/ is still tracked if one is ever legitimately needed there.
+/data/
+# Evaluation OUTPUT under research/ — judge verdicts, run dumps. The harness SCRIPTS in this
+# directory are deliberately tracked as reproducibility artifacts; only their results are ignored.
+/research/*.json

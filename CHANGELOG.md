@@ -15,6 +15,68 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-08-12
+
+### Added
+
+- **Sandbox batteries — an OS boundary and a JavaScript boundary, deliberately distinct**
+  (`@nhtio/adk/batteries/sandbox`, `.../sandbox/tools`, `.../sandbox/node`, `.../sandbox/js`). The ADK
+  shipped 23 tool categories and could not run `ls`; that gap was deliberate, because an ungated shell
+  is the most dangerous thing you can hand a model. Two boundaries answer two different questions —
+  *what can this **process** reach?* (Anthropic's `@anthropic-ai/sandbox-runtime`: Seatbelt /
+  bubblewrap+seccomp / WFP, no container) and *what can this **code** reach?* (a hardened `ses`
+  `Compartment`). Both are optional peers; neither substitutes for the other.
+
+  Nine tools, every one gated: `run_shell_command` (the streaming shell — and the git tool),
+  `open_file`/`open_json_file`/`open_markdown_file` (query, returning a spooled artifact),
+  `stage_file`/`save_media` (mutate, then make it real on disk), `list_directory`,
+  `search_files`/`find_files`, plus `evaluate_javascript` on the SES side. `sandboxedExecutor` adapts
+  the existing `BinaryExecutor` for media pipelines.
+
+  **Gates are mandatory on every tool, reads included, and no reference gate ships.** The threat model
+  for a read is exfiltration — a read of `.env` is unrecoverable, and `search_files` is a
+  secret-discovery primitive — so a shipped default would be adopted unread as "the safe config". A
+  gate is a real suspension: a harness with no decider hangs the turn.
+
+  **Failures throw a narrated `E_SANDBOX_*` rather than returning a string, deliberately against house
+  style.** A returned string is spooled and renders as an artifact *handle*, so the model would spend a
+  call querying an artifact to read one line of refusal. What the model actually reads is
+  `The tool handler threw an error during execution. <narration>` — that prefix is core behaviour, so
+  the narrated exception must be the direct cause. Outcomes that *did* run return their artifact
+  instead: a non-zero exit is a final line, a timeout returns the partial output, and a sandbox
+  violation is woven in where it was observed.
+
+  **Read the docs before deploying.** `docs/batteries/sandbox/` states the residuals where you meet
+  them: TOCTOU on the in-process paths, the four (not one) platform case-matching rules, the fact that
+  only the shell and search paths get OS enforcement, and that a green CI run is **no evidence** the OS
+  boundary works — the suites that prove it skip silently without `TEST_SANDBOX_LIVE`. Browser
+  deployments **require** CSP: CORS gates response readability, not request emission.
+
+  Measured and disclosed rather than assumed: on macOS with SRT 0.0.71, `diagnosticsFor()` returns `[]`
+  for both a denied read and a blocked host while enforcement itself works correctly — so the
+  structured violation this battery's value-add rests on is not populated on that platform today.
+
+  A command that cannot be spawned at all — a missing wrapper binary, an unusable `cwd` — settles as a
+  failed command rather than taking the host process down with it. An unhandled `'error'` on a
+  `ChildProcess` is an uncaught exception, so a sandbox misconfiguration would otherwise have killed the
+  agent instead of failing one tool call.
+
+### Changed
+
+- **`ToolHandler` may now return a `SpooledArtifact`** (core). Previously the return union was
+  `string | Uint8Array | Media | Media[]`, so a handler that streamed a large file into storage and
+  held a reader had no way to return it — and an artifact returned anyway fell into a defensive branch
+  and was spooled as **`"[object Object]"` with no error**. That silent corruption is gone. Additive:
+  no existing handler can return an artifact today, so nothing observable changes for current code.
+
+- **The Anthropic Messages battery now honours `ToolCall.inline`.** `inline` is core vocabulary
+  defaulting to `false`, and the other five LLM batteries render a spooled result as a handle
+  accordingly; this adapter ignored the flag and inlined the entire artifact. A 5 MB log was a handle
+  on five backends and 5 MB of prompt on the sixth. **This is a behavioural change for Anthropic
+  deployments**: results that previously arrived inline now arrive as artifact handles. Set
+  `inline: true` on the producing call to keep the old behaviour. The `SpooledArtifact[]` array path
+  still inlines on every adapter — a wider, separate defect, recorded rather than silently folded in.
+
 ## 2026-08-02
 
 ### Added

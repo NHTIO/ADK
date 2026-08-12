@@ -26,7 +26,6 @@ import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
 import { emitLifecycle } from '../chat_common/lifecycle'
 import { E_LLM_GPU_OUT_OF_MEMORY } from '../chat_common/exceptions'
-import { stripEnvelopeSpecialTokens } from '../chat_common/helpers'
 import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
 import { resolveToolCallParser } from '../chat_common/tool_parsers'
 import { resolveGenerationOptions } from '../chat_common/generation'
@@ -34,6 +33,7 @@ import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { resolveReasoningParser } from '../chat_common/reasoning_parsers'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import { isGpuOutOfMemoryError, probeGpuBudget } from '../chat_common/gpu_budget'
+import { looksLikeSpooledArtifact, stripEnvelopeSpecialTokens } from '../chat_common/helpers'
 import {
   Tokenizable,
   ToolCall,
@@ -871,6 +871,8 @@ export class LiteRtLmAdapter {
             results = raw
           } else if (Array.isArray(raw) && raw.length > 0 && raw.every((m) => Media.isMedia(m))) {
             results = raw as Media[]
+          } else if (looksLikeSpooledArtifact(raw)) {
+            results = raw as SpooledArtifact
           } else if (typeof raw === 'string' || isInstanceOf(raw, 'Uint8Array', Uint8Array)) {
             const reader = await spoolStore.write(call.id, raw as string | Uint8Array)
             const ArtifactCtor = (tool as Tool).artifactConstructor?.() ?? SpooledArtifact

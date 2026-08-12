@@ -16,6 +16,7 @@
  * only ever reacts to inbound envelopes).
  */
 
+import { isError } from '@nhtio/adk/guards'
 import type { PortLike } from './types'
 
 // ── Wire value + error shapes ────────────────────────────────────────────────────────────────────────
@@ -54,6 +55,8 @@ export interface WireError {
 /** Host → guest envelopes. */
 export type HostToGuestEnvelope =
   | { t: 'call'; id: string; method: string; args: WireValue[] }
+  | { t: 'hostresult'; id: string; ok: true; value: WireValue | string }
+  | { t: 'hostresult'; id: string; ok: false; error?: WireError; value?: string }
   | { t: 'abort'; id: string }
   | { t: 'stream:start'; id: string; stream: string; args: WireValue[] }
   | { t: 'stream:cancel'; id: string; reason?: WireValue }
@@ -62,6 +65,7 @@ export type HostToGuestEnvelope =
 /** Guest → host envelopes. */
 export type GuestToHostEnvelope =
   | { t: 'ready'; encoderAvailable: boolean }
+  | { t: 'hostcall'; id: string; method: string; args: WireValue[] }
   | { t: 'result'; id: string; ok: true; value: WireValue }
   | { t: 'result'; id: string; ok: false; error: WireError }
   | { t: 'stream:delta'; id: string; delta: WireValue }
@@ -92,11 +96,39 @@ interface StreamSink {
 
 /** Hooks {@link HostEndpoint} invokes on protocol-level events; `host.ts` wires these to the
  *  observability layer + guest-event fan-out. All optional. */
+export interface HostcallQuotas {
+  /** Per-request deadline in milliseconds. */
+  hostcallTimeoutMs: number
+  /** Maximum accepted requests for one evaluation. */
+  maxHostcallsPerEvaluation: number
+  /** Maximum concurrently running requests. */
+  maxConcurrentHostcalls: number
+}
+
+/** Host-side capability registry. The handler receives decoded wire arguments. */
+export type HostcallHandler = (
+  args: WireValue[],
+  signal: AbortSignal
+) => WireValue | Promise<WireValue>
+
+/** UTF-8 producer-side measurement used by both RPC realms. */
+export const measureHostcallBytes = (value: unknown): number => {
+  const text = JSON.stringify(value)
+  return new TextEncoder().encode(text === undefined ? 'undefined' : text).byteLength
+}
+
+/**
+ * Callback surface for observing host-endpoint lifecycle and guest-originated events.
+ *
+ * @remarks Hooks are notifications only; dispatch and correlation remain owned by the endpoint.
+ */
 export interface HostEndpointHooks {
   /** The guest's `ready` envelope arrived. */
   onReady?: (info: { encoderAvailable: boolean }) => void
   /** An `event` envelope arrived for `channel`. */
   onEvent?: (channel: string, payload: WireValue) => void
+  /** A guest-to-host capability request arrived. It is deliberately independent of `call`. */
+  onHostcall?: (id: string, method: string, args: WireValue[]) => void
   /** Any envelope was sent (`dir: 'out'`) or received (`dir: 'in'`) — for wire tracing. */
   onEnvelope?: (dir: 'out' | 'in', envelope: WireEnvelope) => void
 }
@@ -114,13 +146,29 @@ export class HostEndpoint {
   readonly #pending = new Map<string, PendingCall>()
   readonly #streams = new Map<string, StreamSink>()
   readonly #outbox: HostToGuestEnvelope[] = []
+  readonly #hostcallHandlers: ReadonlyMap<string, HostcallHandler>
+  readonly #hostcallQuotas: HostcallQuotas | undefined
+  readonly #maxHostcallBytes: number | undefined
+  #acceptedHostcalls = 0
+  #concurrentHostcalls = 0
   #ready = false
   #unsubscribe: () => void
   #terminated = false
 
-  constructor(port: PortLike, hooks: HostEndpointHooks = {}) {
+  constructor(
+    port: PortLike,
+    hooks: HostEndpointHooks = {},
+    hostcalls: {
+      handlers?: ReadonlyMap<string, HostcallHandler>
+      quotas?: HostcallQuotas
+      maxHostcallBytes?: number
+    } = {}
+  ) {
     this.#port = port
     this.#hooks = hooks
+    this.#hostcallHandlers = hostcalls.handlers ?? new Map()
+    this.#hostcallQuotas = hostcalls.quotas
+    this.#maxHostcallBytes = hostcalls.maxHostcallBytes
     this.#unsubscribe = port.onMessage(this.#onMessage)
   }
 
@@ -165,6 +213,11 @@ export class HostEndpoint {
         // Flush queued calls/stream-starts in the exact order they were made.
         const queued = this.#outbox.splice(0, this.#outbox.length)
         for (const q of queued) this.#send(q)
+        return
+      }
+      case 'hostcall': {
+        this.#hooks.onHostcall?.(envelope.id, envelope.method, envelope.args)
+        void this.#dispatchHostcall(envelope)
         return
       }
       case 'result': {
@@ -216,6 +269,81 @@ export class HostEndpoint {
     })
     this.#sendOrQueue({ t: 'call', id, method, args })
     return { id, promise }
+  }
+
+  async #dispatchHostcall(
+    envelope: Extract<GuestToHostEnvelope, { t: 'hostcall' }>
+  ): Promise<void> {
+    const handler = this.#hostcallHandlers.get(envelope.method)
+    if (!handler) {
+      this.hostresult(envelope.id, {
+        ok: false,
+        error: { name: 'Error', message: `Unknown host method "${envelope.method}"` },
+      })
+      return
+    }
+    const quotas = this.#hostcallQuotas
+    if (
+      quotas &&
+      (this.#acceptedHostcalls >= quotas.maxHostcallsPerEvaluation ||
+        this.#concurrentHostcalls >= quotas.maxConcurrentHostcalls)
+    ) {
+      this.hostresult(envelope.id, {
+        ok: false,
+        error: { name: 'Error', message: 'Hostcall quota exceeded' },
+      })
+      return
+    }
+    this.#acceptedHostcalls += 1
+    this.#concurrentHostcalls += 1
+    let released = false
+    const release = (): void => {
+      if (!released) {
+        released = true
+        this.#concurrentHostcalls -= 1
+      }
+    }
+    const capabilityAbort = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = quotas?.hostcallTimeoutMs
+    const timedOut = new Promise<never>((_, reject) => {
+      if (timeout === undefined) return
+      timer = setTimeout(() => reject(new Error('Hostcall timed out')), timeout)
+    })
+    try {
+      const value = await Promise.race([
+        Promise.resolve().then(() => handler(envelope.args, capabilityAbort.signal)),
+        timedOut,
+      ])
+      if (timer) clearTimeout(timer)
+      release()
+      if (
+        this.#maxHostcallBytes !== undefined &&
+        measureHostcallBytes(value) > this.#maxHostcallBytes
+      ) {
+        this.hostresult(envelope.id, { ok: false, value: 'too-many-bytes' })
+      } else {
+        this.hostresult(envelope.id, { ok: true, value })
+      }
+    } catch (error) {
+      if (timer) clearTimeout(timer)
+      release()
+      this.hostresult(envelope.id, {
+        ok: false,
+        error: { name: 'Error', message: isError(error) ? error.message : String(error) },
+      })
+    }
+  }
+
+  /** Post a guest capability result. Unknown/late ids are harmlessly ignored by the guest. */
+  hostresult(
+    id: string,
+    result:
+      | { ok: true; value: WireValue | string }
+      | { ok: false; error?: WireError; value?: string }
+  ): void {
+    if (this.#terminated) return
+    this.#send({ t: 'hostresult', id, ...result })
   }
 
   /** Send an `abort` envelope for an in-flight call's id. Does not itself reject the call — the guest
@@ -279,6 +407,13 @@ export const wireErrorToError = (wireError: WireError): Error => {
 export interface GuestEndpointHooks {
   /** A `call` envelope arrived — resolve/reject `settle` with the method's outcome. */
   onCall?: (id: string, method: string, args: WireValue[], signal: AbortSignal) => void
+  /** A host capability result arrived. */
+  onHostResult?: (
+    id: string,
+    result:
+      | { ok: true; value: WireValue | string }
+      | { ok: false; error?: WireError; value?: string }
+  ) => void
   /** A `stream:start` envelope arrived — the handler pushes deltas via the returned sink. */
   onStreamStart?: (id: string, stream: string, args: WireValue[], signal: AbortSignal) => void
   /** A `stream:cancel` envelope arrived for an open stream id. */
@@ -299,6 +434,10 @@ export class GuestEndpoint {
   readonly #hooks: GuestEndpointHooks
   readonly #callAborts = new Map<string, AbortController>()
   readonly #streamAborts = new Map<string, AbortController>()
+  readonly #hostcalls = new Map<
+    string,
+    { resolve: (value: WireValue | string) => void; reject: (error: Error) => void }
+  >()
 
   constructor(port: PortLike, hooks: GuestEndpointHooks = {}) {
     this.#port = port
@@ -316,6 +455,16 @@ export class GuestEndpoint {
     if (!envelope || typeof (envelope as { t?: unknown }).t !== 'string') return
     this.#hooks.onEnvelope?.('in', envelope)
     switch (envelope.t) {
+      case 'hostresult': {
+        const pending = this.#hostcalls.get(envelope.id)
+        if (!pending) return
+        this.#hostcalls.delete(envelope.id)
+        if (envelope.ok) pending.resolve(envelope.value)
+        else if (envelope.value !== undefined) pending.reject(new Error(envelope.value))
+        else pending.reject(wireErrorToError(envelope.error!))
+        this.#hooks.onHostResult?.(envelope.id, envelope)
+        return
+      }
       case 'call': {
         const controller = new AbortController()
         this.#callAborts.set(envelope.id, controller)
@@ -342,6 +491,23 @@ export class GuestEndpoint {
         return
       }
     }
+  }
+
+  /** Issue a guest-to-host capability request using the separate hostcall id space. */
+  hostcall(
+    method: string,
+    args: WireValue[],
+    maxBytes?: number
+  ): { id: string; promise: Promise<WireValue | string> } {
+    const id = `h${nextCorrelationId()}`
+    if (maxBytes !== undefined && measureHostcallBytes({ method, args }) > maxBytes) {
+      return { id, promise: Promise.reject(new Error('Hostcall arguments exceed byte limit')) }
+    }
+    const promise = new Promise<WireValue | string>((resolve, reject) => {
+      this.#hostcalls.set(id, { resolve, reject })
+      this.#send({ t: 'hostcall', id, method, args })
+    })
+    return { id, promise }
   }
 
   /** Announce readiness. Must be sent exactly once, before any `result`/`stream:*`/`event` envelope. */
@@ -376,6 +542,12 @@ export class GuestEndpoint {
   errorStream(id: string, error: WireError): void {
     this.#streamAborts.delete(id)
     this.#send({ t: 'stream:error', id, error })
+  }
+
+  /** Reject all guest capability requests when this endpoint is stopped. */
+  terminate(reason = 'GuestEndpoint has been terminated'): void {
+    for (const pending of this.#hostcalls.values()) pending.reject(new Error(reason))
+    this.#hostcalls.clear()
   }
 
   /** Emit an unsolicited event on `channel`. */

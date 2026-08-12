@@ -50,6 +50,8 @@ export interface ServeIsolatedOptions extends IsolationObservabilityHooks {
  *  the guest-side method/stream implementations plus the `emit` capability for declared events. */
 export type IsolatedImplementationFactory<S extends IsolatedServiceSpec> = (input: {
   emit: IsolatedEmitter<S>
+  /** Issue a guest-to-host capability call. */
+  hostcall: (method: string, args: WireValue[], maxBytes?: number) => Promise<WireValue | string>
 }) => IsolatedImplementation<S>
 
 const codecModeFor = (declared: CodecMode | undefined): CodecMode | undefined => declared
@@ -103,6 +105,7 @@ export const serveIsolatedOverPort = <S extends IsolatedServiceSpec>(
   let encoderAvailable = false
   const openStreams = new Map<string, { cancel: () => void }>()
 
+  let endpoint: GuestEndpoint
   const emitter = new Proxy(
     {},
     {
@@ -122,9 +125,7 @@ export const serveIsolatedOverPort = <S extends IsolatedServiceSpec>(
     }
   ) as IsolatedEmitter<S>
 
-  const implementation = factory({ emit: emitter })
-
-  const endpoint: GuestEndpoint = new GuestEndpoint(port, {
+  endpoint = new GuestEndpoint(port, {
     onEnvelope: (dir, envelope) => {
       if (!hasIsolationHook(resolved, dir === 'out' ? 'wire:out' : 'wire:in')) return
       emitReport(dir === 'out' ? 'wire:out' : 'wire:in', { kind: envelope.t })
@@ -143,6 +144,19 @@ export const serveIsolatedOverPort = <S extends IsolatedServiceSpec>(
       // Best-effort: nothing more to clean up at this layer; the guest process/worker exit is the
       // caller's responsibility (serveIsolated's environment-specific wrapper, or the consumer script).
     },
+  })
+
+  // CONSTRUCTED BEFORE THE FACTORY RUNS, deliberately. The factory receives a `hostcall` capability
+  // that closes over `endpoint`, and a factory may legitimately invoke it SYNCHRONOUSLY — to fetch the
+  // configuration it needs in order to build the implementation. Calling the factory first left that
+  // closure reading an unassigned binding, so such a factory threw instead of producing a service.
+  //
+  // Safe in this order because the endpoint's handlers reach `implementation` only from inside
+  // `handleCall`/`handleStreamStart`, which run when a call arrives — never during construction — and
+  // there is no await between these two statements for an inbound message to interleave into.
+  const implementation = factory({
+    emit: emitter,
+    hostcall: (method, args, maxBytes) => endpoint.hostcall(method, args, maxBytes).promise,
   })
 
   const handleCall = async (
@@ -263,6 +277,11 @@ export const serveIsolatedOverPort = <S extends IsolatedServiceSpec>(
 
   return {
     stop: () => {
+      // `terminate()` FIRST: a pending `hostcall` lives in the endpoint's own map, not in
+      // `openStreams`, so cancelling streams alone left the guest's capability promise unsettled and
+      // whatever awaited it hanging for the life of the process. Stopping must settle every promise it
+      // owns, and a rejection is the honest outcome — the result is never coming.
+      endpoint.terminate('Isolated service stopped')
       for (const [, s] of openStreams) s.cancel()
       openStreams.clear()
     },

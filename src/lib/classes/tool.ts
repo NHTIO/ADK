@@ -46,6 +46,10 @@ export type ArtifactConstructorResolver<A extends SpooledArtifact = SpooledArtif
  *   itself; the consumer's executor middleware is responsible for storing them and wrapping
  *   them via `tool.artifactConstructor?.() ?? SpooledArtifact` when assembling the `ToolCall`
  *   record.
+ * - {@link @nhtio/adk!SpooledArtifact} — a pre-built, reader-backed result. Return this when
+ *   the handler has streamed bytes into storage and wrapped the reader; the consumer passes it
+ *   through without materialising or re-spooling it. Its concrete class determines the forged
+ *   `artifact_*` query tools.
  * - {@link @nhtio/adk!Media} / `Media[]` — explicit-modality silo. Bypasses
  *   {@link Tool.artifactConstructor} — the handler returns the final result shape directly.
  *   The LLM battery renders each `Media` as a provider-specific content block.
@@ -54,7 +58,13 @@ export type ToolHandler = (
   args: unknown,
   ctx: DispatchContext,
   meta: Registry
-) => string | Uint8Array | Media | Media[] | Promise<string | Uint8Array | Media | Media[]>
+) =>
+  | string
+  | Uint8Array
+  | SpooledArtifact
+  | Media
+  | Media[]
+  | Promise<string | Uint8Array | SpooledArtifact | Media | Media[]>
 
 /**
  * Plain input object supplied to {@link Tool} at construction time.
@@ -366,19 +376,27 @@ export class Tool<A extends SpooledArtifact = SpooledArtifact> {
    * handler, (5) emits `toolExecutionEnd` (with the same `callId`), (6) wraps any handler error
    * in {@link @nhtio/adk!E_TOOL_DOWNSTREAM_ERROR} before re-throwing.
    *
-   * The handler returns serialised bytes (`string | Uint8Array`) — persistence is the consumer's
-   * concern. Use {@link Tool.artifactConstructor} when wrapping the bytes into a
-   * `ToolCall.results` field.
+   * The handler usually returns serialised bytes (`string | Uint8Array`) — persistence is then the
+   * consumer's concern, and {@link Tool.artifactConstructor} is the class a wrap-site uses when
+   * wrapping those bytes into a `ToolCall.results` field. **A handler may instead return a
+   * {@link @nhtio/adk!SpooledArtifact} it built itself** (streaming into storage and wrapping the
+   * reader), in which case wrap-sites pass it through untouched and `artifactConstructor` does not
+   * apply — the returned instance's own class is what artifact-tool forging reads.
    *
    * Pattern mirrors `Middleware.runner()` — call once per turn, reuse the returned function.
    *
    * @param ctx - The active turn context. Provides emit functions and turn ID.
-   * @returns An async function `(args) => Promise<string | Uint8Array>`.
+   * @returns An async function `(args) => Promise<string | Uint8Array | SpooledArtifact | Media | Media[]>`.
+   *   A `SpooledArtifact` is a result the HANDLER built (streamed to storage and wrapped itself); a
+   *   wrap-site passes it through unwrapped rather than re-spooling it. `string`/`Uint8Array` are the
+   *   opposite case — bytes the consumer must still store and wrap.
    */
   executor(
     ctx: DispatchContext
-  ): (args: unknown) => Promise<string | Uint8Array | Media | Media[]> {
-    return async (args: unknown): Promise<string | Uint8Array | Media | Media[]> => {
+  ): (args: unknown) => Promise<string | Uint8Array | SpooledArtifact | Media | Media[]> {
+    return async (
+      args: unknown
+    ): Promise<string | Uint8Array | SpooledArtifact | Media | Media[]> => {
       // Compute callId over raw args (pre-validation) so two invocations with the same
       // (tool, raw args) produce the same identifier even if validation coerces values.
       const callId = sha256(canonicalStringify({ tool: this.#name, args }))

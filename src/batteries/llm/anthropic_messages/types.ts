@@ -229,6 +229,8 @@ export interface AnthropicMessagesHelpers extends ChatHelpersCommon {
     renderTrustedContent: ChatHelpersCommon['renderTrustedContent']
     warn?: (msg: string) => void
   }) => Promise<AnthropicContentBlockParam[]>
+  /** Renders the directions-bearing handle body for a non-inlined spooled artifact. */
+  renderArtifactHandleBody?: ChatHelpersCommon['renderArtifactHandleBody']
   /** Renders a tool call's result into Anthropic tool-result content blocks. */
   renderAnthropicToolCallResult: (input: {
     toolCall: ToolCall
@@ -237,6 +239,7 @@ export interface AnthropicMessagesHelpers extends ChatHelpersCommon {
     renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
     renderTrustedContent: ChatHelpersCommon['renderTrustedContent']
     renderAnthropicMediaBlocks: AnthropicMessagesHelpers['renderAnthropicMediaBlocks']
+    renderArtifactHandleBody?: AnthropicMessagesHelpers['renderArtifactHandleBody']
     unsupportedMediaPolicy: UnsupportedMediaPolicy
     warn?: (msg: string) => void
   }) => Promise<AnthropicToolResultBlockParam>

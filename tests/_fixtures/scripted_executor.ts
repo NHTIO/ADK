@@ -1,5 +1,6 @@
 import { DateTime } from 'luxon'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
+import { looksLikeSpooledArtifact } from '@nhtio/adk/batteries/llm/chat_common/helpers'
 import {
   ArtifactTool,
   isInstanceOf,
@@ -119,6 +120,8 @@ export const scriptStep = (step: ScenarioStep, store: ScriptStore): DispatchExec
               `scriptStep: ArtifactTool "${tc.tool}" returned a non-string/non-Tokenizable value`
             )
           }
+        } else if (looksLikeSpooledArtifact(raw)) {
+          results = raw as SpooledArtifact
         } else if (Media.isMedia(raw)) {
           results = raw
         } else if (Array.isArray(raw) && raw.length > 0 && raw.every((m) => Media.isMedia(m))) {

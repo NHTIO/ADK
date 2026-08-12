@@ -36,6 +36,9 @@ export {
   defaultToolsToChatCompletionsTools,
   renderChatCompletionsSystemPrompt,
   defaultRenderChatCompletionsSystemPrompt,
+  renderArtifactHandleBody,
+  defaultRenderArtifactHandleBody,
+  looksLikeSpooledArtifact,
 } from '../chat_common/helpers'
 
 import { E_ANTHROPIC_MESSAGES_UNSUPPORTED_MEDIA_MODALITY } from './exceptions'
@@ -43,6 +46,8 @@ import {
   descriptionToChatCompletionsJsonSchema,
   renderUntrustedContent,
   renderTrustedContent,
+  defaultRenderArtifactHandleBody,
+  looksLikeSpooledArtifact,
 } from '../chat_common/helpers'
 import {
   escapeXmlAttribute,
@@ -231,6 +236,7 @@ export const renderAnthropicToolCallResult = async (input: {
   renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
   renderTrustedContent: ChatHelpersCommon['renderTrustedContent']
   renderAnthropicMediaBlocks: AnthropicMessagesHelpers['renderAnthropicMediaBlocks']
+  renderArtifactHandleBody?: AnthropicMessagesHelpers['renderArtifactHandleBody']
   unsupportedMediaPolicy: UnsupportedMediaPolicy
   warn?: (msg: string) => void
 }): Promise<AnthropicToolResultBlockParam> => {
@@ -272,6 +278,36 @@ export const renderAnthropicToolCallResult = async (input: {
       )
     )
     body = resultParts.join('\n\n')
+  } else if (looksLikeSpooledArtifact(input.results) && input.toolCall.inline === false) {
+    const artifact = input.results as SpooledArtifact
+    let byteLength = 0
+    let lineCount = 0
+    try {
+      byteLength = await artifact.byteLength()
+    } catch {
+      byteLength = 0
+    }
+    try {
+      lineCount = await artifact.lineCount()
+    } catch {
+      lineCount = 0
+    }
+    const handleBody = (input.renderArtifactHandleBody ?? defaultRenderArtifactHandleBody)({
+      callId: input.toolCall.id,
+      artifact,
+      byteLength,
+      lineCount,
+    })
+    return {
+      type: 'tool_result',
+      tool_use_id: input.toolCall.id,
+      content: input.renderUntrustedContent(handleBody, {
+        nonce: input.toolCall.checksum,
+        kind: 'artifact-handle',
+        tool: input.toolCall.tool,
+      }),
+      ...(input.toolCall.isError ? { is_error: true } : {}),
+    }
   } else if ('asString' in (input.results as object)) {
     body = await (input.results as SpooledArtifact).asString()
   } else body = input.results.toString()

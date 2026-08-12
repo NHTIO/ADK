@@ -21,10 +21,10 @@
  * automatic `recycle()`, `'giveUp'` leaves the service crashed. Default: off.
  */
 
-import { HostEndpoint } from './protocol'
 import { isError, isInstanceOf } from '@nhtio/adk/guards'
 import { validateIsolatedServiceOptions } from './validation'
 import { decodeArgument, encodeArgument, fromWireError } from './codec'
+import { HostEndpoint, type HostcallHandler, type HostcallQuotas } from './protocol'
 import { E_ISOLATED_CRASHED, E_ISOLATED_TERMINATED, E_ISOLATION_READY_TIMEOUT } from './exceptions'
 import {
   emitIsolationReport,
@@ -54,6 +54,12 @@ export interface IsolatedServiceOptions extends IsolationObservabilityHooks {
   autoRespawn?: { policy: CrashPolicy }
   /** Classes to register with `@nhtio/encoder`'s custom-encodable round-trip on this side. */
   encodables?: ReadonlyArray<{ readonly name: string }>
+  /** Permitted guest-to-host capability handlers. */
+  hostcallHandlers?: ReadonlyMap<string, HostcallHandler>
+  /** Resolved quotas enforced for guest-to-host calls. */
+  hostcallQuotas?: HostcallQuotas
+  /** Producer-side argument/result byte cap. */
+  maxHostcallBytes?: number
 }
 
 /** Lifecycle state of an {@link IsolatedService}. */
@@ -122,25 +128,33 @@ export const createIsolatedService = <S extends IsolatedServiceSpec>(
     const startedAt = Date.now()
     connectPromise = (async () => {
       const port = await transport.connect()
-      endpoint = new HostEndpoint(port, {
-        onReady: () => {
-          // The guest's `encoderAvailable` flag only matters to the guest's own `toWireError` rich-path
-          // decision (see serve.ts) — the host only ever DECODES wire errors (`fromWireError`), which
-          // self-describes via `WireError.nhtio` being present or absent, so nothing here needs to track
-          // it.
-          state = 'ready'
+      endpoint = new HostEndpoint(
+        port,
+        {
+          onReady: () => {
+            // The guest's `encoderAvailable` flag only matters to the guest's own `toWireError` rich-path
+            // decision (see serve.ts) — the host only ever DECODES wire errors (`fromWireError`), which
+            // self-describes via `WireError.nhtio` being present or absent, so nothing here needs to track
+            // it.
+            state = 'ready'
+          },
+          onEvent: (channel, payload) => {
+            void (async () => {
+              const decoded = await decodeArgument(payload, undefined, `event ${channel}`)
+              for (const fn of eventListeners.get(channel) ?? []) fn(decoded)
+            })()
+          },
+          onEnvelope: (dir, envelope) => {
+            if (!hasIsolationHook(resolved, dir === 'out' ? 'wire:out' : 'wire:in')) return
+            emitReport(dir === 'out' ? 'wire:out' : 'wire:in', { kind: envelope.t })
+          },
         },
-        onEvent: (channel, payload) => {
-          void (async () => {
-            const decoded = await decodeArgument(payload, undefined, `event ${channel}`)
-            for (const fn of eventListeners.get(channel) ?? []) fn(decoded)
-          })()
-        },
-        onEnvelope: (dir, envelope) => {
-          if (!hasIsolationHook(resolved, dir === 'out' ? 'wire:out' : 'wire:in')) return
-          emitReport(dir === 'out' ? 'wire:out' : 'wire:in', { kind: envelope.t })
-        },
-      })
+        {
+          handlers: resolved.hostcallHandlers,
+          quotas: resolved.hostcallQuotas,
+          maxHostcallBytes: resolved.maxHostcallBytes,
+        }
+      )
       await new Promise<void>((resolve, reject) => {
         let settled = false
         const timer = setTimeout(() => {

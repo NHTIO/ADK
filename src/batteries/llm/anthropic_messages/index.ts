@@ -57,6 +57,8 @@ export {
   defaultToolsToChatCompletionsTools,
   renderChatCompletionsSystemPrompt,
   defaultRenderChatCompletionsSystemPrompt,
+  renderArtifactHandleBody,
+  defaultRenderArtifactHandleBody,
   anthropicToolsFromTools,
   defaultAnthropicToolsFromTools,
   renderAnthropicMediaBlocks,
