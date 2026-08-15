@@ -23,6 +23,19 @@ export interface RunShellCommandOptions {
   readonly gate?: ToolGateFn
   /** Optional command-name allow-list. */
   readonly allowedCommands?: readonly string[]
+  /**
+   * Environment variables to add to every command this tool spawns.
+   *
+   * @remarks
+   * ADDITIVE, and applied LAST — over both the host variables the enforcer allow-listed and SRT's own
+   * proxy/CA plumbing. It is not the host-inheritance control: the enforcer decides what the child
+   * inherits (`envAllowList` / `inheritHostEnv` on the Node adapter), and this cannot re-admit a
+   * variable the enforcer withheld except by supplying the value literally here.
+   *
+   * Anything put here is readable by the model — `run_shell_command` runs commands the model chose,
+   * and `env` is one of them — so pass configuration, not credentials.
+   */
+  readonly env?: Readonly<Record<string, string>>
   /** Optional tool description override. */
   readonly description?: string
   /** Injectable model-facing outcome renderer. */
@@ -66,7 +79,11 @@ export const createRunShellCommandTool = (options: RunShellCommandOptions): Tool
     inputSchema,
     trusted: false,
     handler: async (raw, ctx) => {
-      const args = raw as { command: string; cwd: string; timeout_seconds: number }
+      const args = raw as {
+        command: string
+        cwd: string
+        timeout_seconds: number
+      }
       const narrate = options.narrate ?? defaultSandboxNarrator
       try {
         await runToolGate(options.gate, ctx, 'run_shell_command', args)
@@ -113,7 +130,11 @@ export const createRunShellCommandTool = (options: RunShellCommandOptions): Tool
       const commandName = args.command.trim().split(/\s+/, 1)[0]
       if (options.allowedCommands && !options.allowedCommands.includes(commandName))
         throw new E_SANDBOX_REFUSED([
-          narrate({ kind: 'denied-by-policy', path: commandName, axis: 'read' }),
+          narrate({
+            kind: 'denied-by-policy',
+            path: commandName,
+            axis: 'read',
+          }),
         ])
       const correlationId = crypto.randomUUID()
       const controller = new AbortController()
@@ -145,13 +166,17 @@ export const createRunShellCommandTool = (options: RunShellCommandOptions): Tool
           correlationId,
           cwd: options.translator.toBackendPath(relative),
           signal: controller.signal,
+          ...(options.env === undefined ? {} : { env: { ...options.env } }),
         })
       } catch (error) {
         clearTimeout(timeout)
         const outcome = (error as { outcome?: SandboxOutcome }).outcome
         if (outcome?.kind === 'denied-by-policy') throw new E_SANDBOX_REFUSED([narrate(outcome)])
         throw new E_SANDBOX_FAILED([
-          narrate({ kind: 'io-failure', detail: isError(error) ? error.message : String(error) }),
+          narrate({
+            kind: 'io-failure',
+            detail: isError(error) ? error.message : String(error),
+          }),
         ])
       }
       const storeWrite = ctx.storeRetrievableBytes(correlationId, merged)
@@ -160,7 +185,11 @@ export const createRunShellCommandTool = (options: RunShellCommandOptions): Tool
         for (const denial of options.sandbox.diagnosticsFor(correlationId)) {
           if (!seen.has(denial)) {
             seen.add(denial)
-            write(line(`[sandbox] denied: ${denial} (observed after)`))
+            // Redacted because a denial is upstream TEXT and routinely names an absolute host path —
+            // the one line in this stream the battery authors from someone else's words. The exit-code
+            // and timeout lines below are numbers this battery formats, so they carry nothing to scrub.
+            // This does NOT extend to the child's own stdout, which no field translation can reach.
+            write(line(`[sandbox] denied: ${options.translator.redact(denial)} (observed after)`))
           }
         }
       }

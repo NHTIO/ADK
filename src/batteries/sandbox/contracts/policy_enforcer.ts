@@ -16,6 +16,16 @@ export interface SandboxPolicyEnforcer {
     policy: SandboxPolicy
     correlationId: string
     cwd: string
+    /**
+     * An ADDITIVE per-call overlay on the child's environment, applied LAST.
+     *
+     * @remarks
+     * NOT the host-inheritance control. What a child inherits from the host is the ADAPTER's decision
+     * (the Node/SRT one denies by default and takes an allow-list at construction); this field only
+     * adds to whatever that produced, and an adapter MUST NOT let it silently widen what the deployment
+     * allowed. Leaving these semantics unstated is how the Node adapter came to spread the entire
+     * `process.env` into every child while this field sat unused.
+     */
     env?: Record<string, string>
     signal?: AbortSignal
   }): Promise<{

@@ -15,6 +15,52 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-08-14
+
+### Changed
+
+- **BREAKING (sandbox battery): a sandboxed child no longer inherits the host environment.** It gets
+  `PATH` and nothing else — not `HOME`, not `USER`, not `TMPDIR`, and none of your credentials.
+
+  Before this, `srtEnforcer` spawned every child with the full `process.env`, and the tool factory had
+  no way to change that. Since `run_shell_command` exists to run commands the **model** chose, and `env`
+  is one of them, every secret in the host process was one tool call from the model's own context — and
+  no filesystem or network policy prevents that, because the value arrives in the tool result rather
+  than over the wire.
+
+  Two new `srtEnforcer` options control it: `envAllowList` (default `['PATH']`) names what a child may
+  inherit, and **replaces** that default rather than extending it — pass `['PATH', 'CARGO_HOME']`, not
+  `['CARGO_HOME']`, or binaries stop resolving. `inheritHostEnv: true` restores the old behaviour in one
+  line, and hands the model every secret in the process; prefer naming what you need.
+  `createRunShellCommandTool` also gains an `env` option for explicit per-call variables, applied last.
+
+  SRT's own proxy, CA and git plumbing is injected separately and always survives, so the network
+  boundary is unaffected. Most deployments need no change: `PATH` is what ordinary commands and the
+  ripgrep searcher actually depend on.
+
+### Added
+
+- **`enableWeakerNestedSandbox` on `srtEnforcer`**, for running the sandbox inside an unprivileged
+  container — a containerised CI job being the common case. Bubblewrap cannot mount a fresh `/proc`
+  there, so every sandboxed command failed with `apply-seccomp: write /proc/self/uid_map: Operation not
+  permitted` and **no diagnostics** — exit 1, empty stdout, indistinguishable from a policy denial.
+  There was previously no way to express the option at all.
+
+  It lands on the enforcer's options rather than on `SandboxPolicy`, which is deliberately SRT-neutral
+  vocabulary. Upstream's caveat applies and is worth repeating: the bind-mounted `/proc` exposes process
+  information a fresh mount would hide, so enable it only when the **outer** container already provides
+  the isolation you need.
+
+- **A CI job that runs the Linux sandbox suite**, in docker-in-docker so it executes in an unprivileged
+  container. Until now no job ran bubblewrap at all: the live suites skip themselves into a passing
+  report, which is how the missing environment control above shipped unnoticed.
+
+  Its first runs established a limit worth stating rather than discovering later: **this runner's dind
+  daemon forbids unprivileged user namespaces outright**, so bubblewrap fails before the `/proc`
+  question arises — an earlier failure than the one issue #5 reports. `enableWeakerNestedSandbox`
+  therefore cannot be validated in CI; confirming it fixes a real container needs a kernel that permits
+  capability-bearing unprivileged user namespaces. The job is non-blocking and reports what it observed.
+
 ## 2026-08-12
 
 ### Added

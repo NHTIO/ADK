@@ -26,9 +26,14 @@ type SrtManager = {
   ): Promise<{ argv: string[]; env: Record<string, string> }>
   getFsReadConfig(): { denyOnly: string[]; allowWithinDeny?: string[] }
   getFsWriteConfig(): { allowOnly: string[]; denyWithinAllow: string[] }
-  getNetworkRestrictionConfig(): { allowedHosts?: string[]; deniedHosts?: string[] }
+  getNetworkRestrictionConfig(): {
+    allowedHosts?: string[]
+    deniedHosts?: string[]
+  }
   getConfig(): SrtConfig | undefined
-  getSandboxViolationStore(): { getViolationsForCommand(command: string): unknown[] }
+  getSandboxViolationStore(): {
+    getViolationsForCommand(command: string): unknown[]
+  }
   reset(): Promise<void>
 }
 type SrtConfig = {
@@ -37,6 +42,8 @@ type SrtConfig = {
   /** SRT's Linux mandatory-deny scan depth is session-level. */
   mandatoryDenySearchDepth?: number
   git?: { safeDirectories: string[] }
+  /** Top-level and session-level: SRT reads this from the config `initialize()` stored, not per call. */
+  enableWeakerNestedSandbox?: boolean
 }
 
 const unsupported = (): never => {
@@ -45,6 +52,59 @@ const unsupported = (): never => {
   ])
 }
 const nonEmpty = (v: readonly string[] | undefined): string[] => [...(v ?? [])]
+
+/**
+ * Host variables a sandboxed child inherits when the caller names no allow-list.
+ *
+ * @remarks
+ * `PATH` ONLY, and it is the minimum rather than a convenience. The ripgrep searcher spawns `rg` by
+ * BARE NAME, so with no `PATH` the child sees only the one a shell synthesises
+ * (`/usr/gnu/bin:/usr/local/bin:/bin:/usr/bin:.`) — which does not contain `/opt/homebrew/bin` or a Nix
+ * profile, so `search_files` would fail as `io-failure` on any such host and present as *"the search
+ * tool is broken"* rather than as a configuration error.
+ *
+ * `PATH` is not a credential: a model that runs `env` learns where binaries live, not a secret. Every
+ * genuinely sensitive variable — and `HOME`, `USER`, `TMPDIR`, which leak host layout — stays out.
+ */
+const DEFAULT_ENV_ALLOW_LIST: readonly string[] = ['PATH']
+
+/** POSIX environment-variable names. Anything else could not be exported by a shell anyway. */
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/**
+ * Resolve the host half of a sandboxed child's environment ONCE, at construction.
+ *
+ * @remarks
+ * DENY BY DEFAULT. Before this existed the enforcer spread the entire `process.env` into every child,
+ * so a model directing the shell's argv could run `env` and read the host's credentials straight back
+ * into its own context — which no filesystem or network policy prevents, because the secret arrives in
+ * the tool result rather than over the wire.
+ *
+ * The allow-list REPLACES this default rather than extending it; that is stated on the option, because
+ * the opposite assumption is the natural one and would silently drop `PATH`.
+ *
+ * @param options - The enforcer's construction options.
+ * @returns The host variables to seed the child's environment with.
+ */
+const resolveHostEnv = (options: SrtEnforcerOptions): Record<string, string> => {
+  if (options.inheritHostEnv === true) {
+    const all: Record<string, string> = {}
+    for (const [name, value] of Object.entries(process.env))
+      if (value !== undefined) all[name] = value
+    return all
+  }
+  const names = options.envAllowList ?? DEFAULT_ENV_ALLOW_LIST
+  const picked: Record<string, string> = {}
+  for (const name of names) {
+    if (!ENV_NAME.test(name))
+      throw new E_INVALID_SANDBOX_CONFIG([
+        `envAllowList entry ${JSON.stringify(name)} is not a valid environment variable name`,
+      ])
+    const value = process.env[name]
+    if (value !== undefined) picked[name] = value
+  }
+  return picked
+}
 
 /**
  * Whether `<cwd>/.git` is a real DIRECTORY.
@@ -62,8 +122,19 @@ const dotGitIsDirectory = (cwd: string): boolean => {
   }
 }
 
-/** The sole ADK-to-SRT translation point. Keep the upstream type behind this local firewall. */
-const mapPolicy = (policy: SandboxPolicy): SrtConfig => {
+/**
+ * The sole ADK-to-SRT translation point. Keep the upstream type behind this local firewall.
+ *
+ * @remarks
+ * `runtime` carries ADAPTER-level settings that are deliberately absent from `SandboxPolicy`. That
+ * type is ADK-owned, SRT-neutral vocabulary — naming an SRT feature in it would make the firewall
+ * nominal and leave a non-SRT enforcer unable to implement the contract — so an SRT-specific switch
+ * belongs on the adapter's own options, exactly as `binShell` already does.
+ */
+const mapPolicy = (
+  policy: SandboxPolicy,
+  runtime: { enableWeakerNestedSandbox?: boolean } = {}
+): SrtConfig => {
   const fs = policy.filesystem
   const net = policy.network
   if (
@@ -80,6 +151,9 @@ const mapPolicy = (policy: SandboxPolicy): SrtConfig => {
     ...(fs.mandatoryDenySearchDepth !== undefined
       ? { mandatoryDenySearchDepth: fs.mandatoryDenySearchDepth }
       : {}),
+    // Emitted only when enabled, so an untouched configuration is byte-identical to before this
+    // option existed — a drift snapshot taken either side of the upgrade compares equal.
+    ...(runtime.enableWeakerNestedSandbox === true ? { enableWeakerNestedSandbox: true } : {}),
     filesystem: {
       ...(fs.disabled ? { disabled: true } : {}),
       denyRead: nonEmpty(fs.denyRead),
@@ -97,15 +171,23 @@ const mapPolicy = (policy: SandboxPolicy): SrtConfig => {
       allowUnixSockets: [],
       allowMachLookup: [],
     },
-    git: { safeDirectories: nonEmpty(fs.gitSafeDirectories ?? [process.cwd()]) },
+    git: {
+      safeDirectories: nonEmpty(fs.gitSafeDirectories ?? [process.cwd()]),
+    },
   }
 }
 
 const toWeb = (stream: NodeJS.ReadableStream): ReadableStream<Uint8Array> =>
-  (ReadableStream as unknown as { from?: (x: unknown) => ReadableStream<Uint8Array> }).from
-    ? (ReadableStream as unknown as { from: (x: unknown) => ReadableStream<Uint8Array> }).from(
-        stream
-      )
+  (
+    ReadableStream as unknown as {
+      from?: (x: unknown) => ReadableStream<Uint8Array>
+    }
+  ).from
+    ? (
+        ReadableStream as unknown as {
+          from: (x: unknown) => ReadableStream<Uint8Array>
+        }
+      ).from(stream)
     : new ReadableStream({
         start(controller) {
           stream.on('data', (x: Buffer) => controller.enqueue(new Uint8Array(x)))
@@ -191,6 +273,50 @@ export type SrtEnforcerOptions = {
    * SECOND `initialize()` is a no-op — a later call with a different policy silently keeps the first.
    */
   policy: SandboxPolicy
+  /**
+   * Host environment variable NAMES a sandboxed child may inherit. Defaults to `['PATH']`.
+   *
+   * @remarks
+   * The child inherits NOTHING from the host beyond these names. That default is deliberate: a model
+   * that can direct the shell's argv can run `env`, so anything inherited is readable back into its
+   * context — and no filesystem or network policy stops it, because the value arrives in the tool
+   * result rather than over the wire.
+   *
+   * **This REPLACES the default, it does not extend it.** A caller who needs `CARGO_HOME` and still
+   * wants binaries to resolve must pass BOTH: `['PATH', 'CARGO_HOME']`. Passing `['CARGO_HOME']` alone
+   * drops `PATH`, which breaks `search_files` on any host where `rg` lives outside `/usr/bin`.
+   *
+   * An entry that is not a valid POSIX environment-variable name throws `E_INVALID_SANDBOX_CONFIG` at
+   * construction rather than being skipped, so a typo surfaces as a startup error instead of a
+   * variable that silently never arrives.
+   */
+  envAllowList?: readonly string[]
+  /**
+   * Pass the ENTIRE host environment to sandboxed children. Defaults to `false`.
+   *
+   * @remarks
+   * The escape hatch for a deployment that genuinely needs ambient configuration, and it is worth
+   * being blunt about what it re-opens: **every secret in the host process becomes readable by the
+   * model**, because `run_shell_command` exists precisely to run commands the model chose and `env` is
+   * one of them. Prefer naming what you need in `envAllowList`.
+   */
+  inheritHostEnv?: boolean
+  /**
+   * Enable SRT's weaker nested-sandbox mode, for running inside an unprivileged container.
+   *
+   * @remarks
+   * Bubblewrap cannot mount a fresh `/proc` inside an unprivileged container, so the sandbox fails to
+   * start at all — the symptom is `apply-seccomp: write /proc/self/uid_map: Operation not permitted`
+   * with exit 1, an empty stdout and NO diagnostics, which is indistinguishable from a policy denial.
+   * This flag makes the inner sandbox bind-mount the container's EXISTING `/proc` instead.
+   *
+   * **It considerably weakens the boundary**, in upstream's own words: the bind-mounted `/proc`
+   * exposes process information a fresh mount would hide. Only enable it when the OUTER container
+   * already provides the isolation you need — it trades inner isolation for the sandbox running at all.
+   *
+   * Session-level: SRT reads it from the config given to `initialize()`, never per call.
+   */
+  enableWeakerNestedSandbox?: boolean
 }
 
 /**
@@ -214,6 +340,10 @@ export type SrtEnforcerOptions = {
 export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxPolicyEnforcer> => {
   if (process.platform !== 'darwin' && process.platform !== 'linux') return unsupported()
   const binShell = validateBinShell(options.binShell)
+  // Resolved ONCE: the allow-list is fixed for the enforcer's life, so re-picking per spawn would only
+  // add a chance for the two to disagree. Validation throws here, at construction, so a typo'd variable
+  // name is a startup error rather than a variable that silently never arrives.
+  const hostEnv = resolveHostEnv(options)
   const srt = (await import('@anthropic-ai/sandbox-runtime')) as unknown as {
     SandboxManager: SrtManager
   }
@@ -265,7 +395,16 @@ export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxP
     selfSessionClaimed = true
     try {
       if (selfInitialized && manager.isSandboxingEnabled()) await manager.reset()
-      await manager.initialize(mapPolicy(options.policy))
+      // THE nested-sandbox flag MUST ride this call and only this one. SRT resolves it from the
+      // module-level config `initialize()` stored (`getEnableWeakerNestedSandbox()` reads
+      // `config?.enableWeakerNestedSandbox`), NOT from the per-call config handed to
+      // `wrapWithSandboxArgv` — so passing it only at the `run()` site below would compile, ship, and
+      // silently do nothing.
+      await manager.initialize(
+        mapPolicy(options.policy, {
+          enableWeakerNestedSandbox: options.enableWeakerNestedSandbox,
+        })
+      )
       selfInitialized = true
     } catch (error) {
       // A failed establishment must not leave the claim held, or the process is permanently wedged
@@ -363,7 +502,13 @@ export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxP
       )
       const child = spawn(wrapped.argv[0], wrapped.argv.slice(1), {
         cwd: op.cwd,
-        env: { ...process.env, ...wrapped.env, ...(op.env ?? {}) },
+        // ORDER IS LOAD-BEARING — do not "tidy" it into something more uniform.
+        //   1. `hostEnv` is the DENY-BY-DEFAULT host half, resolved once at construction. It was
+        //      `...process.env`, which handed every host secret to a command the model chose.
+        //   2. `wrapped.env` is SRT's own plumbing (proxy, CA bundle, git `safe.directory`) and must
+        //      outrank the host half, or a stale ambient `HTTP_PROXY` would defeat the network policy.
+        //   3. `op.env` is the caller's per-call overlay and wins last, by contract.
+        env: { ...hostEnv, ...wrapped.env, ...(op.env ?? {}) },
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: false,
       })
@@ -376,7 +521,11 @@ export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxP
         child.once('error', () => settle({ exitCode: 1, failed: true }))
         child.once('close', (code) => settle({ exitCode: code ?? 1, failed: (code ?? 1) !== 0 }))
       })
-      return { stdout: toWeb(child.stdout!), stderr: toWeb(child.stderr!), completed }
+      return {
+        stdout: toWeb(child.stdout!),
+        stderr: toWeb(child.stderr!),
+        completed,
+      }
     },
     // Owned sessions are immutable from this adapter's perspective and retain the cheap cached
     // snapshot. An adopted session must re-read SRT on every call: a foreign updateConfig() can widen
