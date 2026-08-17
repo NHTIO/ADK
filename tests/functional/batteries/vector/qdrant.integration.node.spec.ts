@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { describe, it } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { QdrantVectorStore } from '@nhtio/adk/batteries/vector/qdrant'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -30,4 +30,9 @@ d('QdrantVectorStore (integration)', () => {
   }
 
   runVectorStoreConformance('QdrantVectorStore', makeStore)
+
+  it('closes without throwing', async () => {
+    const vs = await makeStore()
+    await vs.close()
+  })
 })

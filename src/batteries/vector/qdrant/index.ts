@@ -2,6 +2,7 @@
  * @module @nhtio/adk/batteries/vector/qdrant
  */
 
+import { sha256 } from 'js-sha256'
 import { BaseVectorStore } from '../contract'
 import { validateRecords } from '../validation'
 import { normalizeScore, sanitizeMetadata } from '../helpers'
@@ -115,17 +116,7 @@ const getQdrantClient = async () => {
   }
 }
 
-const getSha256 = () => {
-  try {
-    const mod = require('js-sha256')
-    return mod.sha256
-  } catch {
-    throw new E_VECTOR_STORE_DRIVER_UNAVAILABLE(['js-sha256'])
-  }
-}
-
 const uuidFromId = (id: string): string => {
-  const sha256 = getSha256()
   const h = sha256(id)
   return (
     h.slice(0, 8) +
@@ -174,10 +165,7 @@ export class QdrantVectorStore extends BaseVectorStore {
     })
   }
   async close(): Promise<void> {
-    if (this.#client) {
-      await this.#client.close()
-      this.#client = null
-    }
+    this.#client = null
   }
   async createCollection(spec: CollectionSpec, ifNotExists: boolean): Promise<void> {
     const client = this.#client || (await this.connect(), this.#client!)
@@ -269,15 +257,15 @@ export class QdrantVectorStore extends BaseVectorStore {
     let hits: any[]
     if (queryVector) {
       const filter = this.translateQdrantFilter(plan.filter)
-      const res = await client.search(plan.collection, {
-        vector: queryVector,
+      const res = await client.query(plan.collection, {
+        query: { nearest: queryVector },
         limit: plan.topK,
         offset: plan.offset,
         filter,
         with_payload: true,
         with_vector: !!plan.projection.vector,
       })
-      hits = res
+      hits = res.points
     } else {
       const filter = this.translateQdrantFilter(plan.filter)
       const res = await client.scroll(plan.collection, {

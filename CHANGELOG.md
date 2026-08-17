@@ -15,6 +15,30 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-08-16
+
+### Fixed
+
+- **The Qdrant vector-store battery was unusable from a published-package install (three
+  independent defects).** None of the three reproduced from ADK's own `src/`, because the test
+  suite aliases `@nhtio/adk` straight to source — only a real `pnpm install` of the built package
+  hit them.
+
+  1. `uuidFromId` called `require('js-sha256')` directly. The published build (rolldown) rewrites
+     bare `require` calls into a runtime shim that throws in real Node ESM (`"type": "module"`, no
+     `require` global) — so every `upsert()` failed with
+     `E_VECTOR_STORE_DRIVER_UNAVAILABLE: js-sha256`. Now imports `sha256` statically, matching the
+     `weaviate` battery's existing pattern.
+  2. Search called `client.search(...)`, which `@qdrant/js-client-rest` removed in `1.19.0` —
+     a version the package's own `^1.18.0` range permits resolving to. Switched to `client.query(...)`
+     with a `{ nearest: vector }` query, which exists at both `1.18.0` and `1.19.0`.
+  3. `close()` called `this.#client.close()`, a method `QdrantClient` has never had at either
+     client version — so every `close()` call threw. It now just drops the client reference, matching
+     the other REST-only vector batteries (`pinecone`, `typesense`, `meilisearch`).
+
+  Verified against a live `qdrant/qdrant` container, driving the built `dist` bundle from outside
+  the repo (not vitest's source aliasing), at both `@qdrant/js-client-rest@1.18.0` and `1.19.0`.
+
 ## 2026-08-14
 
 ### Changed
