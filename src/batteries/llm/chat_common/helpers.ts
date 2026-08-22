@@ -41,6 +41,24 @@ import type {
 export const escapeXmlAttribute = (value: string): string =>
   value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
+// ─── unnamed tool-call substitution ────────────────────────────────────────────
+
+/**
+ * Substitute a placeholder for an empty tool-call name.
+ *
+ * @remarks
+ * `ToolCall.tool` is validated by a bare `validator.string().required()`, which — like the rest of
+ * this validator family — rejects the empty string, not just `undefined`/`null`. Every adapter's
+ * "tool not found" / "malformed args" fallback branches exist specifically to survive a bad
+ * `call.name` from the model, but they construct their error-carrying `ToolCall` from `call.name`
+ * unguarded — so the one input those branches exist to handle gracefully (a hallucinated tool call
+ * with an empty name) crashes them instead. Call this at every such construction site so the
+ * degenerate case reports a name-shaped placeholder rather than throwing
+ * `E_INVALID_INITIAL_TOOL_CALL_VALUE` from inside the recovery path itself.
+ */
+export const normalizeToolName = (name: string): string =>
+  name.length > 0 ? name : '(unnamed tool call)'
+
 // ─── reserved no-nonce tier neutralisation ────────────────────────────────────
 
 /**

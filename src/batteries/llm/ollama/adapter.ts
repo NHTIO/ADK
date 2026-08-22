@@ -30,14 +30,11 @@ import { DateTime } from 'luxon'
 import { sha256 } from 'js-sha256'
 import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
-import { looksLikeSpooledArtifact } from '../chat_common/helpers'
 import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
 import { resolveToolCallParser } from '../chat_common/tool_parsers'
 import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
-// Accepted-shared-runtime tier (see CONTRIBUTING.md → Design Decisions → #13 Battery design):
-// pure, class-free retry primitives shared with the OpenAI Chat Completions battery — no core
-// class coupling, so this deep relative reach is accepted as-is, not re-exported through a shim.
+import { looksLikeSpooledArtifact, normalizeToolName } from '../chat_common/helpers'
 import {
   computeBackoff,
   sleepWithJitter,
@@ -601,15 +598,16 @@ export class OllamaAdapter {
         }
         const completedAt = nowIso()
         if (parseError !== undefined) {
+          const toolName = normalizeToolName(call.name)
           const results = new Tokenizable(parseError.message)
-          helpers.reportToolCall(call.id, { tool: call.name, args })
+          helpers.reportToolCall(call.id, { tool: toolName, args })
           helpers.reportToolCall(call.id, { results, isError: true, isComplete: true })
           await ctx.storeToolCall(
             new ToolCall({
               id: call.id,
-              tool: call.name,
+              tool: toolName,
               args,
-              checksum: computeChecksum(call.name, args),
+              checksum: computeChecksum(toolName, args),
               isComplete: true,
               isError: true,
               results,
@@ -621,23 +619,24 @@ export class OllamaAdapter {
           return
         }
         if (!tool) {
+          const toolName = normalizeToolName(call.name)
           const available = ctx.tools
             .all()
             .map((t) => t.name)
             .sort()
           const errText =
             available.length > 0
-              ? `Tool not found: ${call.name}. Available tools: ${available.join(', ')}.`
-              : `Tool not found: ${call.name}. No tools are available this turn.`
+              ? `Tool not found: ${toolName}. Available tools: ${available.join(', ')}.`
+              : `Tool not found: ${toolName}. No tools are available this turn.`
           const results = new Tokenizable(errText)
-          helpers.reportToolCall(call.id, { tool: call.name, args })
+          helpers.reportToolCall(call.id, { tool: toolName, args })
           helpers.reportToolCall(call.id, { results, isError: true, isComplete: true })
           await ctx.storeToolCall(
             new ToolCall({
               id: call.id,
-              tool: call.name,
+              tool: toolName,
               args,
-              checksum: computeChecksum(call.name, args),
+              checksum: computeChecksum(toolName, args),
               isComplete: true,
               isError: true,
               results,

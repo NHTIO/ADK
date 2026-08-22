@@ -68,11 +68,11 @@ import { APIError } from '@anthropic-ai/sdk/core/error'
 import { default as Anthropic } from '@anthropic-ai/sdk'
 import { countAnthropicMessagesTokens } from './count_tokens'
 import { translateAnthropicError } from './error_translation'
-import { looksLikeSpooledArtifact } from '../chat_common/helpers'
 import { resolveToolCallParser } from '../chat_common/tool_parsers'
 import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
 import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
+import { looksLikeSpooledArtifact, normalizeToolName } from '../chat_common/helpers'
 import {
   computeBackoff,
   sleepWithJitter,
@@ -907,8 +907,9 @@ export class AnthropicMessagesAdapter {
         }
         const completedAt = nowIso()
         if (parseError !== undefined) {
+          const toolName = normalizeToolName(call.name)
           const results = new Tokenizable(parseError.message)
-          helpers.reportToolCall(call.id, { tool: call.name, args })
+          helpers.reportToolCall(call.id, { tool: toolName, args })
           helpers.reportToolCall(call.id, {
             results,
             isError: true,
@@ -917,9 +918,9 @@ export class AnthropicMessagesAdapter {
           await ctx.storeToolCall(
             new ToolCall({
               id: call.id,
-              tool: call.name,
+              tool: toolName,
               args,
-              checksum: computeChecksum(call.name, args),
+              checksum: computeChecksum(toolName, args),
               isComplete: true,
               isError: true,
               results,
@@ -931,16 +932,17 @@ export class AnthropicMessagesAdapter {
           return
         }
         if (!tool) {
+          const toolName = normalizeToolName(call.name)
           const available = ctx.tools
             .all()
             .map((t) => t.name)
             .sort()
           const errText =
             available.length > 0
-              ? `Tool not found: ${call.name}. Available tools: ${available.join(', ')}.`
-              : `Tool not found: ${call.name}. No tools are available this turn.`
+              ? `Tool not found: ${toolName}. Available tools: ${available.join(', ')}.`
+              : `Tool not found: ${toolName}. No tools are available this turn.`
           const results = new Tokenizable(errText)
-          helpers.reportToolCall(call.id, { tool: call.name, args })
+          helpers.reportToolCall(call.id, { tool: toolName, args })
           helpers.reportToolCall(call.id, {
             results,
             isError: true,
@@ -949,9 +951,9 @@ export class AnthropicMessagesAdapter {
           await ctx.storeToolCall(
             new ToolCall({
               id: call.id,
-              tool: call.name,
+              tool: toolName,
               args,
-              checksum: computeChecksum(call.name, args),
+              checksum: computeChecksum(toolName, args),
               isComplete: true,
               isError: true,
               results,

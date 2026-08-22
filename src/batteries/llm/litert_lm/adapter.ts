@@ -33,7 +33,11 @@ import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { resolveReasoningParser } from '../chat_common/reasoning_parsers'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import { isGpuOutOfMemoryError, probeGpuBudget } from '../chat_common/gpu_budget'
-import { looksLikeSpooledArtifact, stripEnvelopeSpecialTokens } from '../chat_common/helpers'
+import {
+  looksLikeSpooledArtifact,
+  stripEnvelopeSpecialTokens,
+  normalizeToolName,
+} from '../chat_common/helpers'
 import {
   Tokenizable,
   ToolCall,
@@ -789,12 +793,13 @@ export class LiteRtLmAdapter {
         const completedAt = nowIso()
 
         if (!call.argsWellFormed) {
+          const toolName = normalizeToolName(call.name)
           const err = new E_LITERT_LM_INVALID_TOOL_CALL_ARGS([
             'must be a JSON object',
             JSON.stringify(call.args),
           ])
           const results = new Tokenizable(err.message)
-          helpers.reportToolCall(call.id, { tool: call.name, args: {} })
+          helpers.reportToolCall(call.id, { tool: toolName, args: {} })
           helpers.reportToolCall(call.id, {
             results,
             isError: true,
@@ -803,9 +808,9 @@ export class LiteRtLmAdapter {
           await ctx.storeToolCall(
             new ToolCall({
               id: call.id,
-              tool: call.name,
+              tool: toolName,
               args: {},
-              checksum: computeChecksum(call.name, {}),
+              checksum: computeChecksum(toolName, {}),
               isComplete: true,
               isError: true,
               results,
@@ -818,16 +823,17 @@ export class LiteRtLmAdapter {
         }
 
         if (!tool) {
+          const toolName = normalizeToolName(call.name)
           const available = ctx.tools
             .all()
             .map((t) => t.name)
             .sort()
           const errText =
             available.length > 0
-              ? `Tool not found: ${call.name}. Available tools: ${available.join(', ')}.`
-              : `Tool not found: ${call.name}. No tools are available this turn.`
+              ? `Tool not found: ${toolName}. Available tools: ${available.join(', ')}.`
+              : `Tool not found: ${toolName}. No tools are available this turn.`
           const results = new Tokenizable(errText)
-          helpers.reportToolCall(call.id, { tool: call.name, args: call.args })
+          helpers.reportToolCall(call.id, { tool: toolName, args: call.args })
           helpers.reportToolCall(call.id, {
             results,
             isError: true,
@@ -836,9 +842,9 @@ export class LiteRtLmAdapter {
           await ctx.storeToolCall(
             new ToolCall({
               id: call.id,
-              tool: call.name,
+              tool: toolName,
               args: call.args,
-              checksum: computeChecksum(call.name, call.args),
+              checksum: computeChecksum(toolName, call.args),
               isComplete: true,
               isError: true,
               results,

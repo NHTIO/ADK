@@ -15,6 +15,30 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-08-21
+
+### Fixed
+
+- **An empty tool-call name from the model crashed the turn, in all six LLM battery adapters.**
+  Every adapter's "unknown tool name" and "malformed tool-call args" fallback branches — the code
+  that exists specifically to survive a bad `call.name` from the model — built their error-carrying
+  `ToolCall` from the raw `call.name` unguarded. `ToolCall.tool` is validated by a bare
+  `validator.string().required()`, which rejects the empty string (not just `undefined`/`null`), so
+  the one input those branches exist to handle gracefully crashed them instead with
+  `E_INVALID_INITIAL_TOOL_CALL_VALUE`, surfaced to a consumer logging only `err.message` as the
+  generic `The LLM execution executor callback threw an error.` — no indication the cause was an
+  unnamed tool call, and no path back to the model to self-correct.
+
+  Observed in production: a model emitted a tool call with `name: ""` mid-run in a multi-vendor
+  review panel, permanently killing that one seat for the rest of the job with no retry.
+
+  Added `normalizeToolName` (`chat_common/helpers`), substituting a `'(unnamed tool call)'`
+  placeholder for an empty name at every such construction site, in `anthropic_messages`,
+  `litert_lm`, `ollama`, `openai_chat_completions`, `transformers_js`, and
+  `webllm_chat_completions`. The malformed-args branch runs before the unknown-tool-name check and
+  has the identical unguarded pattern, so both are fixed identically — a model degenerating enough
+  to emit an empty name is just as likely to also emit garbage args.
+
 ## 2026-08-16
 
 ### Fixed

@@ -683,4 +683,50 @@ describe('OpenAIChatCompletionsAdapter — invalid tool args (validation failure
       expect(text).toContain('No tools are available this turn.')
     })
   })
+
+  describe('empty tool name (unnamed tool call)', () => {
+    it('does NOT crash the dispatch when the model emits a tool call with an empty name', async () => {
+      // Regression: `ToolCall.tool` is validated by a bare `.string().required()`,
+      // which rejects '' (not just undefined/null). The "unknown tool name"
+      // fallback used to build its error ToolCall from the raw `call.name`
+      // unguarded, so the one input that branch exists to survive — an empty
+      // name — crashed it instead of persisting a recoverable error.
+      const fetchFn = vi.fn(async () =>
+        toolCallResponse([{ id: 'call-empty-name', name: '', arguments: JSON.stringify({}) }])
+      )
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: 'm',
+        fetch: fetchFn as never,
+        stream: false,
+      })
+      const ctx = makeCtx(new ToolRegistry([]))
+
+      await expect(adapter.executor()(ctx, makeHelpers())).resolves.toBeUndefined()
+      expect(ctx.storeToolCall).toHaveBeenCalledTimes(1)
+      const stored = ctx._stored.toolCalls[0]
+      expect(stored.isError).toBe(true)
+      expect(stored.tool.length).toBeGreaterThan(0)
+    })
+
+    it('does NOT crash when the empty name is paired with malformed JSON args', async () => {
+      // The malformed-args branch runs BEFORE the unknown-tool-name check and
+      // has the identical unguarded `tool: call.name` construction — a model
+      // degenerating enough to emit an empty name is just as likely to also
+      // emit garbage args.
+      const fetchFn = vi.fn(async () =>
+        toolCallResponse([{ id: 'call-empty-name-bad-args', name: '', arguments: '{not json' }])
+      )
+      const adapter = new OpenAIChatCompletionsAdapter({
+        model: 'm',
+        fetch: fetchFn as never,
+        stream: false,
+      })
+      const ctx = makeCtx(new ToolRegistry([]))
+
+      await expect(adapter.executor()(ctx, makeHelpers())).resolves.toBeUndefined()
+      const stored = ctx._stored.toolCalls[0]
+      expect(stored.isError).toBe(true)
+      expect(stored.tool.length).toBeGreaterThan(0)
+    })
+  })
 })
