@@ -105,7 +105,11 @@ import {
 } from './helpers'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { Tool, Memory, TokenEncoding } from '@nhtio/adk/common'
-import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
+import type {
+  DispatchExecutorFn,
+  DispatchExecutorHelpers,
+  GenerationStats,
+} from '@nhtio/adk/dispatch_runner'
 import type {
   OpenAIChatCompletionsAdapterOptions,
   ChatCompletionsHelpers,
@@ -265,6 +269,30 @@ const estimateTokensOf = async (
   encoding: TokenEncoding
 ): Promise<number> => {
   return Promise.resolve(value.estimateTokens(encoding))
+}
+
+// ─── Generation-stats extraction ───────────────────────────────────────────────
+
+const extractGenerationStats = (input: {
+  model: string
+  usage?: Record<string, unknown>
+  finishReason?: string | null
+  raw: Record<string, unknown>
+}): GenerationStats => {
+  const stats: GenerationStats = {
+    provider: 'openai_chat_completions',
+    model: input.model,
+    raw: input.raw,
+  }
+  const usage = input.usage
+  if (usage) {
+    if (typeof usage.prompt_tokens === 'number') stats.promptTokens = usage.prompt_tokens
+    if (typeof usage.completion_tokens === 'number')
+      stats.completionTokens = usage.completion_tokens
+    if (typeof usage.total_tokens === 'number') stats.totalTokens = usage.total_tokens
+  }
+  if (typeof input.finishReason === 'string') stats.finishReason = input.finishReason
+  return stats
 }
 
 // ─── Adapter class ────────────────────────────────────────────────────────────
@@ -551,6 +579,12 @@ export class OpenAIChatCompletionsAdapter {
         if (k === 'model' || k === 'messages' || k === 'stream') continue
         if (v === undefined) continue
         ;(body as Record<string, unknown>)[k] = v
+      }
+      // Usage is only present on the FINAL streaming chunk, and only when the request opts in —
+      // default it on so `reportGenerationStats` has something to report on the streaming path too.
+      // Left untouched if the consumer set `stream_options` themselves (even partially).
+      if (stream && body.stream_options === undefined) {
+        body.stream_options = { include_usage: true }
       }
       const toolsArr = ctx.tools.visible()
       if (toolsArr.length > 0) {
@@ -998,6 +1032,21 @@ export class OpenAIChatCompletionsAdapter {
         let partialMessageContent = ''
         let sawMessageDelta = false
         let doneSentinelSeen = false
+        // `finish_reason` and `usage` (opted into via `stream_options.include_usage`) do not
+        // necessarily arrive on the same chunk: OpenAI sends `finish_reason` on the last
+        // content-bearing chunk, then a SEPARATE final chunk with an EMPTY `choices` array
+        // carrying `usage`. Track each independently so neither is lost to the other's chunk.
+        // `lastRawChunk` is kept alongside them (rather than deriving `raw` from just the two
+        // extracted fields) so `raw` preserves whatever provider-native metadata the final chunk
+        // actually carried (e.g. `id`, `system_fingerprint`) — matching the non-streaming path,
+        // which spreads the full parsed response into `raw`.
+        let lastFinishReason: string | null | undefined
+        let lastUsage: Record<string, unknown> | undefined
+        let lastModel: string | undefined
+        // Merged (not overwritten) across every chunk that carried usage or a finish_reason, so
+        // metadata split across the two chunks (e.g. `id` on the finish chunk, `system_fingerprint`
+        // on the usage chunk) both survive into the final stats event's `raw`.
+        let mergedRawStatsChunks: Record<string, unknown> = {}
 
         // Reasoning may stream under more than one provider-specific field at once. Accumulate each
         // field's text under its own live stream id; at completion we dedup by content to decide
@@ -1032,6 +1081,19 @@ export class OpenAIChatCompletionsAdapter {
         }
 
         const drainAndPersist = async (): Promise<void> => {
+          if (lastUsage !== undefined || lastFinishReason !== undefined) {
+            helpers.reportGenerationStats(
+              extractGenerationStats({
+                model: lastModel ?? merged.model,
+                usage: lastUsage,
+                finishReason: lastFinishReason,
+                raw:
+                  Object.keys(mergedRawStatsChunks).length > 0
+                    ? mergedRawStatsChunks
+                    : { usage: lastUsage, finish_reason: lastFinishReason },
+              })
+            )
+          }
           if (sawMessageDelta) {
             helpers.reportMessage(streamId, '', { isComplete: true })
             await ctx.storeMessage(
@@ -1172,7 +1234,22 @@ export class OpenAIChatCompletionsAdapter {
                   })
                   continue
                 }
-                const delta = chunk.choices?.[0]?.delta
+                if (typeof chunk.model === 'string') lastModel = chunk.model
+                // `usage` can be present-but-null on non-final chunks; only an object-valued usage
+                // is real provider data — a bare undefined-check would let `null` mark usage as
+                // "available" and produce a synthetic stats event with nothing in it.
+                const chunkChoice = chunk.choices?.[0]
+                const hasFinishReason = typeof chunkChoice?.finish_reason === 'string'
+                const hasUsage = isObject(chunk.usage)
+                if (hasUsage) lastUsage = chunk.usage
+                if (hasFinishReason) lastFinishReason = chunkChoice.finish_reason
+                if (hasUsage || hasFinishReason) {
+                  mergedRawStatsChunks = {
+                    ...mergedRawStatsChunks,
+                    ...(chunk as unknown as Record<string, unknown>),
+                  }
+                }
+                const delta = chunkChoice?.delta
                 if (!delta) continue
                 if (typeof delta.content === 'string' && delta.content.length > 0) {
                   sawMessageDelta = true
@@ -1196,8 +1273,7 @@ export class OpenAIChatCompletionsAdapter {
                     accumulator.feed(d)
                   }
                 }
-                // finish_reason emitted before [DONE] — no special action required; the [DONE]
-                // sentinel is the canonical terminator.
+                // `finish_reason`/`usage` are read from `lastChunk` at drain time, above.
               }
               sepIdx = buffer.indexOf('\n\n')
             }
@@ -1246,6 +1322,19 @@ export class OpenAIChatCompletionsAdapter {
         return
       }
       const choice = parsed.choices?.[0]
+      if (isObject(parsed.usage) || typeof choice?.finish_reason === 'string') {
+        // Reported even when `choice` is absent below — a response can carry billed `usage`
+        // with an empty `choices` array (e.g. a content-filtered completion), and that usage
+        // must not be silently dropped just because there was no assistant choice to persist.
+        helpers.reportGenerationStats(
+          extractGenerationStats({
+            model: parsed.model ?? merged.model,
+            usage: isObject(parsed.usage) ? parsed.usage : undefined,
+            finishReason: choice?.finish_reason,
+            raw: { ...parsed } as unknown as Record<string, unknown>,
+          })
+        )
+      }
       if (!choice) {
         // Empty response, no tool calls — terminal. Self-ack only when opted in.
         if (merged.autoAck) ctx.ack()

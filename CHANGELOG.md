@@ -15,6 +15,25 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-08-22
+
+### Added
+
+- **The OpenAI Chat Completions battery now reports generation stats.** `finish_reason` and
+  `usage` were already typed on this adapter's own response types, but nothing ever read them —
+  `helpers.reportGenerationStats` was never called on either the streaming or non-streaming path,
+  making the adapter behaviorally inconsistent with its `ollama` and `anthropic_messages` siblings.
+
+  Non-streaming: `reportGenerationStats` now fires once per dispatch, reading `finish_reason` and
+  `usage.{prompt,completion,total}_tokens` off the response body.
+
+  Streaming: the adapter now defaults `stream_options: { include_usage: true }` into the request
+  body when streaming (left untouched if the consumer already set one) — OpenAI only sends `usage`
+  on the final SSE chunk, and only when this option is set. `finish_reason` and `usage` are read
+  independently off the stream rather than off "the last chunk", because OpenAI splits them across
+  two different chunks: `finish_reason` arrives on the last content-bearing chunk, while `usage`
+  arrives on a SEPARATE final chunk with an EMPTY `choices` array.
+
 ## 2026-08-21
 
 ### Fixed
