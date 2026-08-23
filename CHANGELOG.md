@@ -15,6 +15,78 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-08-23
+
+### Added
+
+- **New opt-in battery `@nhtio/adk/batteries/validation` — the `ordering_guard` turn-state
+  validation battery.** Every existing LLM adapter assembles wire history by sorting
+  `Message`/`Thought`/`ToolCall` primitives purely by `createdAt`, with no enforcement that a
+  vendor's own ordering rules (Anthropic thinking-before-tool-use, Gemini's mandatory
+  `thoughtSignature` on the first function call, Nova/Gemma/DeepSeek strict role alternation, Kimi/
+  MiniMax/Qwen history-retention invariants, and more) are actually satisfied before dispatch. This
+  battery closes that gap: seven typed `OrderingRule` variants (`OrderRule`, `RequiredMetadataRule`,
+  `AlternationRule`, `AdjacencyRule`, `PreservationRule`, `RoleRemapRule`,
+  `StaleContentAdvisoryRule`) compose into 16 atomic behavior profiles and 38 pre-built family
+  recipes spanning Anthropic, Gemini, Nova, Bedrock Converse, DeepSeek, Qwen, GLM, Kimi, MiniMax,
+  Mistral, Llama, Nemotron, Gemma, GPT-OSS, Cohere, Phi, Granite, Grok, and a few explicitly-flagged
+  unconfirmed baselines.
+
+  Two operating modes via `action`: `'enforce'` (strict, zero-mutation validation — rejects any
+  violation) and `'mutate'` (best-effort automated repair — reorders primitives, inserts
+  alternation fillers, and optionally fills missing vendor metadata). Any repair that could
+  fabricate provenance-sensitive metadata (e.g. Gemini's `thoughtSignature` sentinel bypass) is
+  gated behind an explicit double opt-in (`allowMetadataFallbackRepair: true`, on top of
+  `action: 'mutate'`) so a caller never gets silent metadata fabrication as a side effect of
+  turning mutate mode on.
+
+  `orderingGuardDispatchMiddleware` and `orderingGuardTurnMiddleware` wire into existing
+  `dispatchInputPipeline`/`turnInputPipeline` arrays. `ToolCall` gains an optional
+  `payload`/`replayCompatibility` pair (mirroring `Thought`'s existing pattern) to carry
+  vendor-opaque metadata like Gemini's thought signature.
+
+  See the [Ordering Guard & Validation Battery](https://claude-adk.nhtio.co/batteries/validation/)
+  documentation for the full atomic-behavior catalog, the family-recipe lookup table, and the
+  repair-strategy reference.
+
+### Fixed
+
+- **`mutateMessage`/`mutateThought`/`mutateToolCall`/`mutateRetrievable`/`mutateMemory` silently
+  duplicated the primitive instead of replacing it, in both `DispatchContext` and the parent-flush
+  path `DispatchRunner` uses when a nested dispatch runs against a `TurnContext`.** `Set.add()`
+  compares by reference, not by a primitive's `id` — a "mutated" instance is always a *new* object,
+  so every one of these five `#doMutate*` methods on `DispatchContext` called `Set.add(newInstance)`
+  without first removing the stale instance sharing that `id`. The stale and fresh copies then
+  coexisted in `turnMessages`/`turnThoughts`/`turnToolCalls`/`turnRetrievables`/`turnMemories`
+  forever, and any adapter reading those Sets to build a wire payload saw both. The identical bug
+  existed independently in `DispatchRunner`'s `#applyDeltaToParent` — the mechanism that flushes a
+  nested dispatch's mutation back onto its parent `TurnContext` at the end of each iteration — so a
+  mutation correctly deduplicated on a child `DispatchContext` still re-duplicated the moment it
+  reached the parent.
+
+  Surfaced while building the `ordering_guard` battery's `mutate`-mode repair path, which calls
+  these methods directly and was the first code in this ADK to actually exercise them at scale.
+  Confirmed via a full audit that this was a genuine oversight rather than a design choice: the
+  sibling `#doDelete*` methods, written in the very same initial commit, already contained the
+  correct find-by-id-then-remove pattern, and no test anywhere exercised `mutate*`'s effect on Set
+  contents before now.
+
+  Fixed at both layers: `DispatchContext`'s five `#doMutate*` methods now remove *every* stale
+  same-id instance (not just the first — a state the bug itself could produce) before inserting the
+  replacement, preserving the replaced primitive's original insertion-order position rather than
+  relocating it to the end (several adapters, and this battery's own timeline builder, use Set
+  iteration order as the deterministic tie-break for primitives sharing an identical `createdAt`).
+  `DispatchRunner` gained an equivalent in-place `Set` rebuild for its own parent-flush path.
+
+- **The `ordering_guard` battery's `mutate`-mode reorder repair now genuinely reaches the live turn
+  state.** It previously only reordered a private in-memory copy of the timeline and recorded a
+  `__orderingGuardSeqOverride` stash hint no adapter ever consumed — the guard reported the repair
+  as "applied" and let dispatch proceed, but the real `turnMessages`/`turnThoughts`/`turnToolCalls`
+  Sets (and therefore the wire payload an adapter would build) were untouched. Now shifts the
+  offending primitive's `createdAt` via the real `ctx.mutateMessage`/`mutateThought`/`mutateToolCall`
+  call, which is what the `DispatchContext`/`DispatchRunner` fix above made trustworthy. The
+  now-superseded stash mechanism and its `ORDERING_GUARD_SEQ_OVERRIDE_STASH_KEY` export were removed.
+
 ## 2026-08-22
 
 ### Added
