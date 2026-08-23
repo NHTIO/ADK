@@ -909,6 +909,38 @@ export class DispatchRunner {
     }
   }
 
+  /**
+   * Replaces every member of `set` sharing `id` with `replacement`, preserving the ORIGINAL
+   * insertion position of the first match rather than appending at the end.
+   *
+   * @remarks
+   * `Set.add()` compares by reference, not id — a mutated instance is a NEW object, so the stale
+   * instance(s) must be removed or they coexist with the replacement forever (this is the exact
+   * defect {@link @nhtio/adk!DispatchContext}'s own `#doMutate*` methods were fixed to avoid — a
+   * child dispatch context's mutation is otherwise correctly deduplicated locally, but flushing
+   * that mutation BACK to this parent `TurnContext`'s Sets via `#applyDeltaToParent` re-introduces
+   * the identical bug if this method just appended). `set` is rebuilt in place via `clear()` +
+   * re-add, rather than reassigned, since `TurnContext` exposes no setter for these Sets — only
+   * `set.add`/`set.delete` are available to a caller outside the class.
+   */
+  #replaceById<T extends { id: string }>(set: Set<T>, id: string, replacement: T): void {
+    const rebuilt: T[] = []
+    let inserted = false
+    for (const existing of set) {
+      if ((existing as any).id === id) {
+        if (!inserted) {
+          rebuilt.push(replacement)
+          inserted = true
+        }
+        continue
+      }
+      rebuilt.push(existing)
+    }
+    if (!inserted) rebuilt.push(replacement)
+    set.clear()
+    for (const item of rebuilt) set.add(item)
+  }
+
   #applyDeltaToParent(delta: ContextDelta): void {
     const ctx = this.#sourceCtx!
     const { op, type, value } = delta
@@ -920,8 +952,10 @@ export class DispatchRunner {
       return
     }
     if (type === 'memory') {
-      if (op === 'store' || op === 'mutate') {
-        ctx.turnMemories.add(value as Memory)
+      if (op === 'store') ctx.turnMemories.add(value as Memory)
+      else if (op === 'mutate') {
+        const v = value as Memory
+        this.#replaceById(ctx.turnMemories, (v as any).id, v)
       } else {
         for (const m of ctx.turnMemories) {
           if ((m as any).id === (value as any)) {
@@ -933,8 +967,10 @@ export class DispatchRunner {
       return
     }
     if (type === 'retrievable') {
-      if (op === 'store' || op === 'mutate') {
-        ctx.turnRetrievables.add(value as Retrievable)
+      if (op === 'store') ctx.turnRetrievables.add(value as Retrievable)
+      else if (op === 'mutate') {
+        const v = value as Retrievable
+        this.#replaceById(ctx.turnRetrievables, (v as any).id, v)
       } else {
         for (const r of ctx.turnRetrievables) {
           if ((r as any).id === (value as any)) {
@@ -946,8 +982,10 @@ export class DispatchRunner {
       return
     }
     if (type === 'message') {
-      if (op === 'store' || op === 'mutate') {
-        ctx.turnMessages.add(value as Message)
+      if (op === 'store') ctx.turnMessages.add(value as Message)
+      else if (op === 'mutate') {
+        const v = value as Message
+        this.#replaceById(ctx.turnMessages, (v as any).id, v)
       } else {
         for (const m of ctx.turnMessages) {
           if ((m as any).id === (value as any)) {
@@ -959,8 +997,10 @@ export class DispatchRunner {
       return
     }
     if (type === 'thought') {
-      if (op === 'store' || op === 'mutate') {
-        ctx.turnThoughts.add(value as Thought)
+      if (op === 'store') ctx.turnThoughts.add(value as Thought)
+      else if (op === 'mutate') {
+        const v = value as Thought
+        this.#replaceById(ctx.turnThoughts, (v as any).id, v)
       } else {
         for (const t of ctx.turnThoughts) {
           if ((t as any).id === (value as any)) {
@@ -972,8 +1012,10 @@ export class DispatchRunner {
       return
     }
     if (type === 'toolCall') {
-      if (op === 'store' || op === 'mutate') {
-        ctx.turnToolCalls.add(value as ToolCall)
+      if (op === 'store') ctx.turnToolCalls.add(value as ToolCall)
+      else if (op === 'mutate') {
+        const v = value as ToolCall
+        this.#replaceById(ctx.turnToolCalls, (v as any).id, v)
       } else {
         for (const tc of ctx.turnToolCalls) {
           if ((tc as any).id === (value as any)) {

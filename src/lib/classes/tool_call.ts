@@ -91,6 +91,31 @@ export interface RawToolCall {
    */
   results: ToolCallResults
   /**
+   * Optional vendor-opaque payload that round-trips back to a matching model wire.
+   *
+   * @remarks
+   * Carries provider metadata the ADK cannot interpret, such as Gemini's `thought_signature`
+   * on a function call, GPT-OSS's commentary-channel tag, or other vendor-opaque metadata
+   * that a provider needs echoed back.
+   *
+   * A present `payload` requires a present {@link RawToolCall.replayCompatibility} so the
+   * matching adapter wire shape is known.
+   *
+   * @defaultValue `undefined`
+   */
+  payload?: unknown
+  /**
+   * Optional free-form identifier describing which adapter wire-shape this tool call can be
+   * safely replayed into.
+   *
+   * @remarks
+   * A `replayCompatibility` without a `payload` is allowed — it documents intent without
+   * requiring an opaque blob.
+   *
+   * @defaultValue `undefined`
+   */
+  replayCompatibility?: string
+  /**
    * `true` when this tool call originated from an {@link @nhtio/adk!ArtifactTool}
    * invocation. Defaults to `false`.
    *
@@ -155,6 +180,8 @@ interface ResolvedToolCall {
   isComplete: boolean
   isError: boolean
   results: ToolCallResults
+  payload?: unknown
+  replayCompatibility?: string
   fromArtifactTool: boolean
   inline: boolean
   createdAt: DateTime
@@ -181,43 +208,54 @@ interface ResolvedToolCall {
  * Throws {@link @nhtio/adk!E_INVALID_INITIAL_TOOL_CALL_VALUE} (via the {@link ToolCall} constructor) when
  * validation fails.
  */
-const rawToolCallSchema = validator.object<RawToolCall>({
-  id: validator.string().required(),
-  tool: validator.string().required(),
-  args: validator
-    .alternatives(
-      validator.object().unknown(true),
-      validator.string().custom((value, helpers) => {
-        try {
-          const parsed = JSON.parse(value)
-          if (!isObject(parsed)) {
+const rawToolCallSchema = validator
+  .object<RawToolCall>({
+    id: validator.string().required(),
+    tool: validator.string().required(),
+    args: validator
+      .alternatives(
+        validator.object().unknown(true),
+        validator.string().custom((value, helpers) => {
+          try {
+            const parsed = JSON.parse(value)
+            if (!isObject(parsed)) {
+              return helpers.error('any.invalid')
+            }
+            return parsed
+          } catch {
             return helpers.error('any.invalid')
           }
-          return parsed
-        } catch {
-          return helpers.error('any.invalid')
+        })
+      )
+      .required(),
+    checksum: validator.string().required(),
+    isComplete: validator.boolean().required(),
+    isError: validator.boolean().required(),
+    results: validator
+      .any()
+      .custom((value, helpers) => {
+        if (isToolCallResults(value)) {
+          return value
         }
+        return helpers.error('any.invalid')
       })
-    )
-    .required(),
-  checksum: validator.string().required(),
-  isComplete: validator.boolean().required(),
-  isError: validator.boolean().required(),
-  results: validator
-    .any()
-    .custom((value, helpers) => {
-      if (isToolCallResults(value)) {
-        return value
-      }
+      .required(),
+    payload: validator.any().optional(),
+    replayCompatibility: validator.string().min(1).optional(),
+    fromArtifactTool: validator.boolean().default(false),
+    inline: validator.boolean().default(false),
+    createdAt: validator.datetime().required(),
+    updatedAt: validator.datetime().required(),
+    completedAt: validator.datetime().required(),
+  })
+  .custom((value, helpers) => {
+    const v = value as RawToolCall
+    const hasPayload = v.payload !== undefined && v.payload !== null
+    if (hasPayload && (v.replayCompatibility === undefined || v.replayCompatibility === null)) {
       return helpers.error('any.invalid')
-    })
-    .required(),
-  fromArtifactTool: validator.boolean().default(false),
-  inline: validator.boolean().default(false),
-  createdAt: validator.datetime().required(),
-  updatedAt: validator.datetime().required(),
-  completedAt: validator.datetime().required(),
-})
+    }
+    return value
+  })
 
 /**
  * An immutable, validated tool call record associated with a turn.
@@ -274,6 +312,16 @@ export class ToolCall {
    */
   declare readonly results: ToolCallResults
   /**
+   * Optional vendor-opaque payload that round-trips back to a matching model wire.
+   * See {@link RawToolCall.payload}.
+   */
+  declare readonly payload: unknown
+  /**
+   * Optional wire-shape identifier describing which adapter can safely replay this tool call.
+   * See {@link RawToolCall.replayCompatibility}.
+   */
+  declare readonly replayCompatibility: string | undefined
+  /**
    * `true` when this tool call originated from an {@link @nhtio/adk!ArtifactTool}
    * invocation. Used by `SpooledArtifact.forgeTools(ctx)` to filter out forged-tool results from
    * the `callId` enum it builds.
@@ -299,6 +347,8 @@ export class ToolCall {
   #isComplete: boolean
   #isError: boolean
   #results: ToolCallResults
+  #payload: unknown
+  #replayCompatibility: string | undefined
   #fromArtifactTool: boolean
   #inline: boolean
   #createdAt: DateTime
@@ -323,6 +373,8 @@ export class ToolCall {
     this.#isComplete = resolved.isComplete
     this.#isError = resolved.isError
     this.#results = resolved.results
+    this.#payload = resolved.payload
+    this.#replayCompatibility = resolved.replayCompatibility
     this.#fromArtifactTool = resolved.fromArtifactTool
     this.#inline = resolved.inline
     this.#createdAt = resolved.createdAt
@@ -362,6 +414,16 @@ export class ToolCall {
       },
       results: {
         get: () => this.#results,
+        enumerable: true,
+        configurable: false,
+      },
+      payload: {
+        get: () => this.#payload,
+        enumerable: true,
+        configurable: false,
+      },
+      replayCompatibility: {
+        get: () => this.#replayCompatibility,
         enumerable: true,
         configurable: false,
       },
@@ -415,6 +477,8 @@ export class ToolCall {
       isComplete: this.#isComplete,
       isError: this.#isError,
       results: this.#results,
+      payload: this.#payload,
+      replayCompatibility: this.#replayCompatibility,
       fromArtifactTool: this.#fromArtifactTool,
       inline: this.#inline,
       createdAt: this.#createdAt,

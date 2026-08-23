@@ -808,8 +808,40 @@ export class DispatchContext {
     void this.#hooks.runner('storedMemory').run(v)
   }
 
+  /**
+   * Replaces every member of `set` sharing `id` with `replacement`, preserving the ORIGINAL
+   * insertion position of the first match rather than appending at the end.
+   *
+   * @remarks
+   * `Set.add()` compares by reference, not id — a mutated instance is a NEW object, so the stale
+   * instance(s) must be found and removed or they coexist with the replacement forever. ALL
+   * matches are removed, not just the first: `store*` never deduplicated ids either, so more than
+   * one stale copy can already exist before a mutation runs. Rebuilding the Set (rather than
+   * `delete` + `add`) additionally preserves insertion-order position: several adapters, and this
+   * battery's own {@link @nhtio/adk!buildOrderingTimeline}-style helpers, use Set iteration order
+   * as the deterministic tie-break for primitives sharing an identical timestamp — silently moving
+   * a mutated primitive to the end of iteration order would change that tie-break for no reason
+   * tied to the mutation's actual content.
+   */
+  #replaceById<T extends { id: string }>(set: Set<T>, id: string, replacement: T): Set<T> {
+    const next = new Set<T>()
+    let inserted = false
+    for (const existing of set) {
+      if ((existing as any).id === id) {
+        if (!inserted) {
+          next.add(replacement)
+          inserted = true
+        }
+        continue
+      }
+      next.add(existing)
+    }
+    if (!inserted) next.add(replacement)
+    return next
+  }
+
   async #doMutateMemory(v: Memory): Promise<void> {
-    this.#turnMemories.add(v)
+    this.#turnMemories = this.#replaceById(this.#turnMemories, (v as any).id, v)
     await this.#mutateMemory(this, v)
     void this.#hooks.runner('mutatedMemory').run(v)
   }
@@ -832,7 +864,7 @@ export class DispatchContext {
   }
 
   async #doMutateRetrievable(v: Retrievable): Promise<void> {
-    this.#turnRetrievables.add(v)
+    this.#turnRetrievables = this.#replaceById(this.#turnRetrievables, (v as any).id, v)
     await this.#mutateRetrievable(this, v)
     void this.#hooks.runner('mutatedRetrievable').run(v)
   }
@@ -855,7 +887,7 @@ export class DispatchContext {
   }
 
   async #doMutateMessage(v: Message): Promise<void> {
-    this.#turnMessages.add(v)
+    this.#turnMessages = this.#replaceById(this.#turnMessages, (v as any).id, v)
     await this.#mutateMessage(this, v)
     void this.#hooks.runner('mutatedMessage').run(v)
   }
@@ -878,7 +910,7 @@ export class DispatchContext {
   }
 
   async #doMutateThought(v: Thought): Promise<void> {
-    this.#turnThoughts.add(v)
+    this.#turnThoughts = this.#replaceById(this.#turnThoughts, (v as any).id, v)
     await this.#mutateThought(this, v)
     void this.#hooks.runner('mutatedThought').run(v)
   }
@@ -903,8 +935,22 @@ export class DispatchContext {
   }
 
   async #doMutateToolCall(v: ToolCall): Promise<void> {
-    // Checksum is over tool+args, which do not change on mutation — checksum map is unchanged.
-    this.#turnToolCalls.add(v)
+    // Checksum is over tool+args, which the ORDINARY case does not change on mutation — but that
+    // is a convention, not an enforced invariant: a caller can construct a replacement with a
+    // different checksum (different tool/args). Reconcile #toolCallChecksums against every
+    // displaced instance's ACTUAL checksum (decrement) before crediting the replacement's
+    // (increment), the same way #doDeleteToolCall/#doStoreToolCall do — otherwise the map
+    // silently drifts out of sync with what #turnToolCalls really contains.
+    for (const tc of this.#turnToolCalls) {
+      if ((tc as any).id === (v as any).id) {
+        const count = this.#toolCallChecksums.get(tc.checksum) ?? 1
+        if (count <= 1) this.#toolCallChecksums.delete(tc.checksum)
+        else this.#toolCallChecksums.set(tc.checksum, count - 1)
+      }
+    }
+    const prev = this.#toolCallChecksums.get(v.checksum) ?? 0
+    this.#toolCallChecksums.set(v.checksum, prev + 1)
+    this.#turnToolCalls = this.#replaceById(this.#turnToolCalls, (v as any).id, v)
     await this.#mutateToolCall(this, v)
     void this.#hooks.runner('mutatedToolCall').run(v)
   }
