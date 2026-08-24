@@ -15,7 +15,6 @@ import {
   E_OUTPUT_PIPELINE_ERROR,
   E_PIPELINE_SHORT_CIRCUITED,
 } from './exceptions/runtime'
-import type { Runner } from '@nhtio/middleware'
 import type { RawTurnGate } from './classes/turn_gate'
 import type { WarningEvent } from './types/dispatch_runner'
 import type { EstimationWarning } from './utils/estimation_context'
@@ -117,8 +116,8 @@ export class TurnRunner {
   }
 
   #config: ResolvedTurnRunnerConfig
-  #inputRunner: Runner<TurnPipelineMiddlewareFn>
-  #outputRunner: Runner<TurnPipelineMiddlewareFn>
+  #inputPipeline: Middleware<TurnPipelineMiddlewareFn>
+  #outputPipeline: Middleware<TurnPipelineMiddlewareFn>
   #functionalEmitter: TypedEventEmitter<TurnEvents>
   #observabilityEmitter: TypedEventEmitter<TurnObservabilityEvents>
 
@@ -152,8 +151,10 @@ export class TurnRunner {
       }
     for (const fn of this.#config.turnInputPipeline) turnInputPipeline.add(wrap(fn))
     for (const fn of this.#config.turnOutputPipeline) turnOutputPipeline.add(wrap(fn))
-    this.#inputRunner = turnInputPipeline.runner()
-    this.#outputRunner = turnOutputPipeline.runner()
+    // Hold the Middleware; derive a fresh Runner per turn (a Runner's internal cursor never
+    // resets across .run() calls, so caching one here would only execute the pipeline once).
+    this.#inputPipeline = turnInputPipeline
+    this.#outputPipeline = turnOutputPipeline
     this.#functionalEmitter = new TypedEventEmitter<TurnEvents>()
     this.#observabilityEmitter = new TypedEventEmitter<TurnObservabilityEvents>()
   }
@@ -387,7 +388,8 @@ export class TurnRunner {
       // 1. Input pipeline
       let inputFailed = false
       let inputReached = false
-      await this.#inputRunner
+      await this.#inputPipeline
+        .runner()
         .errorHandler(async (error) => {
           if (!isError(error) || !isInstanceOf(error, 'AbortError')) {
             inputFailed = true
@@ -473,7 +475,8 @@ export class TurnRunner {
       // 3. Output pipeline
       let outputFailed = false
       let outputReached = false
-      await this.#outputRunner
+      await this.#outputPipeline
+        .runner()
         .errorHandler(async (error) => {
           if (!isError(error) || !isInstanceOf(error, 'AbortError')) {
             outputFailed = true

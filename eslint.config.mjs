@@ -13,6 +13,10 @@ export default [
       // precompiled ADK REPL bundle (docs/public/repl/adk-repl.es.js). Never lint
       // targets, and large enough to crash eslint's parser.
       '**/docs/public/**/*',
+      // Claude Code worktrees checked out under .claude/worktrees/ are separate
+      // git working trees (their own node_modules/dist/docs builds) — never lint
+      // targets for this repo's own lint run.
+      '.claude/**/*',
     ],
   }),
   {
