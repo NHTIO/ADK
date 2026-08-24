@@ -3,6 +3,7 @@ import { existsSync } from 'fs'
 import { createRequire } from 'module'
 import { readFile } from 'fs/promises'
 import { getEntries } from './bin/utils'
+import { builtinModules } from 'node:module'
 import { defineConfig, loadEnv } from 'vite'
 import { playwright } from '@vitest/browser-playwright'
 import { dtsComplex } from '@nhtio/vite-plugins/dts_complex'
@@ -108,18 +109,19 @@ const isolationWorkerPrebundle = (): Plugin => {
     },
   }
 }
-const externals = new Set<string>([
-  'node:util',
-  'node:path',
-  'node:process',
-  'node:url',
-  'node:fs',
-  'node:fs/promises',
-  'node:child_process',
+// Every node: builtin (and its bare-specifier alias, e.g. `crypto` as well as `node:crypto`) must
+// be external — never bundled, never left for rolldown/Vite to fall through to the browser-external
+// stub (`module.exports = {}`), which silently turns `os.tmpdir` etc. into `undefined` instead of
+// failing to resolve. Hand-maintaining this list previously missed `node:os`/`node:crypto` (issue
+// #12: NativeTtsAdapter's `synthesize()` always threw `os.tmpdir is not a function` in the published
+// bundle) — generate it exhaustively from `node:module`'s own builtin list instead of enumerating by
+// hand, so no builtin subpath can silently fall through again.
+// Exported (not just module-local) so tests/unit/build/externals_builtins_drift.node.spec.ts can
+// assert every node: builtin is actually present, rather than re-deriving the same expression and
+// only proving it agrees with itself.
+export const externals = new Set<string>([
+  ...builtinModules.flatMap((name) => [name, `node:${name}`]),
   'knex',
-  'stream',
-  'buffer',
-  'crypto',
 ])
 const nonExternal = new Set<string>([])
 
