@@ -284,14 +284,26 @@ export const descriptionToChatCompletionsJsonSchema = (d: DescriptionLike): Json
   }
 
   // enum / valids
+  //
+  // `allow` is a Joi *permissive* list — "these values are accepted in ADDITION to the base
+  // type", e.g. `.allow('')` on a string. It only becomes a restrictive enum ("ONLY these values
+  // are accepted") when the validator was built with `.valid(...)`, which Joi's own `describe()`
+  // signals via `flags.only: true`. Emitting `enum` from a bare `allow` array — regardless of
+  // `flags.only` — inverts a permissive schema into a restrictive one on the wire: a tool field
+  // declared `.allow('')` (accepts '' plus any string) was serialized as `enum: [""]` ("only ''
+  // is valid"), and a tool-calling model correctly complied with the schema it was given. `enum`
+  // / `valids` (non-Joi description shapes already carrying JSON-Schema-native, inherently
+  // restrictive semantics) are unaffected by this — only the Joi `allow` path needs the `only`
+  // gate.
   const allow = (d as { allow?: unknown[] }).allow
   const valids = (d as { valids?: unknown[] }).valids
   const enumVals = d.enum
+  const only = flags.only === true || (d as { only?: unknown }).only === true
   const candidate = Array.isArray(enumVals)
     ? enumVals
     : Array.isArray(valids)
       ? valids
-      : Array.isArray(allow)
+      : only && Array.isArray(allow)
         ? allow
         : undefined
   if (candidate && candidate.length > 0) {

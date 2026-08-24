@@ -221,6 +221,28 @@ describe('descriptionToChatCompletionsJsonSchema', () => {
   it('returns an empty object for nullish input', async () => {
     expect(descriptionToChatCompletionsJsonSchema(null as never)).toEqual({})
   })
+
+  it('does not emit enum for .allow() — permissive must not become restrictive', async () => {
+    // Regression for a reported bug: .allow('') means "'' PLUS any string", but was being
+    // serialized as enum: [''] ("ONLY '' is a valid value"), inverting a permissive schema into
+    // a restrictive one on the wire and causing a tool-calling model to comply with the (wrong)
+    // schema it was given instead of the tool's actual intent.
+    const schema = validator.object({
+      allowed: validator.string().allow('').required(),
+      plain: validator.string().required(),
+    })
+    const out = descriptionToChatCompletionsJsonSchema(schema.describe() as never)
+    expect(out.properties!.allowed.type).toBe('string')
+    expect(out.properties!.allowed.enum).toBeUndefined()
+  })
+
+  it('still emits enum for .valid() — a genuinely restrictive allow-list', async () => {
+    const schema = validator.object({
+      valid: validator.string().valid('').required(),
+    })
+    const out = descriptionToChatCompletionsJsonSchema(schema.describe() as never)
+    expect(out.properties!.valid.enum).toEqual([''])
+  })
 })
 
 // ─── renderUntrustedContent / renderTrustedContent ────────────────────────────
