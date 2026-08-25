@@ -15,6 +15,25 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-08-24
+
+### Fixed
+
+- **`orderingGuardDispatchMiddleware` in `action: 'mutate'` mode killed the turn on its third
+  dispatch iteration, even with zero ordering rules in play.** `runGuard` unconditionally stashed
+  the live, in-flight timeline (real `Message`/`Thought`/`ToolCall` instances, `.value` untouched)
+  under `EFFECTIVE_TIMELINE` on every pass. `ctx.stash` (a `Registry`) klona-clones its *entire*
+  backing store on every `.get()`, regardless of which key is requested — and klona's
+  generic-object clone strategy calls `new x.constructor()` with zero arguments before copying
+  properties. `Message`/`Thought`/`ToolCall` (and `Thought`'s nested `Identity`) all throw on
+  zero-arg construction, so the very next unrelated stash read (the guard's own `SNAPSHOT` read on
+  the following iteration) walked the whole store, hit the poisoned entry, and crashed the
+  dispatch. Fixed by projecting each stashed entry's `.value` onto a bare plain object carrying
+  only the fields any consumer of the stashed timeline actually reads (`id`, `payload`,
+  `replayCompatibility`) instead of the live class instance or its `[ENCODE_METHOD]()` snapshot —
+  the latter was tried first and found insufficient, since it still nests other live class
+  instances (`Identity`, Luxon `DateTime`) that klona chokes on one level deeper. Closes #13.
+
 ## 2026-08-23
 
 ### Added

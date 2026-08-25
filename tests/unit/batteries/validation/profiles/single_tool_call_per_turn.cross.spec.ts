@@ -12,6 +12,7 @@ import {
   ORDERING_GUARD_EFFECTIVE_TIMELINE_STASH_KEY,
   ORDERING_GUARD_RESULT_STASH_KEY,
 } from '../../../../../src/batteries/validation/middleware'
+import type { OrderingStashedTimelineEntry } from '../../../../../src/batteries/validation/types'
 
 const at = (second: number): DateTime => DateTime.fromMillis(second * 1000)
 const message = (id: string, role: 'user' | 'assistant', second: number): Message =>
@@ -105,10 +106,13 @@ describe('single tool call per turn profile', () => {
         onRepair: 'silent',
       })(ctx as never, next)
 
-      const effective = values.get(ORDERING_GUARD_EFFECTIVE_TIMELINE_STASH_KEY) as ReturnType<
-        typeof buildOrderingTimeline
-      >
-      const postRepair = evaluateOrderingProfile(effective, singleToolCallPerTurn)
+      const effective = values.get(
+        ORDERING_GUARD_EFFECTIVE_TIMELINE_STASH_KEY
+      ) as OrderingStashedTimelineEntry[]
+      const postRepair = evaluateOrderingProfile(
+        effective as unknown as ReturnType<typeof buildOrderingTimeline>,
+        singleToolCallPerTurn
+      )
       expect(values.get(ORDERING_GUARD_RESULT_STASH_KEY)).toEqual(
         expect.objectContaining({
           repaired: [expect.objectContaining({ strategy: 'insert-alternation-filler' })],

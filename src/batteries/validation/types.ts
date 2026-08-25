@@ -23,6 +23,31 @@ export interface OrderingTimelineEntry {
   value: Message | Thought | ToolCall
 }
 
+/**
+ * The plain-object projection of a {@link OrderingTimelineEntry.value} stored under
+ * `ORDERING_GUARD_EFFECTIVE_TIMELINE_STASH_KEY` — `ctx.stash` klona-clones its entire store on
+ * every read, and klona's generic-object clone strategy calls `new x.constructor()` with zero
+ * args before copying properties, which throws for the real Message/Thought/ToolCall classes.
+ * Only `id`, `payload`, and `replayCompatibility` are preserved (the only fields any consumer of
+ * this stash key reads); it is never a live class instance.
+ */
+export interface OrderingStashedTimelineEntry {
+  /** Category of the value. */
+  kind: OrderingPrimitiveKind
+  /** Creation time in milliseconds, derived from the primitive's `createdAt`. */
+  at: number
+  /** Stable insertion-order tie-break captured before sorting the timeline. */
+  seq: number
+  /** Conversation role when the primitive has a meaningful user/assistant role. */
+  role?: 'user' | 'assistant'
+  /** Plain-object projection of the original primitive — never a live class instance. */
+  value: {
+    id?: unknown
+    payload?: unknown
+    replayCompatibility?: unknown
+  }
+}
+
 /** Relative order required between two primitive kinds. */
 export interface OrderRule {
   /** Discriminator selecting the relative-order evaluator. */

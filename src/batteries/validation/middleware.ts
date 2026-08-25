@@ -1,11 +1,9 @@
 import { validateOptions } from './validation'
 import { getOrderingProfile } from './profiles'
+import { isInstanceOf } from '@nhtio/adk/guards'
 import { createOrderingViolationError } from './exceptions'
 import { Message, Thought, ToolCall } from '@nhtio/adk/common'
 import { FAMILY_RECIPES, resolveFamilyRecipe } from './profiles/families'
-// Not re-exported from any public barrel (no battery-facing use case for the raw symbols exists
-// yet); this battery's repair path is one of the few real consumers of the snapshot round-trip
-// mechanism itself, mirroring the accepted-shared-runtime tier's rationale in CONTRIBUTING.md #13.
 import { ENCODE_METHOD, DECODE_METHOD } from '../../lib/utils/encoder_symbols'
 import {
   buildOrderingTimeline,
@@ -27,6 +25,7 @@ import type {
   OrderingGuardResult,
   OrderingProfile,
   OrderingRepair,
+  OrderingStashedTimelineEntry,
   OrderingTimelineEntry,
 } from './types'
 
@@ -350,11 +349,58 @@ const runGuard = async (
     const firstIndex = effectiveTimeline.findIndex((candidate) => idOf(candidate) === firstId)
     effectiveTimeline.splice(firstIndex < 0 ? effectiveTimeline.length : firstIndex + 1, 0, entry)
   }
-  // Reorder/metadata repairs are already applied to the REAL turn state by this point (applyRepairs
-  // called the matching ctx.mutate* for each), so an adapter's own next history-assembly pass sees
-  // the corrected order/payload without reading this stash entry at all. It is kept for observability
-  // — a caller can inspect exactly what the guard did this iteration without re-deriving it.
-  ctx.stash.set(EFFECTIVE_TIMELINE, effectiveTimeline)
+  // `ctx.stash` (a Registry) klona-clones its ENTIRE store on every `.get()`, including for
+  // unrelated keys — and klona's generic-object strategy does `new x.constructor()` before
+  // copying properties. Message/Thought/ToolCall all throw on zero-arg construction (schema
+  // validation requires a raw payload), so stashing `effectiveTimeline` with its live `.value`
+  // instances verbatim poisons every subsequent `.get()` call for the rest of the dispatch. Its
+  // own `[ENCODE_METHOD]()` snapshot doesn't fix this either — it still nests other live class
+  // instances (`Identity`, Luxon `DateTime`) that klona chokes on the same way one level down.
+  // Every consumer of the stashed timeline (`helpers.ts`, this file's own repair/apply paths,
+  // and every profile spec that reads this stash key back out) only ever reads `.value.id`,
+  // `.value.payload`, and `.value.replayCompatibility` — all plain values already — so project
+  // just those onto a bare object instead of round-tripping through the full encoder snapshot.
+  // A `.value` that isn't a real primitive instance (already-plain test doubles) is left as-is;
+  // klona's crash is specific to non-plain-object constructors, so a plain object is already
+  // stash-safe. `payload` itself is vendor-opaque (`unknown`) and can independently nest a
+  // clone-hostile class instance (a caller-supplied `Identity`, a `DateTime`, anything with a
+  // non-`Object` constructor) — every documented `payload` shape is meant to round-trip to a
+  // wire protocol, i.e. JSON-serializable, so a JSON round-trip both proves that contract and
+  // guarantees klona never walks into anything but plain objects/arrays/primitives.
+  const toPlainJson = (value: unknown): unknown => {
+    if (value === undefined) return undefined
+    try {
+      return JSON.parse(JSON.stringify(value)) as unknown
+    } catch {
+      return null
+    }
+  }
+  const stashableTimeline: OrderingStashedTimelineEntry[] = effectiveTimeline.map((entry) => {
+    const isPrimitiveInstance =
+      isInstanceOf(entry.value, 'Message', Message) ||
+      isInstanceOf(entry.value, 'Thought', Thought) ||
+      isInstanceOf(entry.value, 'ToolCall', ToolCall)
+    if (!isPrimitiveInstance) {
+      const plain = entry.value as { payload?: unknown }
+      return {
+        ...entry,
+        value: {
+          ...(entry.value as OrderingStashedTimelineEntry['value']),
+          payload: toPlainJson(plain.payload),
+        },
+      }
+    }
+    const raw = entry.value as { id?: unknown; payload?: unknown; replayCompatibility?: unknown }
+    return {
+      ...entry,
+      value: {
+        id: raw.id,
+        payload: toPlainJson(raw.payload),
+        replayCompatibility: raw.replayCompatibility,
+      },
+    }
+  })
+  ctx.stash.set(EFFECTIVE_TIMELINE, stashableTimeline)
   const postRepairBlocking = profiles.flatMap(
     (profile) => evaluateOrderingProfile(effectiveTimeline, profile).blocking
   )
