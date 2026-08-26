@@ -881,6 +881,71 @@ describe('OpenAIChatCompletionsAdapter — retrievables', () => {
 })
 
 describe('OpenAIChatCompletionsAdapter — context window enforcement', () => {
+  it('accounts for a non-inline spooled retrievable handle and forwards the resolved renderer', async () => {
+    const fetchFn = vi.fn(async () => validNonStreamingResponse())
+    const renderer = (_input: {
+      callId: string
+      artifact: unknown
+      byteLength: number
+      lineCount: number
+    }) => 'HANDLE'
+    const id = 'budget-openai'
+    const artifact = new SpooledArtifact(
+      new InMemorySpoolStore().write(id, 'full-body '.repeat(10000))
+    )
+    artifact._setSizeHints({ byteLength: 100000, lineCount: 10000 })
+    const retrievable = new Retrievable({
+      id,
+      content: artifact,
+      trustTier: 'first-party',
+      inline: false,
+      createdAt: dt('2026-01-01T10:00:00Z'),
+      updatedAt: dt('2026-01-01T10:00:00Z'),
+    })
+    const spy = vi.spyOn(artifact, 'estimateHandleTokens')
+    const adapter = new OpenAIChatCompletionsAdapter({
+      model: 'm',
+      fetch: fetchFn as never,
+      stream: false,
+      tokenEncoding: 'cl100k_base',
+      contextWindow: 1000,
+    })
+    await expect(
+      adapter.executor()(
+        makeCtx({
+          turnRetrievables: [retrievable],
+          stash: { openaiChatCompletions: { helpers: { renderRetrievableHandleBody: renderer } } },
+        }),
+        makeHelpers()
+      )
+    ).resolves.toBeUndefined()
+    expect(spy).toHaveBeenCalledWith(id, 'cl100k_base', renderer)
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+  it('falls back to full-content estimation for a non-inline spooled retrievable with no cached size hints, instead of throwing', async () => {
+    const fetchFn = vi.fn(async () => validNonStreamingResponse())
+    const id = 'budget-openai-unhinted'
+    const artifact = new SpooledArtifact(new InMemorySpoolStore().write(id, 'unhinted body'))
+    const retrievable = new Retrievable({
+      id,
+      content: artifact,
+      trustTier: 'first-party',
+      inline: false,
+      createdAt: dt('2026-01-01T10:00:00Z'),
+      updatedAt: dt('2026-01-01T10:00:00Z'),
+    })
+    const adapter = new OpenAIChatCompletionsAdapter({
+      model: 'm',
+      fetch: fetchFn as never,
+      stream: false,
+      tokenEncoding: 'cl100k_base',
+      contextWindow: 1000,
+    })
+    await expect(
+      adapter.executor()(makeCtx({ turnRetrievables: [retrievable] }), makeHelpers())
+    ).resolves.toBeUndefined()
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
   it('disabled by default — no tokenEncoding means massive content dispatches normally', async () => {
     const fetchFn = vi.fn(async () => validNonStreamingResponse())
     const adapter = new OpenAIChatCompletionsAdapter({

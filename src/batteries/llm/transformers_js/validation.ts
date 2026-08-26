@@ -44,6 +44,7 @@ const helpersSchema = validator
     renderUntrustedContent: helperSchema.optional(),
     renderTrustedContent: helperSchema.optional(),
     renderArtifactHandleBody: helperSchema.optional(),
+    renderRetrievableHandleBody: helperSchema.optional(),
     renderStandingInstructions: helperSchema.optional(),
     renderMemories: helperSchema.optional(),
     renderRetrievables: helperSchema.optional(),

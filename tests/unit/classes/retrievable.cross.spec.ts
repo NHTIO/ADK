@@ -1,10 +1,12 @@
 import { DateTime } from 'luxon'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, beforeAll } from 'vitest'
 import { Memory } from '../../../src/lib/classes/memory'
 import { Retrievable } from '../../../src/lib/classes/retrievable'
 import { Tokenizable } from '../../../src/lib/classes/tokenizable'
+import { registerAdkEncodables } from '../../../src/batteries/encoding'
 import { SpooledArtifact } from '../../../src/lib/classes/spooled_artifact'
 import { InMemorySpoolStore } from '../../../src/batteries/storage/in_memory'
+import { ENCODE_METHOD, DECODE_METHOD } from '../../../src/lib/utils/encoder_symbols'
 import { E_INVALID_INITIAL_RETRIEVABLE_VALUE } from '../../../src/lib/exceptions/runtime'
 
 const validRaw = () => ({
@@ -19,6 +21,7 @@ const validRaw = () => ({
 })
 
 describe('Retrievable', () => {
+  beforeAll(() => registerAdkEncodables())
   describe('construction', () => {
     it('accepts valid raw input and round-trips every field', () => {
       const r = new Retrievable(validRaw())
@@ -235,6 +238,68 @@ describe('Retrievable', () => {
     it('is exposed as a static for reuse in other schemas', () => {
       expect(Retrievable.schema).toBeDefined()
       expect(typeof Retrievable.schema.validate).toBe('function')
+    })
+  })
+
+  describe('inline and artifact constructor fields', () => {
+    it('defaults inline to false and accepts explicit boolean values', () => {
+      expect(new Retrievable(validRaw()).inline).toBe(false)
+      expect(new Retrievable({ ...validRaw(), inline: true }).inline).toBe(true)
+      expect(new Retrievable({ ...validRaw(), inline: false }).inline).toBe(false)
+      expect(() => new Retrievable({ ...validRaw(), inline: 'yes' as unknown as boolean })).toThrow(
+        E_INVALID_INITIAL_RETRIEVABLE_VALUE
+      )
+    })
+
+    it('validates and exposes an artifactConstructor resolver', () => {
+      const resolver = () => SpooledArtifact
+      const r = new Retrievable({ ...validRaw(), artifactConstructor: resolver })
+      expect(r.artifactConstructor).toBe(resolver)
+      class NotArtifact {}
+      expect(
+        () => new Retrievable({ ...validRaw(), artifactConstructor: (() => NotArtifact) as never })
+      ).toThrow(E_INVALID_INITIAL_RETRIEVABLE_VALUE)
+    })
+
+    it('encodes and decodes inline and artifactConstructor', () => {
+      const resolver = () => SpooledArtifact
+      const r = new Retrievable({ ...validRaw(), inline: true, artifactConstructor: resolver })
+      const snapshot = r[ENCODE_METHOD]()
+      const decoded = Retrievable[DECODE_METHOD](snapshot)
+      expect(decoded.inline).toBe(true)
+      expect(decoded.artifactConstructor).toBe(resolver)
+      expect(decoded.artifactConstructor!()).toBe(SpooledArtifact)
+    })
+  })
+
+  describe('sizeUnknown and handle token estimates', () => {
+    const artifact = (body = 'some retrieved text') =>
+      new SpooledArtifact(new InMemorySpoolStore().write('art', body))
+    it('reports sizeUnknown only for unhinted non-inline spooled content', () => {
+      const a = artifact()
+      expect(new Retrievable({ ...validRaw(), content: a }).sizeUnknown).toBe(true)
+      a._setSizeHints({ byteLength: 19, lineCount: 1 })
+      expect(new Retrievable({ ...validRaw(), content: a }).sizeUnknown).toBe(false)
+      expect(new Retrievable({ ...validRaw(), content: a, inline: true }).sizeUnknown).toBe(false)
+      expect(new Retrievable({ ...validRaw(), content: new Tokenizable('x') }).sizeUnknown).toBe(
+        false
+      )
+    })
+
+    it('uses synchronous handle estimation only when hinted and non-inline', () => {
+      const hinted = artifact()
+      hinted._setSizeHints({ byteLength: 19, lineCount: 1 })
+      expect(
+        typeof new Retrievable({ ...validRaw(), content: hinted }).estimateTokens('cl100k_base')
+      ).toBe('number')
+      expect(
+        new Retrievable({ ...validRaw(), content: artifact() }).estimateTokens('cl100k_base')
+      ).toBeInstanceOf(Promise)
+      expect(
+        new Retrievable({ ...validRaw(), content: hinted, inline: true }).estimateTokens(
+          'cl100k_base'
+        )
+      ).toBeInstanceOf(Promise)
     })
   })
 

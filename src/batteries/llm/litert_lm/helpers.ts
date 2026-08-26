@@ -35,6 +35,7 @@ import {
   renderFirstPartyRetrievables,
   renderThirdPartyPublicRetrievables,
   renderThirdPartyPrivateRetrievables,
+  renderRetrievableHandleBody,
   renderThought,
   filterThoughts,
 } from '../openai_chat_completions/helpers'
@@ -90,6 +91,8 @@ export {
 export {
   renderArtifactHandleBody,
   defaultRenderArtifactHandleBody,
+  renderRetrievableHandleBody,
+  defaultRenderRetrievableHandleBody,
   looksLikeSpooledArtifact,
 } from '../chat_common/helpers'
 
@@ -474,6 +477,7 @@ export const buildLiteRtConversationInput = async (input: {
   renderFirstPartyRetrievables: typeof renderFirstPartyRetrievables
   renderThirdPartyPublicRetrievables: typeof renderThirdPartyPublicRetrievables
   renderThirdPartyPrivateRetrievables: typeof renderThirdPartyPrivateRetrievables
+  renderRetrievableHandleBody?: typeof renderRetrievableHandleBody
   // Multimodal: the two SessionConfig modality flags + the policy + the media renderer. When a user
   // message carries `attachments` and the matching flag is on, the message's `content` becomes a
   // MessageContentItem[] ([text, image|audio, …]); otherwise media degrades via the policy. Off by
@@ -499,8 +503,9 @@ export const buildLiteRtConversationInput = async (input: {
     renderFirstPartyRetrievables: input.renderFirstPartyRetrievables,
     renderThirdPartyPublicRetrievables: input.renderThirdPartyPublicRetrievables,
     renderThirdPartyPrivateRetrievables: input.renderThirdPartyPrivateRetrievables,
+    renderRetrievableHandleBody: input.renderRetrievableHandleBody,
     renderUntrustedContent: input.renderUntrustedContent,
-  } as never)
+  })
 
   // Tool delivery: 'prompt' (default) renders tool defs as system text (the portable path — the
   // Gemma-4 .litertlm template throws on native `tools`); 'native' uses preface.tools.

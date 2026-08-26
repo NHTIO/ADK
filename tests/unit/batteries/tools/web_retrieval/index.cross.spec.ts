@@ -1,3 +1,4 @@
+import { sha256 } from 'js-sha256'
 import { describe, expect, it, vi } from 'vitest'
 import { Retrievable } from '../../../../../src/common'
 import { InMemorySpoolReader } from '../../../../../src/batteries/storage/in_memory'
@@ -97,7 +98,7 @@ describe('web_retrieval — scrapperArticleToRetrievable', () => {
 })
 
 describe('web_retrieval — scrapperLinksToRetrievables', () => {
-  it('yields one RawRetrievable per { url, text } link', () => {
+  it('yields one RawRetrievable per { url, text } link and keeps links inline by default', () => {
     const raws = scrapperLinksToRetrievables({
       url: 'https://news.example',
       links: [
@@ -107,8 +108,67 @@ describe('web_retrieval — scrapperLinksToRetrievables', () => {
     })
     expect(raws).toHaveLength(2)
     expect(raws[0].content).toBe('A')
+    expect(raws[0].inline).toBe(true)
     expect(raws[0].source).toBe('https://news.example/a')
     expect(raws[1].content).toBe('B')
+  })
+
+  it('preserves the old two-argument inline-string behavior', () => {
+    const [raw] = scrapperLinksToRetrievables({ links: [{ url: 'https://x', text: 'X' }] })
+    expect(raw.content).toBe('X')
+    expect(typeof raw.content).toBe('string')
+  })
+
+  it('uses the spool hook when a recommendation is supplied', () => {
+    const artifact = new SpooledArtifact(new InMemorySpoolReader('large link text'))
+    const recommended = () => SpooledArtifact
+    const spool = vi.fn(() => artifact)
+    const raw = scrapperLinksToRetrievables(
+      { links: [{ url: 'https://x', text: 'large link text' }] },
+      { spool },
+      { text: recommended }
+    )[0]
+    expect(spool).toHaveBeenCalledWith(sha256('https://x'), 'large link text', recommended)
+    expect(raw.content).toBe(artifact)
+    expect(raw.inline).toBe(true)
+  })
+
+  it('honors an explicit inline false', () => {
+    const raw = scrapperLinksToRetrievables(
+      { links: [{ url: 'https://x', text: 'X' }] },
+      { inline: false }
+    )[0]
+    expect(raw.inline).toBe(false)
+  })
+})
+
+describe('web_retrieval — inline and markdown metadata', () => {
+  it('leaves inline unset for search and article unless explicitly passed', () => {
+    expect(searxngResultsToRetrievables({ results: [{ content: 'x' }] })[0].inline).toBeUndefined()
+    expect(scrapperArticleToRetrievable({ textContent: 'x' }).inline).toBeUndefined()
+    expect(scrapperArticleToRetrievable({ textContent: 'x' }, { inline: true }).inline).toBe(true)
+  })
+
+  it('passes the markdown artifact resolver through exactly', () => {
+    const markdown = () => SpooledMarkdownArtifact
+    expect(
+      scrapperArticleToRetrievable({ textContent: 'x' }, { asMarkdown: true }, { markdown })
+        .artifactConstructor
+    ).toBe(markdown)
+    expect(
+      scrapperArticleToRetrievable({ textContent: 'x' }, { asMarkdown: true }).artifactConstructor
+    ).toBeUndefined()
+  })
+
+  it('also passes the plain-text artifact resolver through when asMarkdown is false, so auto-spool still picks the recommended subclass', () => {
+    const text = () => SpooledArtifact
+    expect(
+      scrapperArticleToRetrievable({ textContent: 'x' }, {}, { text }).artifactConstructor
+    ).toBe(text)
+    expect(
+      scrapperArticleToRetrievable({ textContent: 'x' }, { asMarkdown: true }, { text })
+        .artifactConstructor
+    ).toBe(text)
   })
 })
 
@@ -123,6 +183,7 @@ describe('web_retrieval — storeRetrievables (resolver-injected ctor)', () => {
       stored,
       storeRetrievable: vi.fn((v: Retrievable) => {
         stored.push(v)
+        return v
       }),
     }
   }
@@ -142,6 +203,16 @@ describe('web_retrieval — storeRetrievables (resolver-injected ctor)', () => {
       expect(out[0]).toBeInstanceOf(Retrievable)
       expect(out[0].trustTier).toBe('third-party-public')
     }
+  })
+
+  it('returns the post-store instance rather than the pre-store record', async () => {
+    const ctx = makeCtx()
+    const postSpool = new Retrievable({ ...raws[0], content: 'post-spool' })
+    ctx.storeRetrievable.mockResolvedValueOnce(postSpool)
+    const [out] = await storeRetrievables(ctx, raws, {
+      retrievable: Retrievable as unknown as RetrievableCtor,
+    })
+    expect(out).toBe(postSpool)
   })
 
   it('rejects a bad trustTier at Retrievable construction (validation fires in the helper)', async () => {

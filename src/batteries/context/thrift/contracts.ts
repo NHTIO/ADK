@@ -132,14 +132,33 @@ export interface WorkingMemory {
  * helper), since this pass is synchronous end-to-end and never awaits.
  */
 export interface WorkingRetrievable {
-  /** The retrieved passage's rendered content. */
-  content: ContentLike | string
+  /** Stable identifier, when available, for diagnostics and trace attribution. */
+  id?: string
+  /** The retrieved passage's rendered content. Core artifacts may expose an asynchronous estimate;
+   * thrift only accepts the synchronous result and otherwise uses its defensive fallback. */
+  content:
+    | {
+        toString(): string
+        estimateTokens?(encoding: string, ctx?: unknown): number | Promise<number>
+      }
+    | string
   /** Relevance/rerank score, `[0, 1]`-ish; retrievables sort by this (descending) before the shed, so
    *  the tail of the ranking (lowest score) sheds first. Missing/absent sorts as `0` (shed first). */
   score?: number
   /** Optional self-measurement; may resolve synchronously OR as a `Promise` (a reader-backed
    *  artifact). A non-number result falls back to measuring `content.toString()`. */
   estimateTokens?(encoding: string): number | Promise<number>
+  /**
+   * Whether this retrievable's content cannot be synchronously measured safely by thrift.
+   *
+   * A real core `Retrievable` structurally supplies this field automatically through its
+   * `sizeUnknown` getter; no adapter or conversion object is needed. Any other, non-core
+   * duck-typed caller supplying this shape MUST set `sizeUnknown: true` for content whose
+   * size it cannot verify to receive the same never-retain safety guarantee. This field is
+   * optional only to preserve the structural API's compatibility; the obligation for such
+   * callers is not enforced by TypeScript.
+   */
+  sizeUnknown?: boolean
 }
 
 /**

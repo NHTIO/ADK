@@ -425,6 +425,7 @@ export interface ChatCompletionsHelpers extends ChatHelpersCommon {
     renderStandingInstructions: ChatHelpersCommon['renderStandingInstructions']
     renderMemories: ChatHelpersCommon['renderMemories']
     renderRetrievables: ChatHelpersCommon['renderRetrievables']
+    renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
     renderRetrievableSafetyDirective: ChatHelpersCommon['renderRetrievableSafetyDirective']
     renderFirstPartyRetrievables: ChatHelpersCommon['renderFirstPartyRetrievables']
     renderThirdPartyPublicRetrievables: ChatHelpersCommon['renderThirdPartyPublicRetrievables']

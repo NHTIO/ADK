@@ -314,6 +314,9 @@ export class Tokenizable {
    * ({@link TokenizableEvaluator}); assembly passes the live context so the content matches the dispatch
    * it ships in, while a no-context call returns the evaluator's `undefined`-branch fallback.
    */
+  /** Whether the current wrapped value is evaluator-backed rather than a static string. */
+  declare readonly dynamic: boolean
+  /** Resolve the value against an optional dispatch context. */
   declare render: (ctx?: DispatchContext) => string
   /**
    * Estimate the token count under the given {@link TokenEncodingId} of the string this Tokenizable
@@ -511,6 +514,11 @@ export class Tokenizable {
         enumerable: false,
         configurable: false,
         writable: false,
+      },
+      dynamic: {
+        get: () => this.#evaluator !== undefined,
+        enumerable: true,
+        configurable: false,
       },
       render: {
         value: (ctx?: DispatchContext): string => resolve(ctx),

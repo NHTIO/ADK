@@ -210,6 +210,15 @@ describe('Tokenizable', () => {
   })
 
   describe('dynamic (evaluatable) value', () => {
+    it('exposes a live dynamic getter that reflects set() transitions', () => {
+      const t = new Tokenizable('static')
+      expect(t.dynamic).toBe(false)
+      t.set(() => 'dynamic')
+      expect(t.dynamic).toBe(true)
+      t.set('static again')
+      expect(t.dynamic).toBe(false)
+    })
+
     const citeEvaluator = (ctx?: { tools: { visible: () => { name?: string }[] } }): string =>
       ctx?.tools.visible().some((tool) => tool.name === 'provide_answer')
         ? 'CITE: call provide_answer'

@@ -15,6 +15,13 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-08-26
+
+### Changed
+
+- Retrievable records backed by spooled artifacts now render as handles by default; storage-time auto-spooling covers store/mutate on both context types, fetch results, and DispatchRunner preload normalization, except from-scratch `turnRetrievables.add()` records. Dynamic `Tokenizable` content remains unspooled. Handle-mode budget accounting now applies across all six LLM adapters; the thrift pass excludes unhinted, unmeasurable handle-mode records unconditionally rather than guessing. This may leave orphaned bytes when persistence fails after a successful spool write. Non-core duck-typed thrift callers must set `sizeUnknown` themselves for the same safety guarantee.
+- `web_retrieval` converters now accept `ToRetrievableOptions.inline`; links default to `true` so short link text remains inline after auto-spooling. `scrapperLinksToRetrievables` now accepts `recommend` and genuinely supports its declared `spool` hook, in parity with the other converters.
+
 ## 2026-08-24
 
 ### Fixed

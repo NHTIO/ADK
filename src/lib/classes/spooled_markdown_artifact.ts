@@ -9,8 +9,13 @@ import { default as remarkGfm } from 'remark-gfm'
 import { toString as mdastToString } from 'mdast-util-to-string'
 import { default as remarkFrontmatter } from 'remark-frontmatter'
 import { resolveSpoolReader } from '../contracts/reader_resolvers'
-import { SpooledArtifact, defaultSerialise } from './spooled_artifact'
 import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
+import {
+  SpooledArtifact,
+  defaultSerialise,
+  collectArtifactCompatibleIds,
+  resolveArtifactById,
+} from './spooled_artifact'
 import type { Root, Link, Image } from 'mdast'
 import type { AdkEncodableSnapshot } from './encodable'
 import type { SpoolReader } from '../contracts/spool_reader'
@@ -314,9 +319,7 @@ export class SpooledMarkdownArtifact extends SpooledArtifact {
   public static override forgeTools(ctx: DispatchContext): ToolRegistry {
     const registry = SpooledArtifact.forgeTools(ctx)
     const requires = SpooledMarkdownArtifact
-    const compatibleIds = [...ctx.turnToolCalls]
-      .filter((tc) => !tc.fromArtifactTool && isInstanceOf(tc.results, requires.name, requires))
-      .map((tc) => tc.id)
+    const compatibleIds = collectArtifactCompatibleIds(ctx, requires)
     if (compatibleIds.length === 0) return registry
 
     for (const descriptor of this.toolMethods) {
@@ -340,14 +343,9 @@ export class SpooledMarkdownArtifact extends SpooledArtifact {
         onCollision: 'replace',
         handler: async (rawArgs, ctxInner) => {
           const args = rawArgs as Record<string, unknown> & { callId: string }
-          const tc = [...ctxInner.turnToolCalls].find((t) => t.id === args.callId)
-          if (!tc) {
-            return `Error: no tool call with id ${args.callId} in this turn`
-          }
-          const artifact = tc.results
-          if (!isInstanceOf(artifact, requires.name, requires)) {
-            return `Error: tool call ${args.callId} results are not a ${requires.name} instance`
-          }
+          const resolved = resolveArtifactById(ctxInner, args.callId, requires)
+          if (!resolved) return `Error: no artifact with id ${args.callId} in this turn`
+          const artifact = resolved.artifact
           const methodArgs: unknown[] = []
           if (descriptor.method === 'md_headings' || descriptor.method === 'md_sections') {
             methodArgs.push(args.depth as number | undefined)
@@ -387,7 +385,11 @@ export class SpooledMarkdownArtifact extends SpooledArtifact {
     if (this.#index !== undefined) return this.#index
 
     const count = await this.lineCount()
-    const headingsRaw: Array<{ depth: 1 | 2 | 3 | 4 | 5 | 6; text: string; startLine: number }> = []
+    const headingsRaw: Array<{
+      depth: 1 | 2 | 3 | 4 | 5 | 6
+      text: string
+      startLine: number
+    }> = []
     const codeBlocks: MarkdownCodeEntry[] = []
 
     let inFrontmatter = false
@@ -433,7 +435,11 @@ export class SpooledMarkdownArtifact extends SpooledArtifact {
           const openChar = openLine.trimStart()[0]
           const closeChar = l.trimStart()[0]
           if (closeChar === openChar) {
-            codeBlocks.push({ lang: openFenceLang, startLine: openFenceStartLine, endLine: i })
+            codeBlocks.push({
+              lang: openFenceLang,
+              startLine: openFenceStartLine,
+              endLine: i,
+            })
             inCodeBlock = false
             openFenceLen = 0
           }
@@ -450,7 +456,11 @@ export class SpooledMarkdownArtifact extends SpooledArtifact {
 
     // Unclosed code block — record it anyway
     if (inCodeBlock) {
-      codeBlocks.push({ lang: openFenceLang, startLine: openFenceStartLine, endLine: count - 1 })
+      codeBlocks.push({
+        lang: openFenceLang,
+        startLine: openFenceStartLine,
+        endLine: count - 1,
+      })
     }
 
     // Post-process heading endLine values

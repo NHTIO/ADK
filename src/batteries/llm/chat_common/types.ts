@@ -491,17 +491,24 @@ export interface ChatHelpersCommon {
   renderRetrievableSafetyDirective: () => string
   /** Renders first-party (trusted) retrievables into a single prompt block. */
   renderFirstPartyRetrievables: (
-    items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>
+    items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
+    renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
   ) => Promise<string>
   /** Renders third-party public retrievables, wrapping each in the untrusted-content envelope. */
   renderThirdPartyPublicRetrievables: (
     items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
-    deps: { renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent'] }
+    deps: {
+      renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
+      renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
+    }
   ) => Promise<string>
   /** Renders third-party private retrievables, wrapping each in the untrusted-content envelope. */
   renderThirdPartyPrivateRetrievables: (
     items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
-    deps: { renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent'] }
+    deps: {
+      renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
+      renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
+    }
   ) => Promise<string>
   /** Assembles the full retrievables block: safety directive plus the trust-tiered sub-renderers. */
   renderRetrievables: (
@@ -512,6 +519,7 @@ export interface ChatHelpersCommon {
       renderThirdPartyPublicRetrievables: ChatHelpersCommon['renderThirdPartyPublicRetrievables']
       renderThirdPartyPrivateRetrievables: ChatHelpersCommon['renderThirdPartyPrivateRetrievables']
       renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
+      renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
     }
   ) => Promise<string>
   /**
@@ -528,6 +536,23 @@ export interface ChatHelpersCommon {
    * an override typically reorders or re-annotates that list before delegating to the default renderer.
    */
   renderArtifactHandleBody?: (input: {
+    callId: string
+    artifact: unknown
+    byteLength: number
+    lineCount: number
+    estimatedTokens?: number
+    encoding?: string
+  }) => string
+  /**
+   * Renders the directions-bearing "handle" body for a non-inlined {@link @nhtio/adk!Retrievable}
+   * whose content is a {@link @nhtio/adk!SpooledArtifact}: metadata (callId/kind/byteLength/lineCount)
+   * plus the forged `artifact_*` tools the model should call to read it incrementally.
+   *
+   * @remarks
+   * Optional override seam, the retrievable-side counterpart to {@link renderArtifactHandleBody}.
+   * When omitted the battery uses the shared {@link defaultRenderRetrievableHandleBody}.
+   */
+  renderRetrievableHandleBody?: (input: {
     callId: string
     artifact: unknown
     byteLength: number
@@ -559,6 +584,7 @@ export interface ChatHelpersCommon {
     renderStandingInstructions: ChatHelpersCommon['renderStandingInstructions']
     renderMemories: ChatHelpersCommon['renderMemories']
     renderRetrievables: ChatHelpersCommon['renderRetrievables']
+    renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
     renderRetrievableSafetyDirective: ChatHelpersCommon['renderRetrievableSafetyDirective']
     renderFirstPartyRetrievables: ChatHelpersCommon['renderFirstPartyRetrievables']
     renderThirdPartyPublicRetrievables: ChatHelpersCommon['renderThirdPartyPublicRetrievables']

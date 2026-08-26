@@ -392,7 +392,13 @@ export const defaultRenderTrustedContent = renderTrustedContent
  * constructor carrying the `toolMethods` descriptor list the model is told to call. Used instead of a
  * bare `instanceof` so a SpooledArtifact from another realm (worker, bundle copy) still matches.
  */
-export const looksLikeSpooledArtifact = (value: unknown): boolean => {
+export const looksLikeSpooledArtifact = (
+  value: unknown
+): value is {
+  byteLength: () => Promise<number>
+  lineCount: () => Promise<number>
+  asString: () => Promise<string>
+} => {
   if (value === null || typeof value !== 'object') return false
   const v = value as {
     asString?: unknown
@@ -407,29 +413,32 @@ export const looksLikeSpooledArtifact = (value: unknown): boolean => {
 }
 
 /**
- * Render the "handle" body for a spooled-artifact tool result that the producer marked
- * `inline: false`: a directions-bearing text block telling the model the result was NOT inlined (to
- * preserve context budget) and exactly which forged `artifact_*` tools to call — with this
- * `callId` — to read it incrementally.
+ * Shared builder for the "handle" body text used by both {@link renderArtifactHandleBody} and
+ * {@link renderRetrievableHandleBody}: a directions-bearing block telling the model a result was
+ * NOT inlined (to preserve context budget) and exactly which forged `artifact_*` tools to call —
+ * with this `callId` — to read it incrementally.
  *
  * @remarks
  * This is THE machinery that makes the spool/thrift pattern usable by the model: a large tool result
- * (a tool catalog, a search-hit set, a scraped doc) stays out of the prompt, and the model pulls only
- * the slices it needs via `artifact_json_get`/`artifact_grep`/etc. Without it the adapter would either
- * dump the whole body (defeating the purpose) or hand the model an opaque artifact it cannot read.
- * Shared verbatim across the OpenAI, Ollama, transformers.js, and LiteRT-LM batteries so the model
- * sees the SAME contract regardless of backend. The `toolMethods` list is read off the artifact's
- * constructor (each SpooledArtifact subclass advertises its own query tools).
+ * or retrieved record (a tool catalog, a search-hit set, a scraped doc) stays out of the prompt, and
+ * the model pulls only the slices it needs via `artifact_json_get`/`artifact_grep`/etc. Without it
+ * the adapter would either dump the whole body (defeating the purpose) or hand the model an opaque
+ * artifact it cannot read. Shared verbatim across the OpenAI, Ollama, transformers.js, and LiteRT-LM
+ * batteries so the model sees the SAME contract regardless of backend. The `toolMethods` list is
+ * read off the artifact's constructor (each SpooledArtifact subclass advertises its own query
+ * tools). The two callers differ only in `leadingSentence`.
  */
-export const renderArtifactHandleBody = (input: {
+const buildHandleBody = (input: {
   callId: string
   artifact: unknown
   byteLength: number
   lineCount: number
   estimatedTokens?: number
   encoding?: string
+  leadingSentence: string
 }): string => {
-  const { callId, artifact, byteLength, lineCount, estimatedTokens, encoding } = input
+  const { callId, artifact, byteLength, lineCount, estimatedTokens, encoding, leadingSentence } =
+    input
   const ctor = (
     artifact as {
       constructor?: {
@@ -438,33 +447,72 @@ export const renderArtifactHandleBody = (input: {
       }
     }
   ).constructor
-  const methods = ctor?.toolMethods ?? []
-  const lines: string[] = []
-  lines.push(`This tool returned a large artifact that was not inlined to preserve context budget.`)
-  lines.push(``)
-  lines.push(`Artifact metadata:`)
-  lines.push(`- callId: ${callId}`)
-  lines.push(`- kind: ${ctor?.name ?? 'SpooledArtifact'}`)
-  lines.push(`- byteLength: ${byteLength}`)
-  lines.push(`- lineCount: ${lineCount}`)
-  if (estimatedTokens !== undefined && encoding) {
+  const lines = [
+    leadingSentence,
+    '',
+    'Artifact metadata:',
+    `- callId: ${callId}`,
+    `- kind: ${ctor?.name ?? 'SpooledArtifact'}`,
+    `- byteLength: ${byteLength}`,
+    `- lineCount: ${lineCount}`,
+  ]
+  if (estimatedTokens !== undefined && encoding)
     lines.push(`- estimatedTokens: ${estimatedTokens} (encoding: ${encoding})`)
-  }
-  lines.push(``)
-  lines.push(`To read this artifact in this turn, call one of the following tools with`)
-  lines.push(`callId=${callId}:`)
-  for (const m of methods) {
-    lines.push(m.description ? `- ${m.name} — ${m.description}` : `- ${m.name}`)
-  }
-  lines.push(``)
   lines.push(
+    '',
+    'To read this artifact in this turn, call one of the following tools with',
+    `callId=${callId}:`
+  )
+  for (const m of ctor?.toolMethods ?? [])
+    lines.push(m.description ? `- ${m.name} — ${m.description}` : `- ${m.name}`)
+  lines.push(
+    '',
     `The artifact persists in this turn's context — multiple queries against the same callId are allowed and efficient. Do not assume the body has been inlined anywhere else.`
   )
   return lines.join('\n')
 }
 
-/** Default {@link renderArtifactHandleBody}. */
+/**
+ * Render the "handle" body for a tool call's spooled-artifact result marked `inline: false`. See
+ * {@link buildHandleBody} for the shared mechanics; this variant's leading sentence frames the
+ * artifact as a tool result.
+ */
+export const renderArtifactHandleBody = (input: {
+  callId: string
+  artifact: unknown
+  byteLength: number
+  lineCount: number
+  estimatedTokens?: number
+  encoding?: string
+}): string =>
+  buildHandleBody({
+    ...input,
+    leadingSentence:
+      'This tool returned a large artifact that was not inlined to preserve context budget.',
+  })
+
+/**
+ * Render the "handle" body for a {@link @nhtio/adk!Retrievable}'s spooled-artifact content marked
+ * `inline: false`. See {@link buildHandleBody} for the shared mechanics; this variant's leading
+ * sentence frames the artifact as a retrieved record rather than a tool result.
+ */
+export const renderRetrievableHandleBody = (input: {
+  callId: string
+  artifact: unknown
+  byteLength: number
+  lineCount: number
+  estimatedTokens?: number
+  encoding?: string
+}): string =>
+  buildHandleBody({
+    ...input,
+    leadingSentence: "This retrieved record's content is a large artifact that was not inlined.",
+  })
+
+/** Default handle-body renderer for tool-call artifacts; the `renderArtifactHandleBody` override falls back to this. */
 export const defaultRenderArtifactHandleBody = renderArtifactHandleBody
+/** Default handle-body renderer for retrievable artifacts; the `renderRetrievableHandleBody` override falls back to this. */
+export const defaultRenderRetrievableHandleBody = renderRetrievableHandleBody
 
 // ─── renderStandingInstructions ───────────────────────────────────────────────
 
@@ -531,11 +579,21 @@ export const defaultRenderRetrievableSafetyDirective = renderRetrievableSafetyDi
 
 /** Implements {@link ChatHelpersCommon.renderFirstPartyRetrievables}. */
 export const renderFirstPartyRetrievables = async (
-  items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>
+  items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
+  renderHandle: ChatHelpersCommon['renderRetrievableHandleBody'] = defaultRenderRetrievableHandleBody
 ): Promise<string> => {
   const children: string[] = []
   for (const { retrievable, attrs } of items) {
-    const body = await retrievable.contentString()
+    const artifact = looksLikeSpooledArtifact(retrievable.content) ? retrievable.content : undefined
+    const body =
+      artifact && retrievable.inline === false
+        ? renderHandle({
+            callId: retrievable.id,
+            artifact,
+            byteLength: await artifact.byteLength(),
+            lineCount: await artifact.lineCount(),
+          })
+        : await retrievable.contentString()
     if (body.length === 0 && !attrs.nonce) {
       continue
     }
@@ -566,11 +624,23 @@ export const defaultRenderFirstPartyRetrievables = renderFirstPartyRetrievables
 /** Implements {@link ChatHelpersCommon.renderThirdPartyPublicRetrievables}. */
 export const renderThirdPartyPublicRetrievables = async (
   items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
-  deps: { renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent'] }
+  deps: {
+    renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
+    renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
+  }
 ): Promise<string> => {
   const blocks: string[] = []
   for (const { retrievable, attrs } of items) {
-    const body = await retrievable.contentString()
+    const artifact = looksLikeSpooledArtifact(retrievable.content) ? retrievable.content : undefined
+    const body =
+      artifact && retrievable.inline === false
+        ? (deps.renderRetrievableHandleBody ?? defaultRenderRetrievableHandleBody)({
+            callId: retrievable.id,
+            artifact,
+            byteLength: await artifact.byteLength(),
+            lineCount: await artifact.lineCount(),
+          })
+        : await retrievable.contentString()
     blocks.push(
       deps.renderUntrustedContent(body, {
         nonce: attrs.nonce,
@@ -589,11 +659,23 @@ export const defaultRenderThirdPartyPublicRetrievables = renderThirdPartyPublicR
 /** Implements {@link ChatHelpersCommon.renderThirdPartyPrivateRetrievables}. */
 export const renderThirdPartyPrivateRetrievables = async (
   items: Iterable<{ retrievable: Retrievable; attrs: RetrievableAttrs }>,
-  deps: { renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent'] }
+  deps: {
+    renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
+    renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
+  }
 ): Promise<string> => {
   const blocks: string[] = []
   for (const { retrievable, attrs } of items) {
-    const body = await retrievable.contentString()
+    const artifact = looksLikeSpooledArtifact(retrievable.content) ? retrievable.content : undefined
+    const body =
+      artifact && retrievable.inline === false
+        ? (deps.renderRetrievableHandleBody ?? defaultRenderRetrievableHandleBody)({
+            callId: retrievable.id,
+            artifact,
+            byteLength: await artifact.byteLength(),
+            lineCount: await artifact.lineCount(),
+          })
+        : await retrievable.contentString()
     blocks.push(
       deps.renderUntrustedContent(body, {
         nonce: attrs.nonce,
@@ -618,6 +700,7 @@ export const renderRetrievables = async (
     renderThirdPartyPublicRetrievables: ChatHelpersCommon['renderThirdPartyPublicRetrievables']
     renderThirdPartyPrivateRetrievables: ChatHelpersCommon['renderThirdPartyPrivateRetrievables']
     renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
+    renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
   }
 ): Promise<string> => {
   const firstParty: { retrievable: Retrievable; attrs: RetrievableAttrs }[] = []
@@ -642,14 +725,16 @@ export const renderRetrievables = async (
   const parts: string[] = []
   const directive = deps.renderRetrievableSafetyDirective()
   if (directive.length > 0) parts.push(directive)
-  const fp = await deps.renderFirstPartyRetrievables(firstParty)
+  const fp = await deps.renderFirstPartyRetrievables(firstParty, deps.renderRetrievableHandleBody)
   if (fp.length > 0) parts.push(fp)
   const tpub = await deps.renderThirdPartyPublicRetrievables(thirdPartyPublic, {
     renderUntrustedContent: deps.renderUntrustedContent,
+    renderRetrievableHandleBody: deps.renderRetrievableHandleBody,
   })
   if (tpub.length > 0) parts.push(tpub)
   const tpriv = await deps.renderThirdPartyPrivateRetrievables(thirdPartyPrivate, {
     renderUntrustedContent: deps.renderUntrustedContent,
+    renderRetrievableHandleBody: deps.renderRetrievableHandleBody,
   })
   if (tpriv.length > 0) parts.push(tpriv)
   return parts.join('\n\n')
@@ -793,6 +878,7 @@ export const renderChatCompletionsSystemPrompt = async (input: {
   renderStandingInstructions: ChatHelpersCommon['renderStandingInstructions']
   renderMemories: ChatHelpersCommon['renderMemories']
   renderRetrievables: ChatHelpersCommon['renderRetrievables']
+  renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
   renderRetrievableSafetyDirective: ChatHelpersCommon['renderRetrievableSafetyDirective']
   renderFirstPartyRetrievables: ChatHelpersCommon['renderFirstPartyRetrievables']
   renderThirdPartyPublicRetrievables: ChatHelpersCommon['renderThirdPartyPublicRetrievables']
@@ -830,6 +916,7 @@ export const renderChatCompletionsSystemPrompt = async (input: {
       }
       const block = await input.renderRetrievables(wrapped, {
         renderRetrievableSafetyDirective: input.renderRetrievableSafetyDirective,
+        renderRetrievableHandleBody: input.renderRetrievableHandleBody,
         renderFirstPartyRetrievables: input.renderFirstPartyRetrievables,
         renderThirdPartyPublicRetrievables: input.renderThirdPartyPublicRetrievables,
         renderThirdPartyPrivateRetrievables: input.renderThirdPartyPrivateRetrievables,

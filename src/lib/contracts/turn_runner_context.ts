@@ -4,7 +4,8 @@ import { Registry } from '../classes/registry'
 import { Tokenizable } from '../classes/tokenizable'
 import { validateOrThrow } from '../utils/validation'
 import { isInstanceOf, isError } from '../utils/guards'
-import { E_INVALID_TURN_CONTEXT } from '../exceptions/runtime'
+import { E_INVALID_TURN_CONTEXT, E_ARTIFACT_ID_COLLISION } from '../exceptions/runtime'
+import { autoSpoolRetrievable, assertUniqueRetrievableIds } from '../utils/retrievable_spool'
 import type { Tool } from '../classes/tool'
 import type { Memory } from '../classes/memory'
 import type { Message } from '../classes/message'
@@ -354,6 +355,49 @@ export class TurnContext {
   #turnThoughts: Set<Thought>
   #turnToolCalls: Set<ToolCall>
 
+  #replaceById<T extends { id: string }>(set: Set<T>, id: string, replacement: T): Set<T> {
+    const next = new Set<T>()
+    let inserted = false
+    for (const existing of set) {
+      if (existing.id === id) {
+        if (!inserted) next.add(replacement)
+        inserted = true
+      } else next.add(existing)
+    }
+    if (!inserted) next.add(replacement)
+    return next
+  }
+
+  #checkArtifactIdCollision(id: string, source: 'retrievable' | 'toolCall'): void {
+    const other = source === 'retrievable' ? this.#turnToolCalls : this.#turnRetrievables
+    if ([...other].some((v) => v.id === id)) throw new E_ARTIFACT_ID_COLLISION([id])
+  }
+
+  async #doStoreRetrievable(i: TurnRunnerInjected, v: Retrievable): Promise<Retrievable> {
+    this.#checkArtifactIdCollision(v.id, 'retrievable')
+    const record = await autoSpoolRetrievable(this, v)
+    this.#turnRetrievables.add(record)
+    await i.storeRetrievable(this, record)
+    return record
+  }
+  async #doMutateRetrievable(i: TurnRunnerInjected, v: Retrievable): Promise<Retrievable> {
+    this.#checkArtifactIdCollision(v.id, 'retrievable')
+    const record = await autoSpoolRetrievable(this, v)
+    this.#turnRetrievables = this.#replaceById(this.#turnRetrievables, record.id, record)
+    await i.mutateRetrievable(this, record)
+    return record
+  }
+  async #doStoreToolCall(i: TurnRunnerInjected, v: ToolCall): Promise<void> {
+    this.#checkArtifactIdCollision(v.id, 'toolCall')
+    this.#turnToolCalls.add(v)
+    await i.storeToolCall(this, v)
+  }
+  async #doMutateToolCall(i: TurnRunnerInjected, v: ToolCall): Promise<void> {
+    this.#checkArtifactIdCollision(v.id, 'toolCall')
+    this.#turnToolCalls = this.#replaceById(this.#turnToolCalls, v.id, v)
+    await i.mutateToolCall(this, v)
+  }
+
   /**
    * @param raw - The raw context input validated against {@link turnContextSchema}.
    * @param injected - Runtime callbacks supplied by `TurnRunner`; bound as instance methods so
@@ -525,19 +569,23 @@ export class TurnContext {
         writable: false,
       },
       fetchRetrievables: {
-        value: () => injected.fetchRetrievables(this),
+        value: async () => {
+          const recs = await injected.fetchRetrievables(this)
+          assertUniqueRetrievableIds(recs)
+          return Promise.all(recs.map((r) => autoSpoolRetrievable(this, r)))
+        },
         enumerable: true,
         configurable: false,
         writable: false,
       },
       storeRetrievable: {
-        value: (v: Retrievable) => injected.storeRetrievable(this, v),
+        value: (v: Retrievable) => this.#doStoreRetrievable(injected, v),
         enumerable: true,
         configurable: false,
         writable: false,
       },
       mutateRetrievable: {
-        value: (v: Retrievable) => injected.mutateRetrievable(this, v),
+        value: (v: Retrievable) => this.#doMutateRetrievable(injected, v),
         enumerable: true,
         configurable: false,
         writable: false,
@@ -585,13 +633,13 @@ export class TurnContext {
         writable: false,
       },
       storeToolCall: {
-        value: (v: ToolCall) => injected.storeToolCall(this, v),
+        value: (v: ToolCall) => this.#doStoreToolCall(injected, v),
         enumerable: true,
         configurable: false,
         writable: false,
       },
       mutateToolCall: {
-        value: (v: ToolCall) => injected.mutateToolCall(this, v),
+        value: (v: ToolCall) => this.#doMutateToolCall(injected, v),
         enumerable: true,
         configurable: false,
         writable: false,
@@ -716,9 +764,9 @@ export class TurnContext {
   /** Fetches retrievable records relevant to this turn; delegates to the callback supplied at construction. */
   declare readonly fetchRetrievables: () => Retrievable[] | Promise<Retrievable[]>
   /** Stores a new retrievable record in the persistence layer. */
-  declare readonly storeRetrievable: (v: Retrievable) => void | Promise<void>
+  declare readonly storeRetrievable: (v: Retrievable) => Promise<Retrievable>
   /** Updates an existing retrievable record in the persistence layer. */
-  declare readonly mutateRetrievable: (v: Retrievable) => void | Promise<void>
+  declare readonly mutateRetrievable: (v: Retrievable) => Promise<Retrievable>
   /** Removes a retrievable record from the persistence layer by ID. */
   declare readonly deleteRetrievable: (id: string) => void | Promise<void>
   /** Stores a new message in the persistence layer. */

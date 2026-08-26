@@ -60,6 +60,7 @@ import {
   defaultRenderStandingInstructions,
   defaultRenderMemories,
   defaultRenderRetrievables,
+  defaultRenderRetrievableHandleBody,
   defaultRenderRetrievableSafetyDirective,
   defaultRenderFirstPartyRetrievables,
   defaultRenderThirdPartyPublicRetrievables,
@@ -154,6 +155,7 @@ interface ResolvedHelpers {
   renderToolsAsPromptText: typeof defaultRenderToolsAsPromptText
   renderLiteRtToolResult: typeof defaultRenderLiteRtToolResult
   renderArtifactHandleBody: typeof defaultRenderArtifactHandleBody
+  renderRetrievableHandleBody: typeof defaultRenderRetrievableHandleBody
   buildLiteRtConversationInput: typeof defaultBuildLiteRtConversationInput
   createLiteRtStreamAccumulator: typeof defaultCreateLiteRtStreamAccumulator
 }
@@ -210,6 +212,9 @@ const resolveHelpers = (
     renderArtifactHandleBody:
       (src.renderArtifactHandleBody as ResolvedHelpers['renderArtifactHandleBody']) ??
       defaultRenderArtifactHandleBody,
+    renderRetrievableHandleBody:
+      (src.renderRetrievableHandleBody as ResolvedHelpers['renderRetrievableHandleBody']) ??
+      defaultRenderRetrievableHandleBody,
     buildLiteRtConversationInput:
       (src.buildLiteRtConversationInput as ResolvedHelpers['buildLiteRtConversationInput']) ??
       defaultBuildLiteRtConversationInput,
@@ -618,8 +623,12 @@ export class LiteRtLmAdapter {
         for (const si of ctx.standingInstructions)
           b.standingInstructions += tallyTok(si as Tokenizable)
         for (const m of ctx.turnMemories) b.memories += tallyTok(m.content as Tokenizable)
-        for (const r of ctx.turnRetrievables)
-          b.retrievables += tally((await r.contentString?.()) ?? '')
+        for (const r of ctx.turnRetrievables) {
+          b.retrievables +=
+            !r.inline && SpooledArtifact.isSpooledArtifact(r.content) && r.content.hasSizeHints()
+              ? r.content.estimateHandleTokens(r.id, enc, h.renderRetrievableHandleBody)
+              : tally((await r.contentString?.()) ?? '')
+        }
         for (const m of ctx.turnMessages)
           b.messages += m.content ? tallyTok(m.content as Tokenizable) : 0
         for (const t of ctx.turnThoughts) b.thoughts += tallyTok(t.content as Tokenizable)
@@ -709,6 +718,7 @@ export class LiteRtLmAdapter {
         renderFirstPartyRetrievables: h.renderFirstPartyRetrievables,
         renderThirdPartyPublicRetrievables: h.renderThirdPartyPublicRetrievables,
         renderThirdPartyPrivateRetrievables: h.renderThirdPartyPrivateRetrievables,
+        renderRetrievableHandleBody: h.renderRetrievableHandleBody,
         // Multimodal (opt-in): thread the two modality flags + policy + the media renderer so user
         // messages with attachments map to LiteRT content items. NO EngineSettings change — only the
         // existing SessionConfig flags gate it. GATED ON A REAL-MODEL PROOF (browser matrix).

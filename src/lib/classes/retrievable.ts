@@ -5,9 +5,11 @@ import { validateOrThrow } from '../utils/validation'
 import { isInstanceOf, isError } from '../utils/guards'
 import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import { E_INVALID_INITIAL_RETRIEVABLE_VALUE } from '../exceptions/runtime'
+import { artifactConstructorResolverSchema } from '../contracts/spooled_artifact_constructor'
 import type { DateTime } from 'luxon'
 import type { TokenEncoding } from './tokenizable'
 import type { AdkEncodableSnapshot } from './encodable'
+import type { ArtifactConstructorResolver } from './tool'
 
 /**
  * Trust-tier discriminator declared by the retrieval middleware at construction time. Drives
@@ -67,6 +69,10 @@ export interface RawRetrievable {
   createdAt: string | number | Date | DateTime
   /** When the source record was last modified. */
   updatedAt: string | number | Date | DateTime
+  /** Whether to render this record inline rather than as a retrievable handle; defaults to `false`. */
+  inline?: boolean
+  /** Resolver for the spooled-artifact constructor used when plain content is auto-spooled; defaults to `undefined` (the base artifact). */
+  artifactConstructor?: ArtifactConstructorResolver
 }
 
 /**
@@ -82,6 +88,8 @@ interface ResolvedRetrievable {
   score?: number
   createdAt: DateTime
   updatedAt: DateTime
+  inline: boolean
+  artifactConstructor?: ArtifactConstructorResolver
 }
 
 /**
@@ -122,6 +130,8 @@ const rawRetrievableSchema = validator.object<RawRetrievable>({
   score: validator.number().min(0).max(1).optional(),
   createdAt: validator.datetime().required(),
   updatedAt: validator.datetime().required(),
+  inline: validator.boolean().default(false),
+  artifactConstructor: artifactConstructorResolverSchema().optional(),
 })
 
 /**
@@ -173,6 +183,12 @@ export class Retrievable {
   declare readonly createdAt: DateTime
   /** When the source record was last modified. */
   declare readonly updatedAt: DateTime
+  /** Whether this record is rendered inline; defaults to `false` (handle mode for spooled content). */
+  declare readonly inline: boolean
+  /** Producer-declared resolver for the artifact subclass used during auto-spooling, if any. */
+  declare readonly artifactConstructor: ArtifactConstructorResolver | undefined
+  /** Whether a non-inline spooled artifact lacks cached size metadata. */
+  declare readonly sizeUnknown: boolean
 
   #id: string
   #content: Tokenizable | SpooledArtifact
@@ -182,6 +198,8 @@ export class Retrievable {
   #score: number | undefined
   #createdAt: DateTime
   #updatedAt: DateTime
+  #inline: boolean
+  #artifactConstructor: ArtifactConstructorResolver | undefined
 
   /**
    * @param raw - The raw retrievable input validated against `rawRetrievableSchema`.
@@ -192,7 +210,9 @@ export class Retrievable {
     try {
       resolved = validateOrThrow<ResolvedRetrievable>(rawRetrievableSchema, raw, true)
     } catch (err) {
-      throw new E_INVALID_INITIAL_RETRIEVABLE_VALUE({ cause: isError(err) ? err : undefined })
+      throw new E_INVALID_INITIAL_RETRIEVABLE_VALUE({
+        cause: isError(err) ? err : undefined,
+      })
     }
     this.#id = resolved.id
     this.#content =
@@ -206,6 +226,8 @@ export class Retrievable {
     this.#score = resolved.score
     this.#createdAt = resolved.createdAt
     this.#updatedAt = resolved.updatedAt
+    this.#inline = resolved.inline
+    this.#artifactConstructor = resolved.artifactConstructor
 
     Object.defineProperties(this, {
       id: {
@@ -248,6 +270,24 @@ export class Retrievable {
         enumerable: true,
         configurable: false,
       },
+      inline: {
+        get: () => this.#inline,
+        enumerable: true,
+        configurable: false,
+      },
+      artifactConstructor: {
+        get: () => this.#artifactConstructor,
+        enumerable: true,
+        configurable: false,
+      },
+      sizeUnknown: {
+        get: () =>
+          SpooledArtifact.isSpooledArtifact(this.#content) &&
+          !this.#inline &&
+          !this.#content.hasSizeHints(),
+        enumerable: true,
+        configurable: false,
+      },
     })
   }
 
@@ -268,6 +308,13 @@ export class Retrievable {
    * @returns The estimated token count.
    */
   estimateTokens(encoding: TokenEncoding): number | Promise<number> {
+    if (
+      SpooledArtifact.isSpooledArtifact(this.#content) &&
+      !this.#inline &&
+      this.#content.hasSizeHints()
+    ) {
+      return this.#content.estimateHandleTokens(this.#id, encoding)
+    }
     return this.#content.estimateTokens(encoding)
   }
 
@@ -309,6 +356,8 @@ export class Retrievable {
       score: this.#score,
       createdAt: this.#createdAt,
       updatedAt: this.#updatedAt,
+      inline: this.#inline,
+      artifactConstructor: this.#artifactConstructor,
     }
   }
 

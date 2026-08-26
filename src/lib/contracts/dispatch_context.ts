@@ -6,10 +6,12 @@ import { Tokenizable } from '../classes/tokenizable'
 import { validateOrThrow } from '../utils/validation'
 import { isInstanceOf, isError } from '../utils/guards'
 import { ToolRegistry } from '../classes/tool_registry'
+import { autoSpoolRetrievable, assertUniqueRetrievableIds } from '../utils/retrievable_spool'
 import {
   E_INVALID_LLM_EXECUTION_CONTEXT,
   E_LLM_EXECUTION_GATE_NOT_SUPPORTED,
   E_LLM_EXECUTION_ALREADY_SIGNALLED,
+  E_ARTIFACT_ID_COLLISION,
 } from '../exceptions/runtime'
 import type { Tool } from '../classes/tool'
 import type { Memory } from '../classes/memory'
@@ -570,7 +572,11 @@ export class DispatchContext {
         writable: false,
       },
       fetchRetrievables: {
-        value: () => this.#fetchRetrievables(this),
+        value: async () => {
+          const recs = await this.#fetchRetrievables(this)
+          assertUniqueRetrievableIds(recs)
+          return Promise.all(recs.map((r) => autoSpoolRetrievable(this, r)))
+        },
         enumerable: true,
         configurable: false,
         writable: false,
@@ -857,16 +863,27 @@ export class DispatchContext {
     void this.#hooks.runner('deletedMemory').run(id)
   }
 
-  async #doStoreRetrievable(v: Retrievable): Promise<void> {
-    this.#turnRetrievables.add(v)
-    await this.#storeRetrievable(this, v)
-    void this.#hooks.runner('storedRetrievable').run(v)
+  #checkArtifactIdCollision(id: string, source: 'retrievable' | 'toolCall'): void {
+    const other = source === 'retrievable' ? this.#turnToolCalls : this.#turnRetrievables
+    if ([...other].some((v) => v.id === id)) throw new E_ARTIFACT_ID_COLLISION([id])
   }
 
-  async #doMutateRetrievable(v: Retrievable): Promise<void> {
-    this.#turnRetrievables = this.#replaceById(this.#turnRetrievables, (v as any).id, v)
-    await this.#mutateRetrievable(this, v)
-    void this.#hooks.runner('mutatedRetrievable').run(v)
+  async #doStoreRetrievable(v: Retrievable): Promise<Retrievable> {
+    this.#checkArtifactIdCollision(v.id, 'retrievable')
+    const record = await autoSpoolRetrievable(this, v)
+    this.#turnRetrievables.add(record)
+    await this.#storeRetrievable(this, record)
+    void this.#hooks.runner('storedRetrievable').run(record)
+    return record
+  }
+
+  async #doMutateRetrievable(v: Retrievable): Promise<Retrievable> {
+    this.#checkArtifactIdCollision(v.id, 'retrievable')
+    const record = await autoSpoolRetrievable(this, v)
+    this.#turnRetrievables = this.#replaceById(this.#turnRetrievables, record.id, record)
+    await this.#mutateRetrievable(this, record)
+    void this.#hooks.runner('mutatedRetrievable').run(record)
+    return record
   }
 
   async #doDeleteRetrievable(id: string): Promise<void> {
@@ -927,6 +944,7 @@ export class DispatchContext {
   }
 
   async #doStoreToolCall(v: ToolCall): Promise<void> {
+    this.#checkArtifactIdCollision(v.id, 'toolCall')
     this.#turnToolCalls.add(v)
     const prev = this.#toolCallChecksums.get(v.checksum) ?? 0
     this.#toolCallChecksums.set(v.checksum, prev + 1)
@@ -935,6 +953,7 @@ export class DispatchContext {
   }
 
   async #doMutateToolCall(v: ToolCall): Promise<void> {
+    this.#checkArtifactIdCollision(v.id, 'toolCall')
     // Checksum is over tool+args, which the ORDINARY case does not change on mutation — but that
     // is a convention, not an enforced invariant: a caller can construct a replacement with a
     // different checksum (different tool/args). Reconcile #toolCallChecksums against every
@@ -1165,9 +1184,9 @@ export class DispatchContext {
   /** Removes a memory from the local Set and persistence layer by ID. */
   declare readonly deleteMemory: (id: string) => Promise<void>
   /** Stores a new retrievable record in the local Set and persistence layer. */
-  declare readonly storeRetrievable: (v: Retrievable) => Promise<void>
+  declare readonly storeRetrievable: (v: Retrievable) => Promise<Retrievable>
   /** Updates an existing retrievable record in the local Set and persistence layer. */
-  declare readonly mutateRetrievable: (v: Retrievable) => Promise<void>
+  declare readonly mutateRetrievable: (v: Retrievable) => Promise<Retrievable>
   /** Removes a retrievable record from the local Set and persistence layer by ID. */
   declare readonly deleteRetrievable: (id: string) => Promise<void>
   /** Stores a new message in the local Set and persistence layer. */

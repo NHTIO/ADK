@@ -1,4 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import { Retrievable } from '../../../../../src/lib/classes/retrievable'
+import { Tokenizable } from '../../../../../src/lib/classes/tokenizable'
+import { SpooledArtifact } from '../../../../../src/lib/classes/spooled_artifact'
+import { InMemorySpoolReader } from '../../../../../src/batteries/storage/in_memory'
+import { defaultRenderArtifactHandleBody } from '../../../../../src/batteries/llm/chat_common/helpers'
 import {
   subtractToFit,
   DEFAULT_ENCODING,
@@ -7,6 +12,7 @@ import {
   type WorkingTool,
   type WorkingToolRegistry,
   type WorkingThought,
+  type WorkingRetrievable,
   type EstimateTokensFn,
 } from '../../../../../src/batteries/context/thrift'
 
@@ -56,6 +62,136 @@ const makeToolRegistry = (
 }
 
 const emptyToolRegistry = (): WorkingToolRegistry => makeToolRegistry([]).registry
+
+describe('subtractToFit — size-unknown retrievable safety', () => {
+  const makeRetrievable = (body: string, inline = false, hinted = false, score = 0.99) => {
+    const artifact = new SpooledArtifact(new InMemorySpoolReader(body))
+    if (hinted)
+      artifact._setSizeHints({ byteLength: body.length, lineCount: body.split('\\n').length })
+    return new Retrievable({
+      id: `ret-${hinted ? 'hinted' : 'unknown'}`,
+      content: artifact,
+      inline,
+      score,
+      trustTier: 'first-party',
+      createdAt: '2024-01-01T00:00:00.000Z',
+      updatedAt: '2024-01-01T00:00:00.000Z',
+    })
+  }
+  const makeWs = (retrievables: WorkingSet['retrievables']): WorkingSet => ({
+    systemPrompt: 'sys',
+    messages: [],
+    memories: [],
+    retrievables,
+    thoughts: [],
+    tools: emptyToolRegistry(),
+  })
+
+  it('excludes a high-score unhinted handle even with a generous budget', () => {
+    const unknown = makeRetrievable('large body '.repeat(1000))
+    expect(unknown.sizeUnknown).toBe(true)
+    const ws = makeWs([unknown])
+    const trace = subtractToFit(ws, 1_000_000, [], { estimateTokens })
+    expect(ws.retrievables).toEqual([])
+    expect(trace.buckets.find((b) => b.bucket === 'retrievables-size-unknown')).toMatchObject({
+      beforeCount: 1,
+      afterCount: 0,
+    })
+  })
+
+  it('keeps an equivalently high-score hinted handle and counts its handle estimate exactly', () => {
+    const body = 'large body '.repeat(1000)
+    const hinted = makeRetrievable(body, false, true)
+    expect(hinted.sizeUnknown).toBe(false)
+    // Cross-check the pass against the actual handle renderer and the lowest-level tokenizer.
+    // Deliberately do not call hinted.estimateTokens() / estimateHandleTokens(): those aggregate
+    // methods are the production path whose cached-hint accounting this test verifies.
+    const callId = 'ret-hinted'
+    const expectedHandleBody = defaultRenderArtifactHandleBody({
+      callId,
+      artifact: hinted.content,
+      byteLength: body.length,
+      lineCount: body.split('\\n').length,
+    })
+    const expectedHandleTokens = Tokenizable.estimateTokens(expectedHandleBody, DEFAULT_ENCODING)
+    const baseline = subtractToFit(makeWs([]), 1_000_000, [], { estimateTokens })
+    const ws = makeWs([hinted])
+    const trace = subtractToFit(ws, 1_000_000, [], { estimateTokens })
+    expect(ws.retrievables).toHaveLength(1)
+    expect(trace.totalBefore - baseline.totalBefore).toBe(expectedHandleTokens)
+    expect(trace.totalBefore).toBeLessThan(estimateTokens(body, DEFAULT_ENCODING))
+  })
+
+  it('excludes before the first RAG measurement or total call', () => {
+    const events: string[] = []
+    const unknown = {
+      ...makeRetrievable('unmeasurable '.repeat(100)),
+      get sizeUnknown() {
+        events.push('sizeUnknown')
+        return true
+      },
+      estimateTokens: () => {
+        events.push('estimateTokens')
+        return Promise.resolve(999999)
+      },
+    }
+    const ws = makeWs([unknown])
+    subtractToFit(ws, 1_000_000, [], {
+      estimateTokens: (value, encoding) => {
+        events.push('estimate')
+        return estimateTokens(value, encoding)
+      },
+    })
+    expect(events).not.toContain('estimateTokens')
+    expect(events.indexOf('sizeUnknown')).toBeGreaterThanOrEqual(0)
+    expect(events.indexOf('sizeUnknown')).toBeLessThan(events.indexOf('estimate'))
+  })
+
+  it('distinguishes unknown-size exclusion from ordinary score shedding', () => {
+    const ws = makeWs([
+      makeRetrievable('unknown', false, false, 0.99),
+      makeRetrievable('known', false, true, 0.1),
+    ])
+    const trace = subtractToFit(ws, 1, [], { estimateTokens, outputReserve: 0 })
+    const unknownBucket = trace.buckets.find((b) => b.bucket === 'retrievables-size-unknown')
+    const shedBucket = trace.buckets.find((b) => b.bucket === 'retrievables')
+
+    expect(unknownBucket).toMatchObject({ beforeCount: 1, afterCount: 0, ids: ['ret-unknown'] })
+    expect(shedBucket).toMatchObject({ beforeCount: 1, afterCount: 0, ids: ['ret-hinted'] })
+    expect(unknownBucket?.ids).not.toContain('ret-hinted')
+    expect(shedBucket?.ids).not.toContain('ret-unknown')
+  })
+})
+
+describe('subtractToFit — defensive ContentLike rendering', () => {
+  const ragWs = (content: WorkingRetrievable['content']): WorkingSet => ({
+    systemPrompt: 'sys',
+    messages: [],
+    memories: [],
+    retrievables: [{ id: 'render-test', content }],
+    thoughts: [],
+    tools: emptyToolRegistry(),
+  })
+
+  it('rejects default Object.prototype tag coercion, including non-Object tags', () => {
+    expect(() =>
+      subtractToFit(ragWs(new Map() as unknown as WorkingRetrievable['content']), 1000, [], {
+        estimateTokens,
+      })
+    ).toThrow(TypeError)
+  })
+
+  it('accepts intentional custom renderers even when their text resembles an object tag', () => {
+    expect(() =>
+      subtractToFit(ragWs({ toString: () => '[object Map]' }), 1000, [], { estimateTokens })
+    ).not.toThrow()
+  })
+
+  it('requires a renderer to return a genuine string', () => {
+    const invalid = { toString: () => 42 } as unknown as WorkingRetrievable['content']
+    expect(() => subtractToFit(ragWs(invalid), 1000, [], { estimateTokens })).toThrow(TypeError)
+  })
+})
 
 describe('subtractToFit — the tool-calls bucket (accumulated prior-turn tool results)', () => {
   const makeWs = (toolCalls: WorkingToolCall[]): WorkingSet => ({

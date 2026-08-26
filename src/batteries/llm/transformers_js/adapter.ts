@@ -60,6 +60,7 @@ import {
   defaultRenderStandingInstructions,
   defaultRenderMemories,
   defaultRenderRetrievables,
+  defaultRenderRetrievableHandleBody,
   defaultRenderRetrievableSafetyDirective,
   defaultRenderFirstPartyRetrievables,
   defaultRenderThirdPartyPublicRetrievables,
@@ -137,6 +138,7 @@ interface ResolvedHelpers {
   toolsToTransformersJsTools: typeof defaultToolsToTransformersJsTools
   renderTransformersJsToolResult: typeof defaultRenderTransformersJsToolResult
   renderArtifactHandleBody: typeof defaultRenderArtifactHandleBody
+  renderRetrievableHandleBody: typeof defaultRenderRetrievableHandleBody
   buildTransformersJsMessages: typeof defaultBuildTransformersJsMessages
   createTransformersJsStreamAccumulator: typeof defaultCreateTransformersJsStreamAccumulator
 }
@@ -193,6 +195,10 @@ const resolveHelpers = (
       defaultRenderTransformersJsToolResult
     ),
     renderArtifactHandleBody: pick('renderArtifactHandleBody', defaultRenderArtifactHandleBody),
+    renderRetrievableHandleBody: pick(
+      'renderRetrievableHandleBody',
+      defaultRenderRetrievableHandleBody
+    ),
     buildTransformersJsMessages: pick(
       'buildTransformersJsMessages',
       defaultBuildTransformersJsMessages
@@ -739,7 +745,12 @@ export class TransformersJsAdapter {
         let total = tally(ctx.systemPrompt.toString())
         for (const si of ctx.standingInstructions) total += tally(si.toString())
         for (const m of ctx.turnMemories) total += tally(m.content.toString())
-        for (const r of ctx.turnRetrievables) total += tally((await r.contentString?.()) ?? '')
+        for (const r of ctx.turnRetrievables) {
+          total +=
+            !r.inline && SpooledArtifact.isSpooledArtifact(r.content) && r.content.hasSizeHints()
+              ? r.content.estimateHandleTokens(r.id, enc, h.renderRetrievableHandleBody)
+              : tally((await r.contentString?.()) ?? '')
+        }
         for (const m of ctx.turnMessages) total += tally(m.content?.toString() ?? '')
         for (const t of ctx.turnThoughts) total += tally(t.content.toString())
         for (const body of renderedToolCallResults.values()) total += tally(body)
@@ -801,6 +812,7 @@ export class TransformersJsAdapter {
         renderFirstPartyRetrievables: h.renderFirstPartyRetrievables,
         renderThirdPartyPublicRetrievables: h.renderThirdPartyPublicRetrievables,
         renderThirdPartyPrivateRetrievables: h.renderThirdPartyPrivateRetrievables,
+        renderRetrievableHandleBody: h.renderRetrievableHandleBody,
         multimodal: mmFlags,
         decodeMedia: mmFlags ? (media) => defaultMediaToTransformersInput(media) : undefined,
         unsupportedMediaPolicy,

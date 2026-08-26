@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { Retrievable } from '../../../src/lib/classes/retrievable'
 import { ArtifactTool } from '../../../src/lib/classes/artifact_tool'
 import { makeDispatchContext } from '../../_fixtures/dispatch_context'
 import { E_INVALID_TOOL_ARGS } from '../../../src/lib/exceptions/runtime'
@@ -199,6 +200,23 @@ describe('SpooledMarkdownArtifact', () => {
       for (const tool of registry.all()) {
         expect(ArtifactTool.isArtifactTool(tool)).toBe(true)
       }
+    })
+
+    it('discovers retrievable-backed markdown artifacts through markdown forged tools', () => {
+      const artifact = make(MD_NO_FRONTMATTER)
+      const r = new Retrievable({
+        id: 'ret-md',
+        content: artifact,
+        trustTier: 'first-party',
+        createdAt: '2024-01-01',
+        updatedAt: '2024-01-01',
+      })
+      const registry = SpooledMarkdownArtifact.forgeTools(
+        makeDispatchContext({ retrievables: [r] })
+      )
+      expect(
+        JSON.stringify(registry.get('artifact_md_headings')!.describe().inputSchema)
+      ).toContain('ret-md')
     })
 
     it('restricts artifact_md_* callId enum to markdown artifacts only', async () => {

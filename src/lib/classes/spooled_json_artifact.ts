@@ -5,8 +5,13 @@ import { ArtifactTool } from './artifact_tool'
 import { ToolRegistry } from './tool_registry'
 import { isInstanceOf, isObject } from '../utils/guards'
 import { resolveSpoolReader } from '../contracts/reader_resolvers'
-import { SpooledArtifact, defaultSerialise } from './spooled_artifact'
 import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
+import {
+  SpooledArtifact,
+  defaultSerialise,
+  collectArtifactCompatibleIds,
+  resolveArtifactById,
+} from './spooled_artifact'
 import type { AdkEncodableSnapshot } from './encodable'
 import type { SpoolReader } from '../contracts/spool_reader'
 import type { ToolMethodDescriptor } from './spooled_artifact'
@@ -219,9 +224,7 @@ export class SpooledJsonArtifact<T = unknown> extends SpooledArtifact {
   public static override forgeTools(ctx: DispatchContext): ToolRegistry {
     const registry = SpooledArtifact.forgeTools(ctx)
     const requires = SpooledJsonArtifact
-    const compatibleIds = [...ctx.turnToolCalls]
-      .filter((tc) => !tc.fromArtifactTool && isInstanceOf(tc.results, requires.name, requires))
-      .map((tc) => tc.id)
+    const compatibleIds = collectArtifactCompatibleIds(ctx, requires)
     if (compatibleIds.length === 0) return registry
 
     for (const descriptor of this.toolMethods) {
@@ -245,14 +248,9 @@ export class SpooledJsonArtifact<T = unknown> extends SpooledArtifact {
         onCollision: 'replace',
         handler: async (rawArgs, ctxInner) => {
           const args = rawArgs as Record<string, unknown> & { callId: string }
-          const tc = [...ctxInner.turnToolCalls].find((t) => t.id === args.callId)
-          if (!tc) {
-            return `Error: no tool call with id ${args.callId} in this turn`
-          }
-          const artifact = tc.results
-          if (!isInstanceOf(artifact, requires.name, requires)) {
-            return `Error: tool call ${args.callId} results are not a ${requires.name} instance`
-          }
+          const resolved = resolveArtifactById(ctxInner, args.callId, requires)
+          if (!resolved) return `Error: no artifact with id ${args.callId} in this turn`
+          const artifact = resolved.artifact
           const methodArgs: unknown[] = []
           if (
             descriptor.method === 'json_get' ||
@@ -471,7 +469,10 @@ export class SpooledJsonArtifact<T = unknown> extends SpooledArtifact {
    * @returns A fresh {@link SpooledJsonArtifact} backed by a freshly-resolved reader.
    */
   static [DECODE_METHOD](data: AdkEncodableSnapshot): SpooledJsonArtifact {
-    const snapshot = data as { reader: ReaderDescriptor; format?: JsonArtifactFormat }
+    const snapshot = data as {
+      reader: ReaderDescriptor
+      format?: JsonArtifactFormat
+    }
     return new SpooledJsonArtifact(resolveSpoolReader(snapshot.reader), snapshot.format)
   }
 }

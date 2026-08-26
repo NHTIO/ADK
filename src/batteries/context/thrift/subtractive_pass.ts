@@ -114,6 +114,8 @@ export interface BucketTrace {
   afterCount: number
   /** A short human-readable rationale for what this step did (or didn't do), for diagnostics/tracing. */
   note?: string
+  /** Item identifiers affected by this bucket, when the working items expose ids. */
+  ids?: string[]
 }
 
 /** The full record of one subtractive pass — before/after weights per bucket, and whether the
@@ -320,8 +322,21 @@ const defaultIsSummaryMessage: IsSummaryMessageFn = (m) => m.id === '__compact-s
  *  assumed. See the `shedRank` option on {@link SubtractToFitOptions}. */
 const defaultShedRank: ShedRankFn = () => 0
 
-const renderContent = (v: ContentLike | string): string =>
-  typeof v === 'string' ? v : v.toString()
+const renderContent = (v: ContentLike | string): string => {
+  if (typeof v === 'string') return v
+  // Reject the specific failure mode where an opaque object is coerced through the default
+  // Object.prototype renderer. Custom toString implementations remain fully valid, including
+  // ones whose intentional text happens to look like an object tag.
+  const toString = v.toString
+  if (typeof toString !== 'function' || toString === Object.prototype.toString) {
+    throw new TypeError('ContentLike must provide an explicit string renderer')
+  }
+  const rendered = toString.call(v)
+  if (typeof rendered !== 'string') {
+    throw new TypeError('ContentLike renderer must return a string')
+  }
+  return rendered
+}
 
 /**
  * Resolve the per-dispatch INPUT token budget from the ACTIVE model's window: the window minus the
@@ -416,6 +431,14 @@ export const subtractToFit = (
   if (typeof options?.estimateTokens !== 'function') {
     throw new E_CONTEXT_RESOLVER_MISSING(['subtractToFit', 'estimateTokens'])
   }
+  // Exclude unmeasurable handle-mode retrievables before ANY bucket measurement. In particular,
+  // this must precede ragBefore and the first total() call below: a finite synthetic estimate
+  // cannot be safe for an unbounded artifact, and Infinity would poison total() globally.
+  const unknownRetrievables = ws.retrievables.filter((r) => r.sizeUnknown === true)
+  if (unknownRetrievables.length > 0) {
+    ws.retrievables = ws.retrievables.filter((r) => r.sizeUnknown !== true)
+  }
+
   const encoding = options.encoding ?? DEFAULT_ENCODING
   const estimateTokens = options.estimateTokens
   const renderCtx = options.renderCtx
@@ -437,9 +460,10 @@ export const subtractToFit = (
   // end-to-end, so a reader-backed artifact's async estimate would surface as a Promise here; guard
   // that (rare for RAG passages, which are inline text) by falling back to the coerced string.
   const rTok = (r: WorkingRetrievable): number => {
-    if (typeof r.estimateTokens !== 'function') return tok(renderContent(r.content))
+    if (typeof r.estimateTokens !== 'function')
+      return tok(renderContent(r.content as ContentLike | string))
     const est = r.estimateTokens(encoding)
-    return typeof est === 'number' ? est : tok(renderContent(r.content))
+    return typeof est === 'number' ? est : tok(renderContent(r.content as ContentLike | string))
   }
 
   // Count a thought's tokens against the live ctx (dynamic content resolves per-ctx; static is
@@ -467,7 +491,8 @@ export const subtractToFit = (
     bucket: string,
     before: { tokens: number; count: number },
     after: { tokens: number; count: number },
-    note?: string
+    note?: string,
+    ids?: string[]
   ): void => {
     buckets.push({
       bucket,
@@ -476,6 +501,7 @@ export const subtractToFit = (
       beforeCount: before.count,
       afterCount: after.count,
       note,
+      ids,
     })
   }
 
@@ -574,6 +600,15 @@ export const subtractToFit = (
   const memBefore = { tokens: memTokens(), count: ws.memories.length }
   const ragBefore = { tokens: ragTokens(), count: ws.retrievables.length }
   const msgBefore = { tokens: msgTokens(), count: ws.messages.length }
+  if (unknownRetrievables.length > 0) {
+    measure(
+      'retrievables-size-unknown',
+      { tokens: 0, count: unknownRetrievables.length },
+      { tokens: 0, count: 0 },
+      'unmeasurable handle-mode retrievables excluded before ranking or token totals',
+      unknownRetrievables.map((r) => r.id).filter((id): id is string => id !== undefined)
+    )
+  }
   // The surviving guidance thoughts AFTER the step-1 strip — the starting point for the budget shed
   // below.
   const thoughtsShedBefore = { tokens: thoughtTokens(), count: ws.thoughts.length }
@@ -638,13 +673,19 @@ export const subtractToFit = (
   }
 
   // 4. Shed the RAG tail (lowest-reranked first — keep the head, the best chunks).
+  const retrievableIdsBefore = ws.retrievables
+    .map((r) => r.id)
+    .filter((id): id is string => id !== undefined)
   ws.retrievables.sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
   while (total() > budget && ws.retrievables.length > 0) ws.retrievables.pop()
+  const retrievableIdsAfter = new Set(ws.retrievables.map((r) => r.id))
+  const shedRetrievableIds = retrievableIdsBefore.filter((id) => !retrievableIdsAfter.has(id))
   measure(
     'retrievables',
     ragBefore,
     { tokens: ragTokens(), count: ws.retrievables.length },
-    'tail of the ranking sheds first; the best chunks stay'
+    'tail of the ranking sheds first; the best chunks stay',
+    shedRetrievableIds
   )
 
   // 5. Shed low-value memories next.

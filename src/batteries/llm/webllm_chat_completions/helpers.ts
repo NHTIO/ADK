@@ -17,6 +17,8 @@ export {
   defaultRenderMemories,
   renderRetrievables,
   defaultRenderRetrievables,
+  renderRetrievableHandleBody,
+  defaultRenderRetrievableHandleBody,
   renderRetrievableSafetyDirective,
   defaultRenderRetrievableSafetyDirective,
   renderFirstPartyRetrievables,

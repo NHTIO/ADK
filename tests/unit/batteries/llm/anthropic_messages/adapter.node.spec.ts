@@ -2,6 +2,7 @@ import { DateTime } from 'luxon'
 import { validator } from '@nhtio/validation'
 import { describe, expect, it, vi } from 'vitest'
 import { APIUserAbortError } from '@anthropic-ai/sdk/core/error'
+import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import { makeDispatchContext } from '../../../../_fixtures/dispatch_context'
 import {
   Message,
@@ -11,6 +12,8 @@ import {
   ToolRegistry,
   Tokenizable,
   Registry,
+  Retrievable,
+  SpooledArtifact,
 } from '@nhtio/adk/common'
 import {
   buildErrorResponse,
@@ -86,6 +89,7 @@ interface CtxOverrides {
   turnMessages?: Message[]
   turnThoughts?: Thought[]
   turnToolCalls?: ToolCall[]
+  turnRetrievables?: Retrievable[]
   tools?: ToolRegistry
   stash?: Record<string, unknown>
   abortSignal?: AbortSignal
@@ -107,7 +111,7 @@ const makeCtx = (overrides: CtxOverrides = {}): MockCtx => {
     turnThoughts: new Set(overrides.turnThoughts ?? []),
     turnToolCalls: new Set(overrides.turnToolCalls ?? []),
     turnMemories: new Set(),
-    turnRetrievables: new Set(),
+    turnRetrievables: new Set(overrides.turnRetrievables ?? []),
     standingInstructions: new Set(),
     tools: overrides.tools ?? new ToolRegistry(),
     stash: new Registry(overrides.stash ?? {}),
@@ -170,6 +174,74 @@ const tool = (name: string, handler: (...args: unknown[]) => unknown | Promise<u
   })
 
 describe('AnthropicMessagesAdapter — static surface + countTokens', () => {
+  it('accounts for a spooled retrievable handle using the resolved renderer', async () => {
+    const fetchFn = vi.fn(
+      cassetteFetch(singleAnthropicResponseCassette('budget-handle', { content: 'ok' }))
+    )
+    const id = 'budget-anthropic'
+    const artifact = new SpooledArtifact(
+      new InMemorySpoolStore().write(id, 'full-body '.repeat(10000))
+    )
+    artifact._setSizeHints({ byteLength: 100000, lineCount: 10000 })
+    const retrievable = new Retrievable({
+      id,
+      content: artifact,
+      trustTier: 'first-party',
+      inline: false,
+      createdAt: dt('2026-01-01T10:00:00Z'),
+      updatedAt: dt('2026-01-01T10:00:00Z'),
+    })
+    const renderer = (() => 'HANDLE') as never
+    const spy = vi.spyOn(artifact, 'estimateHandleTokens')
+    const adapter = new AnthropicMessagesAdapter({
+      apiKey: 'sk-ant-test-key',
+      model: 'claude-opus-5',
+      maxTokens: 64,
+      stream: false,
+      tokenEncoding: 'cl100k_base',
+      contextWindow: 1000,
+      fetch: fetchFn as never,
+    })
+    await expect(
+      adapter.executor()(
+        makeCtx({
+          turnRetrievables: [retrievable],
+          stash: { anthropicMessages: { helpers: { renderRetrievableHandleBody: renderer } } },
+        }),
+        makeHelpers()
+      )
+    ).resolves.toBeUndefined()
+    expect(spy).toHaveBeenCalledWith(id, 'cl100k_base', renderer)
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+  it('falls back to full-content estimation for a non-inline spooled retrievable with no cached size hints, instead of throwing', async () => {
+    const fetchFn = vi.fn(
+      cassetteFetch(singleAnthropicResponseCassette('budget-handle-unhinted', { content: 'ok' }))
+    )
+    const id = 'budget-anthropic-unhinted'
+    const artifact = new SpooledArtifact(new InMemorySpoolStore().write(id, 'unhinted body'))
+    const retrievable = new Retrievable({
+      id,
+      content: artifact,
+      trustTier: 'first-party',
+      inline: false,
+      createdAt: dt('2026-01-01T10:00:00Z'),
+      updatedAt: dt('2026-01-01T10:00:00Z'),
+    })
+    const adapter = new AnthropicMessagesAdapter({
+      apiKey: 'sk-ant-test-key',
+      model: 'claude-opus-5',
+      maxTokens: 64,
+      stream: false,
+      tokenEncoding: 'cl100k_base',
+      contextWindow: 1000,
+      fetch: fetchFn as never,
+    })
+    await expect(
+      adapter.executor()(makeCtx({ turnRetrievables: [retrievable] }), makeHelpers())
+    ).resolves.toBeUndefined()
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
   it('exposes STASH_KEY and countTokens uses the count surface without max_tokens', async () => {
     const fetchFn = vi.fn(
       cassetteFetch({

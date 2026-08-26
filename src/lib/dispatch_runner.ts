@@ -11,6 +11,7 @@ import { canonicalStringify } from './utils/canonical_json'
 import { SpooledArtifact } from './classes/spooled_artifact'
 import { TurnContext } from './contracts/turn_runner_context'
 import { DispatchContext } from './contracts/dispatch_context'
+import { normalizeRetrievables } from './utils/retrievable_spool'
 import { runWithEstimationWarnings } from './utils/estimation_context'
 import {
   E_INVALID_LLM_DISPATCH_INPUT,
@@ -345,6 +346,15 @@ export class DispatchRunner {
 
     const llmCtx = runner.#buildContext(resolved.source, resolved.raw)
     runner.#wireContextHooks(llmCtx)
+    await normalizeRetrievables(llmCtx)
+    if (resolved.source) {
+      // Write the now-spooled records back onto the source TurnContext's own working set, so a
+      // subsequent dispatch from the same TurnContext reuses the existing artifact handle instead
+      // of re-encoding and re-storing the same plain-string content from scratch every time.
+      for (const record of llmCtx.turnRetrievables) {
+        runner.#replaceById(resolved.source.turnRetrievables, record.id, record)
+      }
+    }
 
     await runner.#runDispatch(llmCtx, resolved.executor)
   }
@@ -385,8 +395,12 @@ export class DispatchRunner {
         storeMemory: (_c, v) => source.storeMemory(v),
         mutateMemory: (_c, v) => source.mutateMemory(v),
         deleteMemory: (_c, id) => source.deleteMemory(id),
-        storeRetrievable: (_c, v) => source.storeRetrievable(v),
-        mutateRetrievable: (_c, v) => source.mutateRetrievable(v),
+        storeRetrievable: async (_c, v) => {
+          return source.storeRetrievable(v) as unknown as Promise<void>
+        },
+        mutateRetrievable: async (_c, v) => {
+          return source.mutateRetrievable(v) as unknown as Promise<void>
+        },
         deleteRetrievable: (_c, id) => source.deleteRetrievable(id),
         storeMessage: (_c, v) => source.storeMessage(v),
         mutateMessage: (_c, v) => source.mutateMessage(v),
@@ -685,6 +699,15 @@ export class DispatchRunner {
         if (typeof ctor.forgeTools === 'function') {
           ctors.add(ctor as { forgeTools: (c: DispatchContext) => ToolRegistry })
         }
+      }
+    }
+    for (const retrievable of ctx.turnRetrievables) {
+      if (retrievable.inline || !SpooledArtifact.isSpooledArtifact(retrievable.content)) continue
+      const ctor = (retrievable.content as SpooledArtifact).constructor as unknown as {
+        forgeTools?: (c: DispatchContext) => ToolRegistry
+      }
+      if (typeof ctor.forgeTools === 'function') {
+        ctors.add(ctor as { forgeTools: (c: DispatchContext) => ToolRegistry })
       }
     }
     if (ctors.size === 0) return

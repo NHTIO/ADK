@@ -109,7 +109,8 @@ const makeThought = (overrides: {
 
 const makeRetrievable = (overrides: {
   id?: string
-  content?: string
+  content?: string | Tokenizable | SpooledArtifact
+  inline?: boolean
   trustTier?: 'first-party' | 'third-party-public' | 'third-party-private'
   source?: string
   kind?: string
@@ -120,6 +121,7 @@ const makeRetrievable = (overrides: {
   return new Retrievable({
     id: overrides.id ?? 'ret1',
     content: overrides.content ?? 'retrieved content',
+    inline: overrides.inline,
     trustTier: overrides.trustTier ?? 'first-party',
     source: overrides.source,
     kind: overrides.kind,
@@ -473,6 +475,30 @@ describe('renderFirstPartyRetrievables', () => {
     expect(out).toContain('</retrieved_adv>')
   })
 
+  it('renders a SpooledArtifact as a handle, inlines when requested, and treats inline as moot for Tokenizable', async () => {
+    const handle = makeRetrievable({
+      id: 'fp-h',
+      content: makeSpooled('secret body', 'fp-h'),
+      trustTier: 'first-party',
+    })
+    const inlined = makeRetrievable({
+      id: 'fp-i',
+      content: makeSpooled('inline body', 'fp-i'),
+      trustTier: 'first-party',
+      inline: true,
+    })
+    const plain = makeRetrievable({
+      id: 'fp-p',
+      content: 'plain body',
+      trustTier: 'first-party',
+      inline: false,
+    })
+    expect(await renderFirstPartyRetrievables([toAttrs(handle)])).not.toContain('secret body')
+    expect(await renderFirstPartyRetrievables([toAttrs(handle)])).toContain('callId: fp-h')
+    expect(await renderFirstPartyRetrievables([toAttrs(inlined)])).toContain('inline body')
+    expect(await renderFirstPartyRetrievables([toAttrs(plain)])).toContain('plain body')
+  })
+
   it('does NOT leak the literal "first-party" string into the rendered envelope', async () => {
     const r = makeRetrievable({ id: 'fp-3', content: 'body', trustTier: 'first-party' })
     const out = await renderFirstPartyRetrievables([toAttrs(r)])
@@ -510,6 +536,28 @@ describe('renderThirdPartyPublicRetrievables', () => {
     expect(out).toContain('tool="https://example.com/a"')
     expect(out).toContain('web page body')
     expect(out).toContain('</untrusted_content_pub-1>')
+  })
+
+  it('renders a non-inline SpooledArtifact as a handle without leaking its body', async () => {
+    const r = makeRetrievable({
+      id: 'pub-h',
+      content: makeSpooled('public secret body', 'pub-h'),
+      trustTier: 'third-party-public',
+    })
+    const out = await renderThirdPartyPublicRetrievables([toAttrs(r)], { renderUntrustedContent })
+    expect(out).not.toContain('public secret body')
+    expect(out).toContain('callId: pub-h')
+  })
+
+  it('renders a third-party-public SpooledArtifact inline when explicitly requested', async () => {
+    const r = makeRetrievable({
+      id: 'pub-inline',
+      content: makeSpooled('public inline full body', 'pub-inline'),
+      trustTier: 'third-party-public',
+      inline: true,
+    })
+    const out = await renderThirdPartyPublicRetrievables([toAttrs(r)], { renderUntrustedContent })
+    expect(out).toContain('public inline full body')
   })
 
   it('honours a custom renderUntrustedContent injected via deps (per-tier DI)', async () => {
@@ -554,6 +602,28 @@ describe('renderThirdPartyPrivateRetrievables', () => {
     expect(out).toContain('kind="retrieved-third-party-private"')
     expect(out).toContain('tool="upload://user-doc"')
     expect(out).toContain('uploaded pdf body')
+  })
+
+  it('renders a non-inline SpooledArtifact as a handle without leaking its body', async () => {
+    const r = makeRetrievable({
+      id: 'priv-h',
+      content: makeSpooled('private secret body', 'priv-h'),
+      trustTier: 'third-party-private',
+    })
+    const out = await renderThirdPartyPrivateRetrievables([toAttrs(r)], { renderUntrustedContent })
+    expect(out).not.toContain('private secret body')
+    expect(out).toContain('callId: priv-h')
+  })
+
+  it('renders a third-party-private SpooledArtifact inline when explicitly requested', async () => {
+    const r = makeRetrievable({
+      id: 'priv-inline',
+      content: makeSpooled('private inline full body', 'priv-inline'),
+      trustTier: 'third-party-private',
+      inline: true,
+    })
+    const out = await renderThirdPartyPrivateRetrievables([toAttrs(r)], { renderUntrustedContent })
+    expect(out).toContain('private inline full body')
   })
 
   it('honours a custom renderUntrustedContent injected via deps (per-tier DI)', async () => {

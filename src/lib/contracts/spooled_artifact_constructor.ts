@@ -70,3 +70,23 @@ export const implementsSpooledArtifactConstructor = (
 ): value is SpooledArtifactConstructorLike => {
   return passesSchema(spooledArtifactConstructorSchema, value)
 }
+
+/**
+ * Creates the validator fragment for a resolver returning a spooled-artifact constructor.
+ *
+ * The resolver is invoked during validation, then its result is checked with the canonical
+ * cross-realm-safe constructor guard. Keeping this fragment here makes `Tool` and `Retrievable`
+ * share exactly the same validation behaviour.
+ */
+export const artifactConstructorResolverSchema = () =>
+  // eslint-disable-next-line adk/require-validator-any-required -- disposition is set by the caller's .optional()/.required() appended to this returned schema
+  validator.any().custom((value, helpers) => {
+    if (typeof value !== 'function') return helpers.error('any.invalid')
+    let resolved: unknown
+    try {
+      resolved = (value as () => unknown)()
+    } catch {
+      return helpers.error('any.invalid')
+    }
+    return implementsSpooledArtifactConstructor(resolved) ? value : helpers.error('any.invalid')
+  })

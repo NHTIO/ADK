@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { Retrievable } from '../../../src/lib/classes/retrievable'
 import { ArtifactTool } from '../../../src/lib/classes/artifact_tool'
 import { makeDispatchContext } from '../../_fixtures/dispatch_context'
 import { E_INVALID_TOOL_ARGS } from '../../../src/lib/exceptions/runtime'
@@ -151,6 +152,21 @@ describe('SpooledJsonArtifact', () => {
       for (const tool of registry.all()) {
         expect(ArtifactTool.isArtifactTool(tool)).toBe(true)
       }
+    })
+
+    it('discovers retrievable-backed JSON artifacts through JSON forged tools', () => {
+      const artifact = make(JSON_OBJECT)
+      const r = new Retrievable({
+        id: 'ret-json',
+        content: artifact,
+        trustTier: 'first-party',
+        createdAt: '2024-01-01',
+        updatedAt: '2024-01-01',
+      })
+      const registry = SpooledJsonArtifact.forgeTools(makeDispatchContext({ retrievables: [r] }))
+      expect(JSON.stringify(registry.get('artifact_json_get')!.describe().inputSchema)).toContain(
+        'ret-json'
+      )
     })
 
     it('restricts artifact_json_* callId enum to JSON artifacts; base tools see every artifact', async () => {

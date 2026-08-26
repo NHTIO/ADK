@@ -1,6 +1,7 @@
 import { DateTime } from 'luxon'
 import { validator } from '@nhtio/validation'
 import { describe, expect, it, vi } from 'vitest'
+import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import {
   Tokenizable,
   Message,
@@ -727,6 +728,66 @@ describe('LiteRtLmAdapter — option layering', () => {
 // ─── context window ─────────────────────────────────────────────────────────────────────────────────
 
 describe('LiteRtLmAdapter — context window', () => {
+  it('accounts for a spooled retrievable handle using the resolved renderer', async () => {
+    const h = makeEngine({ message: { content: 'ok' } })
+    const id = 'budget-litert'
+    const artifact = new SpooledArtifact(
+      new InMemorySpoolStore().write(id, 'full-body '.repeat(10000))
+    )
+    artifact._setSizeHints({ byteLength: 100000, lineCount: 10000 })
+    const retrievable = new Retrievable({
+      id,
+      content: artifact,
+      trustTier: 'first-party',
+      inline: false,
+      createdAt: dt('2026-01-01T10:00:00Z'),
+      updatedAt: dt('2026-01-01T10:00:00Z'),
+    })
+    const renderer = (() => 'HANDLE') as never
+    const spy = vi.spyOn(artifact, 'estimateHandleTokens')
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      engine: h.engine as never,
+      tokenEncoding: 'gemma',
+      contextWindow: 1000,
+    })
+    await expect(
+      adapter.executor()(
+        makeCtx({
+          turnRetrievables: [retrievable],
+          stash: { liteRtLm: { helpers: { renderRetrievableHandleBody: renderer } } },
+        }),
+        makeHelpers()
+      )
+    ).resolves.toBeUndefined()
+    expect(spy).toHaveBeenCalledWith(id, 'gemma', renderer)
+    expect(h.configs).toHaveLength(1)
+  })
+  it('falls back to full-content estimation for a non-inline spooled retrievable with no cached size hints, instead of throwing', async () => {
+    const h = makeEngine({ message: { content: 'ok' } })
+    const id = 'budget-litert-unhinted'
+    const artifact = new SpooledArtifact(new InMemorySpoolStore().write(id, 'unhinted body'))
+    const retrievable = new Retrievable({
+      id,
+      content: artifact,
+      trustTier: 'first-party',
+      inline: false,
+      createdAt: dt('2026-01-01T10:00:00Z'),
+      updatedAt: dt('2026-01-01T10:00:00Z'),
+    })
+    const adapter = new LiteRtLmAdapter({
+      model: 'm',
+      stream: false,
+      engine: h.engine as never,
+      tokenEncoding: 'gemma',
+      contextWindow: 1000,
+    })
+    await expect(
+      adapter.executor()(makeCtx({ turnRetrievables: [retrievable] }), makeHelpers())
+    ).resolves.toBeUndefined()
+    expect(h.configs).toHaveLength(1)
+  })
   it('throws E_LITERT_LM_CONTEXT_OVERFLOW when the budget is exceeded', async () => {
     const h = makeEngine({ message: { content: 'unused' } })
     const adapter = new LiteRtLmAdapter({

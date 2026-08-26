@@ -1,6 +1,7 @@
 import { DateTime } from 'luxon'
 import { validator } from '@nhtio/validation'
 import { describe, expect, it, vi } from 'vitest'
+import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import {
   Tokenizable,
   Message,
@@ -61,6 +62,7 @@ const makeCtx = (
   overrides: {
     systemPrompt?: string
     turnMessages?: Message[]
+    turnRetrievables?: Retrievable[]
     tools?: ToolRegistry
     stash?: Record<string, unknown>
     abortSignal?: AbortSignal
@@ -73,7 +75,7 @@ const makeCtx = (
     turnThoughts: new Set<Thought>(),
     turnToolCalls: new Set<ToolCall>(),
     turnMemories: new Set<Memory>(),
-    turnRetrievables: new Set<Retrievable>(),
+    turnRetrievables: new Set(overrides.turnRetrievables ?? []),
     standingInstructions: new Set<Tokenizable>(),
     tools: overrides.tools ?? new ToolRegistry(),
     stash: new Registry(overrides.stash ?? {}),
@@ -920,6 +922,66 @@ describe('TransformersJsAdapter — multimodal GPU-buffer disposal (second-gener
 // ─── context window ─────────────────────────────────────────────────────────────────────────────────
 
 describe('TransformersJsAdapter — context window', () => {
+  it('accounts for a spooled retrievable handle using the resolved renderer', async () => {
+    const pipe = makeFakePipeline({ text: 'ok' })
+    const id = 'budget-transformers'
+    const artifact = new SpooledArtifact(
+      new InMemorySpoolStore().write(id, 'full-body '.repeat(10000))
+    )
+    artifact._setSizeHints({ byteLength: 100000, lineCount: 10000 })
+    const retrievable = new Retrievable({
+      id,
+      content: artifact,
+      trustTier: 'first-party',
+      inline: false,
+      createdAt: dt('2026-01-01T10:00:00Z'),
+      updatedAt: dt('2026-01-01T10:00:00Z'),
+    })
+    const renderer = (() => 'HANDLE') as never
+    const spy = vi.spyOn(artifact, 'estimateHandleTokens')
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      pipeline: pipe as never,
+      tokenEncoding: 'gemma',
+      contextWindow: 1000,
+    })
+    await expect(
+      adapter.executor()(
+        makeCtx({
+          turnRetrievables: [retrievable],
+          stash: { transformersJs: { helpers: { renderRetrievableHandleBody: renderer } } },
+        }),
+        makeHelpers()
+      )
+    ).resolves.toBeUndefined()
+    expect(spy).toHaveBeenCalledWith(id, 'gemma', renderer)
+    expect((pipe as unknown as { calls: unknown[] }).calls).toHaveLength(1)
+  })
+  it('falls back to full-content estimation for a non-inline spooled retrievable with no cached size hints, instead of throwing', async () => {
+    const pipe = makeFakePipeline({ text: 'ok' })
+    const id = 'budget-transformers-unhinted'
+    const artifact = new SpooledArtifact(new InMemorySpoolStore().write(id, 'unhinted body'))
+    const retrievable = new Retrievable({
+      id,
+      content: artifact,
+      trustTier: 'first-party',
+      inline: false,
+      createdAt: dt('2026-01-01T10:00:00Z'),
+      updatedAt: dt('2026-01-01T10:00:00Z'),
+    })
+    const adapter = new TransformersJsAdapter({
+      model: 'm',
+      stream: false,
+      pipeline: pipe as never,
+      tokenEncoding: 'gemma',
+      contextWindow: 1000,
+    })
+    await expect(
+      adapter.executor()(makeCtx({ turnRetrievables: [retrievable] }), makeHelpers())
+    ).resolves.toBeUndefined()
+    expect((pipe as unknown as { calls: unknown[] }).calls).toHaveLength(1)
+  })
   it('throws E_TRANSFORMERS_JS_CONTEXT_OVERFLOW when the budget is exceeded', async () => {
     const pipe = makeFakePipeline({ text: 'unused' })
     const adapter = new TransformersJsAdapter({

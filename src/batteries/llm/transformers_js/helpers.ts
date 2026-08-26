@@ -34,6 +34,7 @@ import {
   renderFirstPartyRetrievables,
   renderThirdPartyPublicRetrievables,
   renderThirdPartyPrivateRetrievables,
+  renderRetrievableHandleBody,
   renderThought,
   filterThoughts,
 } from '../openai_chat_completions/helpers'
@@ -64,6 +65,8 @@ export {
   defaultRenderMemories,
   renderRetrievables,
   defaultRenderRetrievables,
+  renderRetrievableHandleBody,
+  defaultRenderRetrievableHandleBody,
   renderRetrievableSafetyDirective,
   defaultRenderRetrievableSafetyDirective,
   renderFirstPartyRetrievables,
@@ -310,6 +313,7 @@ export const buildTransformersJsMessages = async (input: {
   renderFirstPartyRetrievables: typeof renderFirstPartyRetrievables
   renderThirdPartyPublicRetrievables: typeof renderThirdPartyPublicRetrievables
   renderThirdPartyPrivateRetrievables: typeof renderThirdPartyPrivateRetrievables
+  renderRetrievableHandleBody?: typeof renderRetrievableHandleBody
   /**
    * Multimodal config. Absent/false → text-only (every message renders a plain string `content`, the
    * byte-for-byte original behavior). When set, a message carrying `attachments` of an enabled kind
@@ -340,8 +344,9 @@ export const buildTransformersJsMessages = async (input: {
     renderFirstPartyRetrievables: input.renderFirstPartyRetrievables,
     renderThirdPartyPublicRetrievables: input.renderThirdPartyPublicRetrievables,
     renderThirdPartyPrivateRetrievables: input.renderThirdPartyPrivateRetrievables,
+    renderRetrievableHandleBody: input.renderRetrievableHandleBody,
     renderUntrustedContent: input.renderUntrustedContent,
-  } as never)
+  })
 
   const messages: TransformersJsMessage[] = []
   const images: unknown[] = []

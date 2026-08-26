@@ -95,6 +95,8 @@ export {
   defaultRenderThirdPartyPrivateRetrievables,
   renderRetrievables,
   defaultRenderRetrievables,
+  renderRetrievableHandleBody,
+  defaultRenderRetrievableHandleBody,
   renderThought,
   defaultRenderThought,
   filterThoughts,
@@ -700,6 +702,7 @@ export const buildChatCompletionsHistory = async (input: {
   renderFirstPartyRetrievables: ChatHelpersCommon['renderFirstPartyRetrievables']
   renderThirdPartyPublicRetrievables: ChatHelpersCommon['renderThirdPartyPublicRetrievables']
   renderThirdPartyPrivateRetrievables: ChatHelpersCommon['renderThirdPartyPrivateRetrievables']
+  renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
   renderTimelineMessage: ChatCompletionsHelpers['renderTimelineMessage']
   renderThought: ChatHelpersCommon['renderThought']
   filterThoughts: ChatHelpersCommon['filterThoughts']
@@ -730,6 +733,7 @@ export const buildChatCompletionsHistory = async (input: {
     renderStandingInstructions: input.renderStandingInstructions,
     renderMemories: input.renderMemories,
     renderRetrievables: input.renderRetrievables,
+    renderRetrievableHandleBody: input.renderRetrievableHandleBody,
     renderRetrievableSafetyDirective: input.renderRetrievableSafetyDirective,
     renderFirstPartyRetrievables: input.renderFirstPartyRetrievables,
     renderThirdPartyPublicRetrievables: input.renderThirdPartyPublicRetrievables,

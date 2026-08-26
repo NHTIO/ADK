@@ -29,6 +29,7 @@ import {
   defaultRenderStandingInstructions,
   defaultRenderMemories,
   defaultRenderRetrievables,
+  defaultRenderRetrievableHandleBody,
   defaultRenderRetrievableSafetyDirective,
   defaultRenderFirstPartyRetrievables,
   defaultRenderThirdPartyPublicRetrievables,
@@ -149,6 +150,8 @@ const resolveHelpers = (
     renderStandingInstructions: src.renderStandingInstructions ?? defaultRenderStandingInstructions,
     renderMemories: src.renderMemories ?? defaultRenderMemories,
     renderRetrievables: src.renderRetrievables ?? defaultRenderRetrievables,
+    renderRetrievableHandleBody:
+      src.renderRetrievableHandleBody ?? defaultRenderRetrievableHandleBody,
     renderRetrievableSafetyDirective:
       src.renderRetrievableSafetyDirective ?? defaultRenderRetrievableSafetyDirective,
     renderFirstPartyRetrievables:
@@ -315,6 +318,7 @@ const assembleCountTokensPayload = async (
     renderFirstPartyRetrievables: resolvedHelpers.renderFirstPartyRetrievables,
     renderThirdPartyPublicRetrievables: resolvedHelpers.renderThirdPartyPublicRetrievables,
     renderThirdPartyPrivateRetrievables: resolvedHelpers.renderThirdPartyPrivateRetrievables,
+    renderRetrievableHandleBody: resolvedHelpers.renderRetrievableHandleBody,
     renderAnthropicTimelineMessage: resolvedHelpers.renderAnthropicTimelineMessage,
     renderThought: resolvedHelpers.renderThought,
     filterThoughts: resolvedHelpers.filterThoughts,

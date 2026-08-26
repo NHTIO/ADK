@@ -104,6 +104,7 @@ import {
   defaultRenderStandingInstructions,
   defaultRenderMemories,
   defaultRenderRetrievables,
+  defaultRenderRetrievableHandleBody,
   defaultRenderRetrievableSafetyDirective,
   defaultRenderFirstPartyRetrievables,
   defaultRenderThirdPartyPublicRetrievables,
@@ -233,6 +234,8 @@ const resolveHelpers = (
     renderUntrustedContent: src.renderUntrustedContent ?? defaultRenderUntrustedContent,
     renderTrustedContent: src.renderTrustedContent ?? defaultRenderTrustedContent,
     renderArtifactHandleBody: src.renderArtifactHandleBody ?? defaultRenderArtifactHandleBody,
+    renderRetrievableHandleBody:
+      src.renderRetrievableHandleBody ?? defaultRenderRetrievableHandleBody,
     renderStandingInstructions: src.renderStandingInstructions ?? defaultRenderStandingInstructions,
     renderMemories: src.renderMemories ?? defaultRenderMemories,
     renderRetrievables: src.renderRetrievables ?? defaultRenderRetrievables,
@@ -515,7 +518,14 @@ export class AnthropicMessagesAdapter {
         }
         let retTokens = 0
         for (const r of ctx.turnRetrievables) {
-          retTokens += await estimateTokensOf(r.content, encoding)
+          retTokens +=
+            !r.inline && SpooledArtifact.isSpooledArtifact(r.content) && r.content.hasSizeHints()
+              ? r.content.estimateHandleTokens(
+                  r.id,
+                  encoding,
+                  resolvedHelpers.renderRetrievableHandleBody
+                )
+              : await estimateTokensOf(r.content, encoding)
         }
         let tlTokens = 0
         for (const msg of ctx.turnMessages) {
@@ -658,6 +668,7 @@ export class AnthropicMessagesAdapter {
         renderFirstPartyRetrievables: resolvedHelpers.renderFirstPartyRetrievables,
         renderThirdPartyPublicRetrievables: resolvedHelpers.renderThirdPartyPublicRetrievables,
         renderThirdPartyPrivateRetrievables: resolvedHelpers.renderThirdPartyPrivateRetrievables,
+        renderRetrievableHandleBody: resolvedHelpers.renderRetrievableHandleBody,
         renderAnthropicTimelineMessage: resolvedHelpers.renderAnthropicTimelineMessage,
         renderThought: resolvedHelpers.renderThought,
         filterThoughts: resolvedHelpers.filterThoughts,

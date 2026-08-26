@@ -38,6 +38,8 @@ export {
   defaultRenderChatCompletionsSystemPrompt,
   renderArtifactHandleBody,
   defaultRenderArtifactHandleBody,
+  renderRetrievableHandleBody,
+  defaultRenderRetrievableHandleBody,
   looksLikeSpooledArtifact,
 } from '../chat_common/helpers'
 
@@ -237,6 +239,7 @@ export const renderAnthropicToolCallResult = async (input: {
   renderTrustedContent: ChatHelpersCommon['renderTrustedContent']
   renderAnthropicMediaBlocks: AnthropicMessagesHelpers['renderAnthropicMediaBlocks']
   renderArtifactHandleBody?: AnthropicMessagesHelpers['renderArtifactHandleBody']
+  renderRetrievableHandleBody?: AnthropicMessagesHelpers['renderRetrievableHandleBody']
   unsupportedMediaPolicy: UnsupportedMediaPolicy
   warn?: (msg: string) => void
 }): Promise<AnthropicToolResultBlockParam> => {
@@ -349,6 +352,7 @@ export const renderAnthropicSegmentedSystemPrompt = async (input: {
   renderFirstPartyRetrievables: ChatHelpersCommon['renderFirstPartyRetrievables']
   renderThirdPartyPublicRetrievables: ChatHelpersCommon['renderThirdPartyPublicRetrievables']
   renderThirdPartyPrivateRetrievables: ChatHelpersCommon['renderThirdPartyPrivateRetrievables']
+  renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
   renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
   renderCtx?: unknown
   warn?: (msg: string) => void
@@ -370,6 +374,7 @@ export const renderAnthropicSegmentedSystemPrompt = async (input: {
         renderFirstPartyRetrievables: input.renderFirstPartyRetrievables,
         renderThirdPartyPublicRetrievables: input.renderThirdPartyPublicRetrievables,
         renderThirdPartyPrivateRetrievables: input.renderThirdPartyPrivateRetrievables,
+        renderRetrievableHandleBody: input.renderRetrievableHandleBody,
         renderUntrustedContent: input.renderUntrustedContent,
       })
       if (s) parts.push(s)
@@ -554,6 +559,7 @@ export const buildAnthropicMessagesHistory = async (
     renderFirstPartyRetrievables: input.renderFirstPartyRetrievables,
     renderThirdPartyPublicRetrievables: input.renderThirdPartyPublicRetrievables,
     renderThirdPartyPrivateRetrievables: input.renderThirdPartyPrivateRetrievables,
+    renderRetrievableHandleBody: input.renderRetrievableHandleBody,
     renderUntrustedContent: input.renderUntrustedContent,
     warn: input.warn,
   })
@@ -572,6 +578,7 @@ export const buildAnthropicMessagesHistory = async (
           renderFirstPartyRetrievables: input.renderFirstPartyRetrievables,
           renderThirdPartyPublicRetrievables: input.renderThirdPartyPublicRetrievables,
           renderThirdPartyPrivateRetrievables: input.renderThirdPartyPrivateRetrievables,
+          renderRetrievableHandleBody: input.renderRetrievableHandleBody,
           renderUntrustedContent: input.renderUntrustedContent,
         })
       : segmented

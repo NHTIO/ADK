@@ -231,6 +231,8 @@ export interface AnthropicMessagesHelpers extends ChatHelpersCommon {
   }) => Promise<AnthropicContentBlockParam[]>
   /** Renders the directions-bearing handle body for a non-inlined spooled artifact. */
   renderArtifactHandleBody?: ChatHelpersCommon['renderArtifactHandleBody']
+  /** Renders the directions-bearing handle body for a non-inlined retrievable's spooled artifact content. */
+  renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
   /** Renders a tool call's result into Anthropic tool-result content blocks. */
   renderAnthropicToolCallResult: (input: {
     toolCall: ToolCall
@@ -240,6 +242,7 @@ export interface AnthropicMessagesHelpers extends ChatHelpersCommon {
     renderTrustedContent: ChatHelpersCommon['renderTrustedContent']
     renderAnthropicMediaBlocks: AnthropicMessagesHelpers['renderAnthropicMediaBlocks']
     renderArtifactHandleBody?: AnthropicMessagesHelpers['renderArtifactHandleBody']
+    renderRetrievableHandleBody?: AnthropicMessagesHelpers['renderRetrievableHandleBody']
     unsupportedMediaPolicy: UnsupportedMediaPolicy
     warn?: (msg: string) => void
   }) => Promise<AnthropicToolResultBlockParam>
@@ -259,6 +262,7 @@ export interface AnthropicMessagesHelpers extends ChatHelpersCommon {
     renderFirstPartyRetrievables: ChatHelpersCommon['renderFirstPartyRetrievables']
     renderThirdPartyPublicRetrievables: ChatHelpersCommon['renderThirdPartyPublicRetrievables']
     renderThirdPartyPrivateRetrievables: ChatHelpersCommon['renderThirdPartyPrivateRetrievables']
+    renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
     renderUntrustedContent: ChatHelpersCommon['renderUntrustedContent']
     warn?: (msg: string) => void
   }) => Promise<AnthropicTextBlockParam[]>
@@ -299,6 +303,7 @@ export interface AnthropicMessagesHelpers extends ChatHelpersCommon {
     renderFirstPartyRetrievables: ChatHelpersCommon['renderFirstPartyRetrievables']
     renderThirdPartyPublicRetrievables: ChatHelpersCommon['renderThirdPartyPublicRetrievables']
     renderThirdPartyPrivateRetrievables: ChatHelpersCommon['renderThirdPartyPrivateRetrievables']
+    renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
     renderAnthropicTimelineMessage: AnthropicMessagesHelpers['renderAnthropicTimelineMessage']
     renderThought: ChatHelpersCommon['renderThought']
     filterThoughts: ChatHelpersCommon['filterThoughts']

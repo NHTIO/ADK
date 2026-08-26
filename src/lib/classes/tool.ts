@@ -5,8 +5,8 @@ import { isInstanceOf, isError } from '../utils/guards'
 import { canonicalStringify } from '../utils/canonical_json'
 import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import { validator, encode as encodeSchema, decode as decodeSchema } from '@nhtio/validation'
+import { artifactConstructorResolverSchema } from '../contracts/spooled_artifact_constructor'
 import { validateOrThrow, asyncValidateOrThrow, ValidationException } from '../utils/validation'
-import { implementsSpooledArtifactConstructor } from '../contracts/spooled_artifact_constructor'
 import {
   E_INVALID_INITIAL_TOOL_VALUE,
   E_INVALID_TOOL_ARGS,
@@ -170,24 +170,7 @@ const rawToolSchema = validator.object<RawTool>({
     })
     .required(),
   handler: validator.function().required(),
-  artifactConstructor: validator
-    .any()
-    .custom((value, helpers) => {
-      if (typeof value !== 'function') return helpers.error('any.invalid')
-      // The resolver runs at validate time — well after the tool.ts ↔ spooled_artifact.ts ↔
-      // artifact_tool.ts module cycle has fully unwound — so invoking it is safe. Delegate the
-      // "is this a SpooledArtifact-shaped constructor?" check to the contract-level guard so
-      // there's one canonical duck-type test (mirrors `implementsSpoolReader`'s pattern).
-      let resolved: unknown
-      try {
-        resolved = (value as () => unknown)()
-      } catch {
-        return helpers.error('any.invalid')
-      }
-      if (implementsSpooledArtifactConstructor(resolved)) return value
-      return helpers.error('any.invalid')
-    })
-    .optional(),
+  artifactConstructor: artifactConstructorResolverSchema().optional(),
   // eslint-disable-next-line adk/require-validator-any-required -- map value type-arg: meta holds arbitrary values; disposition is set by .default({}) on the object
   meta: validator.object().pattern(validator.string(), validator.any()).default({}),
   ephemeral: validator.boolean().default(false),

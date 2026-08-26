@@ -95,6 +95,7 @@ const helpersSchema = validator
     renderStandingInstructions: helperSchema.optional(),
     renderMemories: helperSchema.optional(),
     renderRetrievables: helperSchema.optional(),
+    renderRetrievableHandleBody: helperSchema.optional(),
     renderRetrievableSafetyDirective: helperSchema.optional(),
     renderFirstPartyRetrievables: helperSchema.optional(),
     renderThirdPartyPublicRetrievables: helperSchema.optional(),

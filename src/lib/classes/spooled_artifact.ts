@@ -6,7 +6,11 @@ import { Tokenizable, TokenEncoding } from './tokenizable'
 import { implementsSpoolReader } from '../contracts/spool_reader'
 import { resolveSpoolReader } from '../contracts/reader_resolvers'
 import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
-import { E_NOT_A_SPOOL_READER, E_READER_NOT_DESCRIBABLE } from '../exceptions/runtime'
+import {
+  E_NOT_A_SPOOL_READER,
+  E_READER_NOT_DESCRIBABLE,
+  E_ARTIFACT_ID_COLLISION,
+} from '../exceptions/runtime'
 import type { ObjectSchema } from '@nhtio/validation'
 import type { AdkEncodableSnapshot } from './encodable'
 import type { SpoolReader } from '../contracts/spool_reader'
@@ -63,6 +67,57 @@ export interface ToolMethodDescriptor {
 }
 
 const noArgsSchema = validator.object<Record<string, never>>({})
+
+export function collectArtifactCompatibleIds(
+  ctx: {
+    turnToolCalls: Iterable<{
+      id: string
+      fromArtifactTool?: boolean
+      results: unknown
+    }>
+    turnRetrievables: Iterable<{
+      id: string
+      inline: boolean
+      content: unknown
+    }>
+  },
+  requires: SpooledArtifactConstructor
+): string[] {
+  const toolIds = [...ctx.turnToolCalls]
+    .filter((tc) => !tc.fromArtifactTool && isInstanceOf(tc.results, requires.name, requires))
+    .map((tc) => tc.id)
+  const retrievableIds = [...(ctx.turnRetrievables ?? [])]
+    .filter((r) => !r.inline && isInstanceOf(r.content, requires.name, requires))
+    .map((r) => r.id)
+  const collisions = retrievableIds.filter((id) => toolIds.includes(id))
+  if (collisions.length > 0) throw new E_ARTIFACT_ID_COLLISION([collisions[0]])
+  return [...new Set([...toolIds, ...retrievableIds])]
+}
+
+export function resolveArtifactById(
+  ctx: {
+    turnToolCalls: Iterable<{
+      id: string
+      fromArtifactTool?: boolean
+      results: unknown
+    }>
+    turnRetrievables: Iterable<{
+      id: string
+      inline: boolean
+      content: unknown
+    }>
+  },
+  id: string,
+  requires: SpooledArtifactConstructor
+): { artifact: SpooledArtifact; source: 'toolCall' | 'retrievable' } | undefined {
+  const tc = [...ctx.turnToolCalls].find((t) => t.id === id && !t.fromArtifactTool)
+  if (tc && isInstanceOf(tc.results, requires.name, requires))
+    return { artifact: tc.results, source: 'toolCall' }
+  const r = [...(ctx.turnRetrievables ?? [])].find((v) => v.id === id && !v.inline)
+  if (r && isInstanceOf(r.content, requires.name, requires))
+    return { artifact: r.content, source: 'retrievable' }
+  return undefined
+}
 
 /**
  * Default serialiser for {@link @nhtio/adk!ArtifactTool} handler return values when a descriptor does not
@@ -195,6 +250,7 @@ export class SpooledArtifact {
   public static toolMethods: ReadonlyArray<ToolMethodDescriptor> = baseToolMethods
 
   #reader: SpoolReader
+  #sizeHints: { byteLength: number; lineCount: number } | undefined
 
   /**
    * @param reader - The backing store to read from.
@@ -427,7 +483,26 @@ export class SpooledArtifact {
    * @returns The byte length as reported by the {@link @nhtio/adk!SpoolReader}.
    */
   async byteLength(): Promise<number> {
-    return this.#reader.byteLength()
+    return this.#sizeHints?.byteLength ?? this.#reader.byteLength()
+  }
+
+  /**
+   * Cache producer-computed size metadata for synchronous handle estimation.
+   *
+   * @param hints - The byte length and line count of the backing content.
+   * @internal
+   */
+  _setSizeHints(hints: { byteLength: number; lineCount: number }): void {
+    this.#sizeHints = hints
+  }
+
+  /**
+   * Returns whether producer-computed size metadata is available.
+   *
+   * @returns `true` when {@link SpooledArtifact._setSizeHints} has populated the cache.
+   */
+  hasSizeHints(): boolean {
+    return this.#sizeHints !== undefined
   }
 
   /**
@@ -436,7 +511,70 @@ export class SpooledArtifact {
    * @returns The line count as reported by the {@link @nhtio/adk!SpoolReader}.
    */
   async lineCount(): Promise<number> {
-    return this.#reader.lineCount()
+    return this.#sizeHints?.lineCount ?? this.#reader.lineCount()
+  }
+
+  /**
+   * Estimates tokens for the exact handle-body metadata rendered for this artifact.
+   *
+   * The fallback renderer is an interim core-safe implementation. Its output is deliberately
+   * specified here for fan-in parity: the lines are the fixed prose and metadata strings below,
+   * with one `\n` separator, and method entries formatted as `- name — description` (or `- name`).
+   * The canonical renderer in `chat_common` should eventually delegate to this builder rather than
+   * maintain a second copy.
+   *
+   * @param callId - The turn-local artifact identifier.
+   * @param encoding - The token encoding used for estimation.
+   * @param renderer - Optional renderer overriding the interim default.
+   * @returns A synchronous token estimate.
+   */
+  estimateHandleTokens(
+    callId: string,
+    encoding: TokenEncoding,
+    renderer?: (input: {
+      callId: string
+      artifact: unknown
+      byteLength: number
+      lineCount: number
+      estimatedTokens?: number
+      encoding?: string
+    }) => string
+  ): number {
+    if (!this.#sizeHints)
+      throw new Error('Cannot estimate artifact handle tokens without size hints')
+    const render =
+      renderer ??
+      ((input) => {
+        const ctor = (
+          input.artifact as {
+            constructor?: {
+              name?: string
+              toolMethods?: ReadonlyArray<{
+                name: string
+                description?: string
+              }>
+            }
+          }
+        ).constructor
+        const methods = ctor?.toolMethods ?? []
+        return [
+          'This tool returned a large artifact that was not inlined to preserve context budget.',
+          '',
+          'Artifact metadata:',
+          `- callId: ${input.callId}`,
+          `- kind: ${ctor?.name ?? 'SpooledArtifact'}`,
+          `- byteLength: ${input.byteLength}`,
+          `- lineCount: ${input.lineCount}`,
+          '',
+          `To read this artifact in this turn, call one of the following tools with`,
+          `callId=${input.callId}:`,
+          ...methods.map((m) => (m.description ? `- ${m.name} — ${m.description}` : `- ${m.name}`)),
+          '',
+          `The artifact persists in this turn's context — multiple queries against the same callId are allowed and efficient. Do not assume the body has been inlined anywhere else.`,
+        ].join('\n')
+      })
+    const text = render({ callId, artifact: this, ...this.#sizeHints })
+    return Tokenizable.estimateTokens(text, encoding)
   }
 
   /**
@@ -539,10 +677,7 @@ export class SpooledArtifact {
    */
   public static forgeTools(ctx: DispatchContext): ToolRegistry {
     const requires: SpooledArtifactConstructor = SpooledArtifact
-    const calls = [...ctx.turnToolCalls]
-    const compatibleIds = calls
-      .filter((tc) => !tc.fromArtifactTool && isInstanceOf(tc.results, requires.name, requires))
-      .map((tc) => tc.id)
+    const compatibleIds = collectArtifactCompatibleIds(ctx, requires)
     if (compatibleIds.length === 0) return new ToolRegistry([])
 
     const tools: ArtifactTool[] = []
@@ -567,14 +702,9 @@ export class SpooledArtifact {
         onCollision: 'replace',
         handler: async (rawArgs, ctxInner) => {
           const args = rawArgs as Record<string, unknown> & { callId: string }
-          const tc = [...ctxInner.turnToolCalls].find((t) => t.id === args.callId)
-          if (!tc) {
-            return `Error: no tool call with id ${args.callId} in this turn`
-          }
-          const artifact = tc.results
-          if (!isInstanceOf(artifact, requires.name, requires)) {
-            return `Error: tool call ${args.callId} results are not a ${requires.name} instance`
-          }
+          const resolved = resolveArtifactById(ctxInner, args.callId, requires)
+          if (!resolved) return `Error: no artifact with id ${args.callId} in this turn`
+          const artifact = resolved.artifact
           const methodArgs: unknown[] = []
           if (descriptor.method === 'grep') {
             const pattern = args.pattern as string

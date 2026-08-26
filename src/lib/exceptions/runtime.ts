@@ -150,6 +150,17 @@ export const E_INVALID_INITIAL_MEMORY_VALUE = createException(
 )
 
 /**
+ * Thrown when a tool call and retrievable eligible for artifact forging share an id.
+ */
+export const E_ARTIFACT_ID_COLLISION = createException<[string]>(
+  'E_ARTIFACT_ID_COLLISION',
+  'Artifact id collision: the tool call and retrievable with id "%s" both identify eligible artifacts.',
+  'E_ARTIFACT_ID_COLLISION',
+  409,
+  true
+)
+
+/**
  * Thrown when a {@link @nhtio/adk!Retrievable} is initialised with a value that fails schema validation.
  *
  * @remarks

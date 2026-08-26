@@ -80,6 +80,8 @@ export {
   defaultRenderThirdPartyPrivateRetrievables,
   renderRetrievables,
   defaultRenderRetrievables,
+  renderRetrievableHandleBody,
+  defaultRenderRetrievableHandleBody,
   renderThought,
   defaultRenderThought,
   filterThoughts,
@@ -556,6 +558,7 @@ export const buildOllamaHistory = async (input: {
   renderFirstPartyRetrievables: ChatHelpersCommon['renderFirstPartyRetrievables']
   renderThirdPartyPublicRetrievables: ChatHelpersCommon['renderThirdPartyPublicRetrievables']
   renderThirdPartyPrivateRetrievables: ChatHelpersCommon['renderThirdPartyPrivateRetrievables']
+  renderRetrievableHandleBody?: ChatHelpersCommon['renderRetrievableHandleBody']
   renderOllamaTimelineMessage: OllamaHelpers['renderOllamaTimelineMessage']
   renderThought: ChatHelpersCommon['renderThought']
   filterThoughts: ChatHelpersCommon['filterThoughts']
@@ -585,6 +588,7 @@ export const buildOllamaHistory = async (input: {
     renderFirstPartyRetrievables: input.renderFirstPartyRetrievables,
     renderThirdPartyPublicRetrievables: input.renderThirdPartyPublicRetrievables,
     renderThirdPartyPrivateRetrievables: input.renderThirdPartyPrivateRetrievables,
+    renderRetrievableHandleBody: input.renderRetrievableHandleBody,
     renderUntrustedContent: input.renderUntrustedContent,
   })
   if (leadingSystem.length > 0) {

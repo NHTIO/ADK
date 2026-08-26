@@ -1,12 +1,17 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { promisify } from '../../_fixtures/promisified'
 import { Tokenizable } from '../../../src/lib/classes/tokenizable'
+import { Retrievable } from '../../../src/lib/classes/retrievable'
 import { ArtifactTool } from '../../../src/lib/classes/artifact_tool'
 import { makeDispatchContext } from '../../_fixtures/dispatch_context'
 import { SpooledArtifact } from '../../../src/lib/classes/spooled_artifact'
 import { InMemorySpoolReader } from '../../../src/batteries/storage/in_memory'
 import { makeSpooledArtifact, makeToolCall } from '../../_fixtures/primitives'
-import { E_NOT_A_SPOOL_READER, E_INVALID_TOOL_ARGS } from '../../../src/lib/exceptions/runtime'
+import {
+  E_NOT_A_SPOOL_READER,
+  E_INVALID_TOOL_ARGS,
+  E_ARTIFACT_ID_COLLISION,
+} from '../../../src/lib/exceptions/runtime'
 
 const SAMPLE = ['alpha', 'beta', 'gamma', 'delta', 'epsilon'].join('\n')
 
@@ -33,6 +38,50 @@ describe('SpooledArtifact', () => {
   })
 
   describe('byteLength / lineCount', () => {
+    it('caches size hints and does not read the reader after caching', async () => {
+      const reader = new InMemorySpoolReader(SAMPLE)
+      const byteLength = vi.spyOn(reader, 'byteLength')
+      const lineCount = vi.spyOn(reader, 'lineCount')
+      const a = new SpooledArtifact(reader)
+      expect(a.hasSizeHints()).toBe(false)
+      expect(await a.byteLength()).toBe(SAMPLE.length)
+      expect(await a.lineCount()).toBe(5)
+      a._setSizeHints({ byteLength: 99, lineCount: 7 })
+      expect(a.hasSizeHints()).toBe(true)
+      expect(await a.byteLength()).toBe(99)
+      expect(await a.lineCount()).toBe(7)
+      expect(byteLength).toHaveBeenCalledTimes(1)
+      expect(lineCount).toHaveBeenCalledTimes(1)
+    })
+
+    it('estimateHandleTokens uses the default and explicit renderers', () => {
+      const a = new SpooledArtifact(new InMemorySpoolReader(SAMPLE))
+      a._setSizeHints({ byteLength: SAMPLE.length, lineCount: 5 })
+      const defaultText = [
+        'This tool returned a large artifact that was not inlined to preserve context budget.',
+        '',
+        'Artifact metadata:',
+        '- callId: handle-1',
+        '- kind: SpooledArtifact',
+        `- byteLength: ${SAMPLE.length}`,
+        '- lineCount: 5',
+        '',
+        'To read this artifact in this turn, call one of the following tools with',
+        'callId=handle-1:',
+        ...SpooledArtifact.toolMethods.map((m) => `- ${m.name} — ${m.description}`),
+        '',
+        "The artifact persists in this turn's context — multiple queries against the same callId are allowed and efficient. Do not assume the body has been inlined anywhere else.",
+      ].join('\n')
+      expect(a.estimateHandleTokens('handle-1', 'cl100k_base')).toBe(
+        Tokenizable.estimateTokens(defaultText, 'cl100k_base')
+      )
+      const custom = vi.fn(() => 'custom renderer text')
+      expect(a.estimateHandleTokens('handle-1', 'cl100k_base', custom)).toBe(
+        Tokenizable.estimateTokens('custom renderer text', 'cl100k_base')
+      )
+      expect(custom).toHaveBeenCalled()
+    })
+
     it('reports byteLength from the reader', async () => {
       const a = new SpooledArtifact(new InMemorySpoolReader(SAMPLE))
       expect(await a.byteLength()).toBe(SAMPLE.length)
@@ -204,6 +253,55 @@ describe('SpooledArtifact', () => {
         expect(tool.ephemeral).toBe(true)
         expect(tool.onCollision).toBe('replace')
       }
+    })
+
+    it('includes retrievable-backed artifacts and excludes inline retrievables', async () => {
+      const artifact = new SpooledArtifact(new InMemorySpoolReader(SAMPLE))
+      const retrievable = new Retrievable({
+        ...{
+          id: 'ret-1',
+          content: artifact,
+          trustTier: 'first-party',
+          createdAt: '2024-01-01',
+          updatedAt: '2024-01-01',
+        },
+        inline: false,
+      })
+      const inline = new Retrievable({
+        ...{
+          id: 'ret-inline',
+          content: artifact,
+          trustTier: 'first-party',
+          createdAt: '2024-01-01',
+          updatedAt: '2024-01-01',
+        },
+        inline: true,
+      })
+      const ctx = makeDispatchContext({ retrievables: [retrievable, inline] })
+      const registry = SpooledArtifact.forgeTools(ctx)
+      const dump = JSON.stringify(registry.get('artifact_head')!.describe().inputSchema)
+      expect(dump).toContain('ret-1')
+      expect(dump).not.toContain('ret-inline')
+      expect(await registry.get('artifact_head')!.executor(ctx)({ callId: 'ret-1', n: 1 })).toBe(
+        'alpha'
+      )
+    })
+
+    it('throws E_ARTIFACT_ID_COLLISION for a tool call and retrievable sharing an id', async () => {
+      const artifact = new SpooledArtifact(new InMemorySpoolReader(SAMPLE))
+      const ctx = makeDispatchContext({
+        toolCalls: [makeToolCall(artifact, { id: 'same-id' })],
+        retrievables: [
+          new Retrievable({
+            id: 'same-id',
+            content: artifact,
+            trustTier: 'first-party',
+            createdAt: '2024-01-01',
+            updatedAt: '2024-01-01',
+          }),
+        ],
+      })
+      expect(() => SpooledArtifact.forgeTools(ctx)).toThrow(E_ARTIFACT_ID_COLLISION)
     })
 
     it('includes the base seven artifact_* tools when a base artifact is present', async () => {

@@ -79,6 +79,7 @@ import {
   defaultRenderStandingInstructions,
   defaultRenderMemories,
   defaultRenderRetrievables,
+  defaultRenderRetrievableHandleBody,
   defaultRenderRetrievableSafetyDirective,
   defaultRenderFirstPartyRetrievables,
   defaultRenderThirdPartyPublicRetrievables,
@@ -188,6 +189,8 @@ const resolveHelpers = (
     renderStandingInstructions: src.renderStandingInstructions ?? defaultRenderStandingInstructions,
     renderMemories: src.renderMemories ?? defaultRenderMemories,
     renderRetrievables: src.renderRetrievables ?? defaultRenderRetrievables,
+    renderRetrievableHandleBody:
+      src.renderRetrievableHandleBody ?? defaultRenderRetrievableHandleBody,
     renderRetrievableSafetyDirective:
       src.renderRetrievableSafetyDirective ?? defaultRenderRetrievableSafetyDirective,
     renderFirstPartyRetrievables:
@@ -469,7 +472,14 @@ export class WebLLMChatCompletionsAdapter {
         }
         let retTokens = 0
         for (const r of ctx.turnRetrievables) {
-          retTokens += await estimateTokensOf(r.content, encoding)
+          retTokens +=
+            !r.inline && SpooledArtifact.isSpooledArtifact(r.content) && r.content.hasSizeHints()
+              ? r.content.estimateHandleTokens(
+                  r.id,
+                  encoding,
+                  resolvedHelpers.renderRetrievableHandleBody
+                )
+              : await estimateTokensOf(r.content, encoding)
         }
         let tlTokens = 0
         for (const msg of ctx.turnMessages) {
@@ -612,6 +622,7 @@ export class WebLLMChatCompletionsAdapter {
           renderStandingInstructions: resolvedHelpers.renderStandingInstructions,
           renderMemories: resolvedHelpers.renderMemories,
           renderRetrievables: resolvedHelpers.renderRetrievables,
+          renderRetrievableHandleBody: resolvedHelpers.renderRetrievableHandleBody,
           renderRetrievableSafetyDirective: resolvedHelpers.renderRetrievableSafetyDirective,
           renderFirstPartyRetrievables: resolvedHelpers.renderFirstPartyRetrievables,
           renderThirdPartyPublicRetrievables: resolvedHelpers.renderThirdPartyPublicRetrievables,

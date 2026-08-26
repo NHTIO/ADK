@@ -2,6 +2,7 @@ import { DateTime } from 'luxon'
 import { describe, expect, it } from 'vitest'
 import { ToolCall } from '../../../src/lib/classes/tool_call'
 import { DispatchRunner } from '../../../src/lib/dispatch_runner'
+import { Retrievable } from '../../../src/lib/classes/retrievable'
 import { SpooledArtifact } from '../../../src/lib/classes/spooled_artifact'
 import { InMemorySpoolStore } from '../../../src/batteries/storage/in_memory'
 import type { RawDispatchContext } from '../../../src/lib/contracts/dispatch_context'
@@ -106,6 +107,24 @@ describe('DispatchRunner — core forges artifact-reader tools into ctx.tools be
       turnInputPipeline: [captureToolNamesInInputPipeline(seen)],
     })
     expect(seen[0]!.filter((n) => n.startsWith('artifact_'))).toEqual([])
+  })
+
+  it('forges readers discovered only through turnRetrievables', async () => {
+    const artifact = new SpooledArtifact(new InMemorySpoolStore().write('ret-only', 'a\\nb'))
+    const retrievable = new Retrievable({
+      id: 'ret-only',
+      content: artifact,
+      trustTier: 'first-party',
+      createdAt: '2026-01-01',
+      updatedAt: '2026-01-01',
+    })
+    const seen: string[][] = []
+    await DispatchRunner.dispatch({
+      raw: makeRaw({ retrievables: [retrievable] }),
+      executor: noopExecutor,
+      turnInputPipeline: [captureToolNamesInInputPipeline(seen)],
+    })
+    expect(seen[0]).toContain('artifact_head')
   })
 
   it('does not accumulate forged readers across iterations (prune-then-reforge is idempotent)', async () => {

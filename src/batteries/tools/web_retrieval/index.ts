@@ -62,6 +62,8 @@ export interface ToRetrievableOptions {
   idPrefix?: string
   /** Optional reader-backed-artifact hook for large content. See {@link SpoolHook}. */
   spool?: SpoolHook
+  /** Whether spooled content should be materialized inline instead of rendered as a handle. */
+  inline?: boolean
 }
 
 /**
@@ -164,6 +166,7 @@ export const searxngResultsToRetrievables = (
       kind,
       createdAt: created,
       updatedAt: created,
+      inline: opts.inline,
     }
     if (source) raw.source = source
     const score = clampScore(r.score)
@@ -231,6 +234,8 @@ export const scrapperArticleToRetrievable = (
   const raw: RawRetrievable = {
     id,
     content,
+    inline: opts.inline,
+    artifactConstructor: recommended,
     trustTier,
     kind,
     createdAt: created,
@@ -261,16 +266,19 @@ export interface ScrapperLinksLike {
  * Convert a Scrapper normalised links payload into one {@link @nhtio/adk/common!RawRetrievable} per link.
  *
  * @remarks
- * Each link's `text` becomes the (inline) content and its `url` the `source`. Link text is short,
- * so no spooling is applied.
+ * Each link's `text` becomes the content and its `url` the `source`. Spooling is opt-in, exactly
+ * as for the other web converters; link records default to `inline: true` so short text remains
+ * inline even when a storage layer auto-spools it.
  *
  * @param payload - The Scrapper normalised links payload (`{ links: [{ url, text }] }`).
- * @param opts - Trust tier, kind, id prefix.
+ * @param opts - Trust tier, kind, id prefix, optional spool hook, and inline preference.
+ * @param recommend - Optional artifact-resolver recommendations.
  * @returns One `RawRetrievable` per link.
  */
 export const scrapperLinksToRetrievables = (
   payload: ScrapperLinksLike,
-  opts: ToRetrievableOptions = {}
+  opts: ToRetrievableOptions = {},
+  recommend: ArtifactRecommendations = {}
 ): RawRetrievable[] => {
   const trustTier: RetrievableTrustTier = opts.trustTier ?? 'third-party-public'
   const kind = opts.kind ?? 'web-link'
@@ -279,9 +287,13 @@ export const scrapperLinksToRetrievables = (
   return links.map((l, i) => {
     const source = l.url ?? ''
     const id = stableId(opts.idPrefix, source || `${kind}:${i}`)
+    const text = l.text ?? source
+    const recommended = recommend.text ?? recommend.markdown ?? recommend.json
+    const content = recommended ? resolveContent(id, text, opts, recommended) : text
     const raw: RawRetrievable = {
       id,
-      content: l.text ?? source,
+      content,
+      inline: opts.inline ?? true,
       trustTier,
       kind,
       createdAt: created,
@@ -296,8 +308,8 @@ export const scrapperLinksToRetrievables = (
 
 /** The minimal context surface {@link storeRetrievables} needs. */
 export interface RetrievableStoreCtx {
-  /** Persist a single `Retrievable` into the turn (a `DispatchContext` method, or a stub). */
-  storeRetrievable: (v: Retrievable) => unknown | Promise<unknown>
+  /** Persist a single `Retrievable` and return the tracked (possibly auto-spooled) instance. */
+  storeRetrievable: (v: Retrievable) => Retrievable | Promise<Retrievable>
 }
 
 /**
@@ -353,8 +365,8 @@ export const storeRetrievables = async (
   const out: Retrievable[] = []
   for (const raw of raws) {
     const record = new Ctor(raw)
-    await ctx.storeRetrievable(record)
-    out.push(record)
+    const stored = await ctx.storeRetrievable(record)
+    out.push(stored)
   }
   return out
 }

@@ -1,7 +1,17 @@
 import { DateTime } from 'luxon'
 import { validator } from '@nhtio/validation'
 import { describe, expect, it, vi } from 'vitest'
-import { Message, Thought, Tool, ToolCall, ToolRegistry, Tokenizable } from '@nhtio/adk/common'
+import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
+import {
+  Message,
+  Thought,
+  Tool,
+  ToolCall,
+  ToolRegistry,
+  Tokenizable,
+  Retrievable,
+  SpooledArtifact,
+} from '@nhtio/adk/common'
 import {
   buildAnthropicMessagesHistory,
   fingerprintAnthropicMessagesPrefix,
@@ -93,18 +103,25 @@ const buildHistory = async (input: {
   messages?: Message[]
   thoughts?: Thought[]
   toolCalls?: ToolCall[]
+  retrievables?: Retrievable[]
   cacheBreakpoints?: 'auto' | 'system-only' | 'off'
   cacheTtl?: '5m' | '1h'
   bucketOrder?: Array<'standingInstructions' | 'memories' | 'retrievables' | 'timeline'>
   tools?: ToolRegistry
   warn?: (msg: string) => void
+  renderRetrievableHandleBody?: (input: {
+    callId: string
+    artifact: unknown
+    byteLength: number
+    lineCount: number
+  }) => string
 }) =>
   buildAnthropicMessagesHistory({
     model: 'claude-opus-5',
     systemPrompt: new Tokenizable('System prompt'),
     standingInstructions: new Set([new Tokenizable('Stand here')]),
     memories: new Set(),
-    retrievables: new Set(),
+    retrievables: new Set(input.retrievables ?? []),
     messages: new Set(input.messages ?? []),
     thoughts: new Set(input.thoughts ?? []),
     toolCalls: new Set(input.toolCalls ?? []),
@@ -138,6 +155,7 @@ const buildHistory = async (input: {
     renderAnthropicThinkingBlocks: defaultRenderAnthropicThinkingBlocks,
     renderUntrustedContent: defaultRenderUntrustedContent,
     renderTrustedContent: defaultRenderTrustedContent,
+    renderRetrievableHandleBody: input.renderRetrievableHandleBody,
     warn: input.warn,
   })
 
@@ -201,6 +219,30 @@ describe('Anthropic helpers — prompt caching + history assembly', () => {
     expect(finalUserTurn.content[0]?.cache_control).toEqual({
       type: 'ephemeral',
     })
+  })
+
+  it('forwards the handle renderer on both segmented and cacheBreakpoints=off paths', async () => {
+    const store = new InMemorySpoolStore()
+    const artifact = new SpooledArtifact(store.write('ret', 'anthropic secret'))
+    const r = new Retrievable({
+      id: 'ret',
+      content: artifact,
+      trustTier: 'first-party',
+      inline: false,
+      createdAt: dt('2026-01-01T00:00:00Z'),
+      updatedAt: dt('2026-01-01T00:00:00Z'),
+    })
+    const handle = vi.fn(() => 'HANDLE_ONLY')
+    for (const cacheBreakpoints of ['auto', 'off'] as const) {
+      const built = await buildHistory({
+        cacheBreakpoints,
+        retrievables: [r],
+        renderRetrievableHandleBody: handle,
+      })
+      expect(JSON.stringify(built.system)).toContain('HANDLE_ONLY')
+      expect(JSON.stringify(built.system)).not.toContain('anthropic secret')
+    }
+    expect(handle).toHaveBeenCalled()
   })
 
   it('suppresses message-side cache controls for off/system-only and warns instead of emitting a fifth breakpoint', async () => {

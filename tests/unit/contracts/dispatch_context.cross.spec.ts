@@ -316,9 +316,10 @@ describe('DispatchContext mutate* replaces the stale primitive by id', () => {
       createdAt: now.toISO() as string,
       updatedAt: now.toISO() as string,
     })
-    await ctx.mutateRetrievable(updated)
+    const stored = await ctx.mutateRetrievable(updated)
     expect(ctx.turnRetrievables.size).toBe(1)
-    expect([...ctx.turnRetrievables][0]).toBe(updated)
+    expect([...ctx.turnRetrievables][0]).toBe(stored)
+    expect(stored.content).not.toBe(updated.content)
   })
 
   it('mutateMemory replaces the prior instance sharing the same id (via fetchMemories seeding)', async () => {
