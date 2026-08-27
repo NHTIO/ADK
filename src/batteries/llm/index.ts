@@ -140,3 +140,43 @@ export type {
   ReasoningParserName,
   ReasoningParserFn,
 } from './transformers_js'
+
+export { ClaudeCodeCliAdapter } from './claude_code_cli'
+export { claudeCodeCliOptionsSchema } from './claude_code_cli'
+export { validateOptions as validateClaudeCodeCliOptions } from './claude_code_cli'
+export {
+  E_INVALID_CLAUDE_CODE_CLI_OPTIONS,
+  E_CLAUDE_CODE_CLI_BINARY_NOT_FOUND,
+  E_CLAUDE_CODE_CLI_WRAPPER_SPAWN_ERROR,
+  E_CLAUDE_CODE_CLI_WRAPPER_CRASHED,
+  E_CLAUDE_CODE_CLI_PROCESS_EXITED_NONZERO,
+  E_CLAUDE_CODE_CLI_STREAM_ERROR,
+  E_CLAUDE_CODE_CLI_STREAM_STALLED,
+  E_CLAUDE_CODE_CLI_STARTUP_TIMEOUT,
+  E_CLAUDE_CODE_CLI_MCP_BRIDGE_STARTUP_FAILED,
+  E_CLAUDE_CODE_CLI_TURN_FAILED,
+  E_CLAUDE_CODE_CLI_UNSUPPORTED_MEDIA_MODALITY,
+} from './claude_code_cli'
+export type {
+  ClaudeCodeCliHelpers,
+  ClaudeCodeCliAdapterOptions,
+  ClaudeCodeCliExtraArg,
+  WrapperBridgedTool,
+  WrapperAuth,
+  WrapperRunCommand,
+  WrapperToolResultContentBlock,
+  WrapperToolCallResponseCommand,
+  WrapperShutdownCommand,
+  WrapperCommand,
+  WrapperReadyEvent,
+  WrapperInitEvent,
+  WrapperMessageDeltaEvent,
+  WrapperThoughtDeltaEvent,
+  WrapperToolCallRequestEvent,
+  WrapperRetryEvent,
+  WrapperResultEvent,
+  WrapperErrorEvent,
+  WrapperLogEvent,
+  WrapperShutdownCompleteEvent,
+  WrapperEvent,
+} from './claude_code_cli'

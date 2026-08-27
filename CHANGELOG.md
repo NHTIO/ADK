@@ -15,6 +15,12 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-08-27
+
+### Added
+
+- New `claude_code_cli` LLM battery: a CLI-harness adapter wrapping the Claude Code CLI binary as a `DispatchExecutorFn` destination. Every dispatch iteration is stateless — the full history renders into one `-p` prompt and spawns a fresh, permission-bypassed `claude --bare` process with its own built-in tools fully disabled (`--tools ""`). Real ADK tools are bridged into the CLI's tool loop over a local MCP server; the bridge itself (not `--allowedTools`) enforces which bridged tools are callable, since `--dangerously-skip-permissions` removes the permission engine an allow-rule would otherwise feed. Supports both `apiKey`/`authToken` auth (mutually exclusive), a capability-probed `maxTurns` for forward compatibility with CLIs that support it, and CLI-native `maxBudgetUsd` safety caps in place of client-side context-window accounting. POSIX-only in v1 (`darwin`/`linux`) — reliable process-group cleanup has no Windows equivalent. This is the first of a new "CLI harness battery" family; the wrapper-process/wire-protocol pattern is documented in `CONTRIBUTING.md` as the template for future Codex CLI / Pi agent batteries.
+
 ## 2026-08-26
 
 ### Changed

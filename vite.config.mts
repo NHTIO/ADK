@@ -204,6 +204,7 @@ export default defineConfig(async ({ mode }) => {
         entry: {
           ...entries,
           'adk-mcp': resolve(SRC_DIR, 'mcp/server.ts'),
+          'claude-code-cli-wrapper': resolve(SRC_DIR, 'batteries/llm/claude_code_cli/wrapper.ts'),
         },
         name: LIB_NAME,
         formats: ['es', 'cjs'],

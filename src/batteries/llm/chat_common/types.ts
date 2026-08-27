@@ -577,6 +577,13 @@ export interface ChatHelpersCommon {
   /** Assembles the system-prompt message from its constituent buckets in {@link ChatCompletionsBucketOrder}. */
   renderChatCompletionsSystemPrompt: (input: {
     systemPrompt: Tokenizable
+    /**
+     * Live dispatch context for resolving a DYNAMIC {@link Tokenizable} `systemPrompt` via
+     * `.render(ctx)`. Optional; a static `systemPrompt` ignores it. The real implementation
+     * (`chat_common/helpers.ts`) already accepts and forwards this — declared here so the type
+     * matches what the function actually does.
+     */
+    renderCtx?: unknown
     standingInstructions: Iterable<Tokenizable>
     memories: Iterable<Memory>
     retrievables: Iterable<Retrievable>
