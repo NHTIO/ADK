@@ -24,6 +24,7 @@
 
 import { default as noModelInToolHandler } from './rules/no_model_in_tool_handler'
 import { default as requireValidatorAnyRequired } from './rules/require_validator_any_required'
+import { default as requireStringEmptyDisposition } from './rules/require_string_empty_disposition'
 import { default as thoughtPayloadRequiresReplayTag } from './rules/thought_payload_requires_replay_tag'
 import { default as tokenEncodingRequiresContextWindow } from './rules/token_encoding_requires_context_window'
 import { default as artifactToolForbidsArtifactConstructor } from './rules/artifact_tool_forbids_artifact_constructor'
@@ -35,6 +36,7 @@ import type { FlatConfig } from '@typescript-eslint/utils/ts-eslint'
  */
 export const rules = {
   'require-validator-any-required': requireValidatorAnyRequired,
+  'require-string-empty-disposition': requireStringEmptyDisposition,
   'no-model-in-tool-handler': noModelInToolHandler,
   'thought-payload-requires-replay-tag': thoughtPayloadRequiresReplayTag,
   'token-encoding-requires-context-window': tokenEncodingRequiresContextWindow,

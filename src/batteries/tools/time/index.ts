@@ -27,10 +27,12 @@ export const getCurrentTimeTool = new Tool({
     timezone: validator
       .string()
       .default('UTC')
-      .description('IANA timezone (optional, defaults UTC)'),
+      .allow('')
+      .description('IANA timezone. Omit or send an empty string to use UTC.'),
   }),
   handler: async (args) => {
-    const { timezone } = args as { timezone: string }
+    const { timezone: rawTimezone } = args as { timezone: string }
+    const timezone = rawTimezone || 'UTC'
     if (!IANAZone.isValidZone(timezone)) {
       return `Error: Invalid timezone "${timezone}".`
     }
@@ -55,18 +57,20 @@ export const convertTimeTool = new Tool({
     target_timezone: validator
       .string()
       .default('UTC')
-      .description('Target IANA timezone (optional, defaults UTC)'),
+      .allow('')
+      .description('Target IANA timezone. Omit or send an empty string to use UTC.'),
   }),
   handler: async (args) => {
     const {
       source_timezone: sourceTimezone,
       time,
-      target_timezone: targetTimezone,
+      target_timezone: rawTargetTimezone,
     } = args as {
       source_timezone: string
       time: string
       target_timezone: string
     }
+    const targetTimezone = rawTargetTimezone || 'UTC'
 
     if (!IANAZone.isValidZone(sourceTimezone)) {
       return `Error: Invalid source timezone "${sourceTimezone}".`

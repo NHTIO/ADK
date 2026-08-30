@@ -181,6 +181,61 @@ describe('createScrapperArticleTool — per-parameter disposition', () => {
   })
 })
 
+describe('createScrapperArticleTool — empty-string optional params (GitLab #14)', () => {
+  beforeEach(() => stubFetch(ARTICLE_BODY))
+
+  it.each(['device', 'user_agent', 'extra_http_headers', 'proxy_server'] as const)(
+    '%s: "" passes schema validation and is never forwarded on the wire',
+    async (key) => {
+      const fetchFn = stubFetch(ARTICLE_BODY)
+      const tool = await createScrapperArticleTool({ instanceUrl: 'https://s.example' })
+      await exec(tool, { url: 'https://example.com', [key]: '' })
+      const u = new URL(fetchFn.mock.calls[0][0] as URL)
+      const wireKeys: Record<string, string> = {
+        device: 'device',
+        user_agent: 'user-agent',
+        extra_http_headers: 'extra-http-headers',
+        proxy_server: 'proxy-server',
+      }
+      expect(u.searchParams.has(wireKeys[key])).toBe(false)
+    }
+  )
+
+  it('wait_until still rejects "" (enum spec regression guard)', async () => {
+    const tool = await createScrapperArticleTool({ instanceUrl: 'https://s.example' })
+    await expect(exec(tool, { url: 'https://example.com', wait_until: '' })).rejects.toBeInstanceOf(
+      E_INVALID_TOOL_ARGS
+    )
+  })
+
+  it('a fixed-pinned "" value is never forwarded on the wire', async () => {
+    const fetchFn = stubFetch(ARTICLE_BODY)
+    const tool = await createScrapperArticleTool({
+      instanceUrl: 'https://s.example',
+      fixed: { device: '' },
+    })
+    await exec(tool, { url: 'https://example.com' })
+    expect(new URL(fetchFn.mock.calls[0][0] as URL).searchParams.has('device')).toBe(false)
+  })
+
+  it('the original issue repro — all four params set to "" in one call — no longer throws', async () => {
+    const fetchFn = stubFetch(ARTICLE_BODY)
+    const tool = await createScrapperArticleTool({ instanceUrl: 'https://s.example' })
+    await exec(tool, {
+      url: 'https://example.com',
+      device: '',
+      user_agent: '',
+      extra_http_headers: '',
+      proxy_server: '',
+    })
+    const u = new URL(fetchFn.mock.calls[0][0] as URL)
+    expect(u.searchParams.has('device')).toBe(false)
+    expect(u.searchParams.has('user-agent')).toBe(false)
+    expect(u.searchParams.has('extra-http-headers')).toBe(false)
+    expect(u.searchParams.has('proxy-server')).toBe(false)
+  })
+})
+
 describe('createScrapperArticleTool — output shapes', () => {
   beforeEach(() => stubFetch(ARTICLE_BODY))
 

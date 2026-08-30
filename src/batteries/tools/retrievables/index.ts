@@ -104,11 +104,17 @@ export const storeRetrievableTool = new Tool({
     source: validator
       .string()
       .optional()
-      .description('Optional provenance string: URL, document path, KB id, etc.'),
+      .allow('')
+      .description(
+        'Optional provenance string: URL, document path, KB id, etc. An empty string is treated as not provided.'
+      ),
     kind: validator
       .string()
       .optional()
-      .description("Optional semantic label: 'policy', 'reference', 'web-page', 'pdf', etc."),
+      .allow('')
+      .description(
+        "Optional semantic label: 'policy', 'reference', 'web-page', 'pdf', etc. An empty string is treated as not provided."
+      ),
     score: validator
       .number()
       .min(0)
@@ -118,7 +124,8 @@ export const storeRetrievableTool = new Tool({
     id: validator
       .string()
       .optional()
-      .description('Optional stable id. Auto-generated when absent.'),
+      .allow('')
+      .description('Optional stable id. Auto-generated when absent or an empty string.'),
   }),
   artifactConstructor: () => SpooledJsonArtifact,
   handler: async (args, ctx) => {
@@ -133,11 +140,11 @@ export const storeRetrievableTool = new Tool({
     try {
       const now = DateTime.now()
       const retrievable = new Retrievable({
-        id: id ?? uuidv6(),
+        id: (id || undefined) ?? uuidv6(),
         content,
         trustTier,
-        source,
-        kind,
+        source: source || undefined,
+        kind: kind || undefined,
         score,
         createdAt: now,
         updatedAt: now,
@@ -169,14 +176,30 @@ export const updateRetrievableTool = new Tool({
     'Update an existing retrievable by id. Supply any subset of content / trustTier / source / kind / score — omitted fields retain their prior values. updatedAt is always refreshed.',
   inputSchema: validator.object({
     id: validator.string().required().description('Id of the retrievable to update.'),
-    content: validator.string().optional().description('Replacement content.'),
+    content: validator
+      .string()
+      .optional()
+      .allow('')
+      .description('Replacement content. Omit or send an empty string to leave it unchanged.'),
     trustTier: validator
       .string()
       .valid(...TRUST_TIERS)
       .optional()
       .description('Replacement trust tier.'),
-    source: validator.string().optional().description('Replacement provenance string.'),
-    kind: validator.string().optional().description('Replacement semantic label.'),
+    source: validator
+      .string()
+      .optional()
+      .allow('')
+      .description(
+        'Replacement provenance string. Omit or send an empty string to leave it unchanged.'
+      ),
+    kind: validator
+      .string()
+      .optional()
+      .allow('')
+      .description(
+        'Replacement semantic label. Omit or send an empty string to leave it unchanged.'
+      ),
     score: validator.number().min(0).max(1).optional().description('Replacement score in [0, 1].'),
   }),
   artifactConstructor: () => SpooledJsonArtifact,
@@ -197,10 +220,10 @@ export const updateRetrievableTool = new Tool({
       }
       const updated = new Retrievable({
         id: existing.id,
-        content: content ?? existing.content,
+        content: (content || undefined) ?? existing.content,
         trustTier: trustTier ?? existing.trustTier,
-        source: source ?? existing.source,
-        kind: kind ?? existing.kind,
+        source: (source || undefined) ?? existing.source,
+        kind: (kind || undefined) ?? existing.kind,
         score: score ?? existing.score,
         createdAt: existing.createdAt,
         updatedAt: DateTime.now(),

@@ -1,6 +1,10 @@
 import { DateTime } from 'luxon'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
-import { looksLikeSpooledArtifact } from '@nhtio/adk/batteries/llm/chat_common/helpers'
+// `chat_common/helpers` is deliberately NOT `@module`-tagged — it stays a private, inlined module,
+// so it is absent from the published package's `exports` map and importing it here breaks the smoke
+// checks, which install the built package rather than resolving source. Consume the identical
+// function through a battery barrel that re-exports it publicly instead.
+import { looksLikeSpooledArtifact } from '@nhtio/adk/batteries/llm/litert_lm'
 import {
   ArtifactTool,
   isInstanceOf,

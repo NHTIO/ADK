@@ -121,6 +121,34 @@ describe('storeRetrievableTool', () => {
     expect(createdAt >= before && createdAt <= after).toBe(true)
   })
 
+  it('auto-generates an id when an empty string is supplied instead of omitted', async () => {
+    const { ctx, state } = makeCtxStub()
+    const result = await storeRetrievableTool.executor(ctx)({
+      id: '',
+      content: 'doc body',
+      trustTier: 'first-party',
+    })
+    const parsed = JSON.parse(result as string)
+    expect(parsed.retrievable.id).not.toBe('')
+    expect(parsed.retrievable.id).toBeTruthy()
+    expect(state.stored[0].id).toBe(parsed.retrievable.id)
+  })
+
+  it("stores source/kind as undefined, not literal empty strings, when supplied as ''", async () => {
+    const { ctx, state } = makeCtxStub()
+    const result = await storeRetrievableTool.executor(ctx)({
+      content: 'doc body',
+      trustTier: 'first-party',
+      source: '',
+      kind: '',
+    })
+    const parsed = JSON.parse(result as string)
+    expect(parsed.retrievable.source).toBeUndefined()
+    expect(parsed.retrievable.kind).toBeUndefined()
+    expect(state.stored[0].source).toBeUndefined()
+    expect(state.stored[0].kind).toBeUndefined()
+  })
+
   it('accepts each of the three trust tiers', async () => {
     for (const tier of ['first-party', 'third-party-public', 'third-party-private'] as const) {
       const { ctx } = makeCtxStub()
@@ -198,6 +226,29 @@ describe('updateRetrievableTool', () => {
     expect(result).toMatch(/^Error: /)
     expect(result).toContain('unknown')
     expect(state.mutated).toHaveLength(0)
+  })
+
+  it('treats empty-string content/source/kind as "no change" and keeps existing values', async () => {
+    const initial = sampleRetrievable({
+      content: 'original body',
+      source: 'kb://original',
+      kind: 'policy',
+    })
+    const { ctx, state } = makeCtxStub([initial])
+    const result = await updateRetrievableTool.executor(ctx)({
+      id: 'ret-1',
+      content: '',
+      source: '',
+      kind: '',
+      score: 0.3,
+    })
+    const parsed = JSON.parse(result as string)
+    expect(parsed.ok).toBe(true)
+    expect(parsed.retrievable.content).toBe('original body')
+    expect(parsed.retrievable.source).toBe('kb://original')
+    expect(parsed.retrievable.kind).toBe('policy')
+    expect(parsed.retrievable.score).toBe(0.3)
+    expect(state.mutated).toHaveLength(1)
   })
 })
 

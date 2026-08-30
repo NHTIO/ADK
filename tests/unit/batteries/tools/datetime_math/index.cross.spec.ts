@@ -517,6 +517,45 @@ describe('durationFormatTool', () => {
   })
 })
 
+describe('datetime_math empty-string timezone disposition (C6)', () => {
+  it('date_add: timezone "" resolves identically to omitting it (UTC)', async () => {
+    const outEmpty = await runAdd({ date: '2026-03-15', direction: 'add', days: 7, timezone: '' })
+    const outOmitted = await runAdd({ date: '2026-03-15', direction: 'add', days: 7 })
+    expect(outEmpty).toBe(outOmitted)
+    expect(outEmpty).not.toMatch(/^Error/)
+  })
+
+  it('date_diff: timezone "" resolves identically to omitting it (UTC)', async () => {
+    const outEmpty = await runDiff({
+      from: '2026-03-01',
+      to: '2026-03-15',
+      unit: 'days',
+      timezone: '',
+    })
+    const outOmitted = await runDiff({ from: '2026-03-01', to: '2026-03-15', unit: 'days' })
+    expect(outEmpty).toBe(outOmitted)
+    expect(outEmpty).not.toMatch(/^Error/)
+  })
+
+  it('date_add and date_diff pass schema validation with timezone: ""', async () => {
+    const rAdd = await callTool(dateAddTool, {
+      date: '2026-01-01',
+      direction: 'add',
+      days: 1,
+      timezone: '',
+    })
+    expect(rAdd.kind).toBe('resolved')
+
+    const rDiff = await callTool(dateDiffTool, {
+      from: '2026-01-01',
+      to: '2026-01-02',
+      unit: 'days',
+      timezone: '',
+    })
+    expect(rDiff.kind).toBe('resolved')
+  })
+})
+
 describe('callTool no-crash: adversarial edges', () => {
   it('date_add rejects NaN days cleanly via schema (not a downstream crash)', async () => {
     const r = await callTool(dateAddTool, {

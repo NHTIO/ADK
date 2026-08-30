@@ -212,7 +212,8 @@ export const VERBS: readonly VerbSpec[] = [
       },
       replace: {
         type: 'string',
-        description: 'Replacement text. Default: blackout/removal.',
+        description:
+          'Replacement text. Omit for the blackout/removal default; send an empty string to blank the match out with nothing.',
       },
     },
     appliesTo: ['document', 'spreadsheet', 'presentation'],

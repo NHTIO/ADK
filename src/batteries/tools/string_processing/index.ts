@@ -221,7 +221,10 @@ export const stringExtractTool = new Tool({
     flags: validator
       .string()
       .default('g')
-      .description('Regex flags (default: "g"). "g" is always included.'),
+      .allow('')
+      .description(
+        'Regex flags (default: "g"). "g" is always included. Omit or send an empty string for the default.'
+      ),
     group: validator
       .number()
       .default(0)

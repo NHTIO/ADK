@@ -572,7 +572,7 @@ const granularSchemaFor = (
         schema = validator.any().optional()
         break
       default:
-        schema = validator.string()
+        schema = validator.string().allow('')
     }
     schema = schema.description(arg.description)
     if (arg.required) schema = schema.required()

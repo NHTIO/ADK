@@ -37,7 +37,9 @@ export const parseCsvTool = new Tool({
       .string()
       .default('')
       .allow('')
-      .description('Field delimiter — auto-detected if omitted. Use "\\t" for TSV.'),
+      .description(
+        'Field delimiter — auto-detected when omitted or sent as an empty string. Use "\\t" for TSV.'
+      ),
     limit: validator.number().default(1000).description('Maximum rows to return (default: 1000)'),
   }),
   artifactConstructor: () => SpooledJsonArtifact,

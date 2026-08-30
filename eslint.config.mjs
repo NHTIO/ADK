@@ -34,6 +34,23 @@ export default [
     },
   },
   {
+    // Tool-schema-bearing battery families: model-facing `validator.string()` tool-call args are
+    // where a silent `''`-rejection footgun actually bites (a model substituting `""` for "I don't
+    // want to set this"). Scoped separately from the repo-wide block above — this rule's detection
+    // surface (straight-line reassignment tracking, one bounded if-with-no-else, and the
+    // ScrapperParamSpec-shaped object-literal pattern-match) is deliberately broader than a simple
+    // chain check and is not meant to run repo-wide (e.g. LLM-battery construction-options
+    // `validation.ts` schemas are out of scope — see the rule's own header comment).
+    files: [
+      'src/batteries/tools/**/*.ts',
+      'src/batteries/sandbox/**/*.ts',
+      'src/batteries/media/**/*.ts',
+    ],
+    rules: {
+      'adk/require-string-empty-disposition': 'error',
+    },
+  },
+  {
     // Functional tests exercise the *public* import surface only. Reaching into `src/lib/`
     // bypasses the barrel boundary — if a symbol is needed in a functional test, it must be
     // exported from a public barrel (`@nhtio/adk/*`). Internal-only primitives stay in unit

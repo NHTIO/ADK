@@ -570,6 +570,13 @@ describe('stringExtractTool comprehensive tests', () => {
       })
       expect(out).toBe('No matches found.')
     })
+
+    it('flags: "" passes validation and behaves identically to omitting flags (both end up with "g")', async () => {
+      const outEmpty = await runX({ text: 'a a a', pattern: 'a', flags: '' })
+      const outOmitted = await runX({ text: 'a a a', pattern: 'a' })
+      expect(outEmpty).toBe(outOmitted)
+      expect(JSON.parse(outEmpty)).toEqual(['a', 'a', 'a'])
+    })
   })
 
   describe('edge cases and error handling', () => {

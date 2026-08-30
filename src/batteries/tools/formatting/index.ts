@@ -35,9 +35,11 @@ export const formatNumberTool = new Tool({
     currency: validator
       .string()
       .optional()
+      .allow('')
       .description(
-        'ISO 4217 currency code — required when style is "currency" (e.g. "USD", "EUR")'
+        'ISO 4217 currency code — required when style is "currency" (e.g. "USD", "EUR"). An empty string is treated as not provided.'
       ),
+    // eslint-disable-next-line adk/require-string-empty-disposition -- an empty locale is not a valid BCP 47 tag and should keep failing validation, unlike an omitted one which falls back to the default
     locale: validator.string().default('en-US').description('BCP 47 locale tag (default: "en-US")'),
     min_decimals: validator
       .number()

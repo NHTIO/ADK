@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { makeToolCtxStub, callTool } from '../../../../_fixtures/tool_ctx_stub'
 import { convertTimeTool, getCurrentTimeTool } from '../../../../../src/batteries/tools/time'
 
@@ -262,6 +262,76 @@ describe('convertTimeTool — oracle & edge cases', () => {
     await expect(
       convertTimeTool.executor(makeToolCtxStub())({
         source_timezone: 'UTC',
+        target_timezone: 'UTC',
+      })
+    ).rejects.toBeInstanceOf(E_INVALID_TOOL_ARGS)
+  })
+})
+
+// ─── Empty-string timezone disposition (C6) — frozen clock required ────
+// `getCurrentTimeTool`/`convertTimeTool` call `DateTime.now()`, so two separate
+// invocations can observe different wall-clock instants even when both correctly
+// resolve to UTC — freeze the clock so "" and omitted produce byte-identical output.
+
+describe('getCurrentTimeTool — empty-string timezone (C6)', () => {
+  it('timezone: "" produces byte-identical output to omitting it, under a frozen clock', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-06-15T12:34:56Z'))
+      const outEmpty = await runNow({ timezone: '' })
+      const outOmitted = await runNow({})
+      expect(outEmpty).toBe(outOmitted)
+      expect(outEmpty.startsWith('UTC:')).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('timezone: "" passes schema validation (callTool)', async () => {
+    const r = await callTool(getCurrentTimeTool, { timezone: '' })
+    expect(r.kind).toBe('resolved')
+    if (r.kind === 'resolved') expect(r.out).not.toMatch(/^Error/)
+  })
+})
+
+describe('convertTimeTool — empty-string target_timezone (C6)', () => {
+  it('target_timezone: "" produces byte-identical output to omitting it, under a frozen clock', async () => {
+    vi.useFakeTimers()
+    try {
+      // `time` is a wall-clock HH:MM with today's date, so "today" must also be frozen.
+      vi.setSystemTime(new Date('2026-06-15T00:00:00Z'))
+      const outEmpty = await runConv({
+        source_timezone: 'Asia/Tokyo',
+        time: '09:00',
+        target_timezone: '',
+      })
+      const outOmitted = await runConv({
+        source_timezone: 'Asia/Tokyo',
+        time: '09:00',
+      })
+      expect(outEmpty).toBe(outOmitted)
+      expect(outEmpty).toContain('= 00:00 UTC')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('target_timezone: "" passes schema validation (callTool)', async () => {
+    const r = await callTool(convertTimeTool, {
+      source_timezone: 'UTC',
+      time: '12:00',
+      target_timezone: '',
+    })
+    expect(r.kind).toBe('resolved')
+    if (r.kind === 'resolved') expect(r.out).not.toMatch(/^Error/)
+  })
+
+  it('source_timezone stays required and still rejects "" (out of scope for C6)', async () => {
+    const { E_INVALID_TOOL_ARGS } = await import('../../../../../src/lib/exceptions/runtime')
+    await expect(
+      convertTimeTool.executor(makeToolCtxStub())({
+        source_timezone: '',
+        time: '12:00',
         target_timezone: 'UTC',
       })
     ).rejects.toBeInstanceOf(E_INVALID_TOOL_ARGS)

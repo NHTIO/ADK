@@ -138,29 +138,33 @@ const commonSpecs: ScrapperParamSpec[] = [
     key: 'device',
     wire: 'device',
     type: 'string',
-    schema: validator.string(),
-    description: 'Emulated device, e.g. "Desktop Chrome".',
+    schema: validator.string().allow(''),
+    description:
+      'Emulated device, e.g. "Desktop Chrome". Omit or send an empty string to leave it unset.',
   },
   {
     key: 'user_agent',
     wire: 'user-agent',
     type: 'string',
-    schema: validator.string(),
-    description: 'Explicit user-agent (prefer device).',
+    schema: validator.string().allow(''),
+    description:
+      'Explicit user-agent (prefer device). Omit or send an empty string to leave it unset.',
   },
   {
     key: 'extra_http_headers',
     wire: 'extra-http-headers',
     type: 'string',
-    schema: validator.string(),
-    description: 'Extra headers the scraper sends to the TARGET site, formatted "K:v;K2:v2".',
+    schema: validator.string().allow(''),
+    description:
+      'Extra headers the scraper sends to the TARGET site, formatted "K:v;K2:v2". Omit or send an empty string to send none.',
   },
   {
     key: 'proxy_server',
     wire: 'proxy-server',
     type: 'string',
-    schema: validator.string(),
-    description: 'Upstream proxy, e.g. "http://host:3128" or "socks5://host:1080".',
+    schema: validator.string().allow(''),
+    description:
+      'Upstream proxy, e.g. "http://host:3128" or "socks5://host:1080". Omit or send an empty string to use no proxy.',
   },
 ]
 

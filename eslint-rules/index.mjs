@@ -2,6 +2,7 @@ import { default as preferIsError } from './rules/prefer-is-error.mjs'
 import { default as preferIsObject } from './rules/prefer-is-object.mjs'
 import { default as useIsInstanceOf } from './rules/use-is-instance-of.mjs'
 import { default as requireValidatorAnyRequired } from './rules/require-validator-any-required.mjs'
+import { default as requireStringEmptyDisposition } from './rules/require-string-empty-disposition.mjs'
 import { default as noSrcLibFromFunctional } from './rules/no-src-lib-import-from-functional-tests.mjs'
 import { default as noNodeBuiltinFromCrossOrBrowser } from './rules/no-node-builtin-from-cross-or-browser-spec.mjs'
 
@@ -14,6 +15,7 @@ const plugin = {
     'prefer-is-object': preferIsObject,
     'prefer-is-error': preferIsError,
     'require-validator-any-required': requireValidatorAnyRequired,
+    'require-string-empty-disposition': requireStringEmptyDisposition,
   },
 }
 

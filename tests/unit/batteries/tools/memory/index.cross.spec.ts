@@ -128,6 +128,20 @@ describe('storeMemoryTool', () => {
     expect(state.stored[0].id).toBe('explicit-id')
   })
 
+  it('auto-generates a uuidv6 id when an empty string is supplied instead of omitted', async () => {
+    const { ctx, state } = makeCtxStub()
+    const result = await storeMemoryTool.executor(ctx)({
+      id: '',
+      content: 'x',
+      confidence: 0.5,
+      importance: 0.5,
+    })
+    const parsed = JSON.parse(result as string)
+    expect(parsed.memory.id).not.toBe('')
+    expect(parsed.memory.id).toBeTruthy()
+    expect(state.stored[0].id).toBe(parsed.memory.id)
+  })
+
   it('rejects out-of-range confidence', async () => {
     const { ctx } = makeCtxStub()
     await expect(
@@ -187,6 +201,21 @@ describe('updateMemoryTool', () => {
     expect(result).toMatch(/^Error: /)
     expect(result).toContain('unknown')
     expect(state.mutated).toHaveLength(0)
+  })
+
+  it('treats an empty-string content as "no change" and keeps the existing content', async () => {
+    const initial = sampleMemory({ content: 'original content' })
+    const { ctx, state } = makeCtxStub([initial])
+    const result = await updateMemoryTool.executor(ctx)({
+      id: 'mem-1',
+      content: '',
+      confidence: 0.2,
+    })
+    const parsed = JSON.parse(result as string)
+    expect(parsed.ok).toBe(true)
+    expect(parsed.memory.content).toBe('original content')
+    expect(parsed.memory.confidence).toBe(0.2)
+    expect(state.mutated).toHaveLength(1)
   })
 })
 

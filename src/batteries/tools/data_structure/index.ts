@@ -374,7 +374,13 @@ export const setOperationsTool = new Tool({
     'Perform set operations on two JSON arrays: intersection (common elements), union (all elements), difference (in A but not B), symmetric difference, or membership check.',
   inputSchema: validator.object({
     data_a: validator.string().required().description('First JSON array'),
-    data_b: validator.string().optional().description('Second JSON array'),
+    data_b: validator
+      .string()
+      .optional()
+      .allow('')
+      .description(
+        'Second JSON array. Omit or send an empty string to skip the second-array comparison.'
+      ),
     operation: validator
       .string()
       .valid(
@@ -392,8 +398,9 @@ export const setOperationsTool = new Tool({
     compare_key: validator
       .string()
       .optional()
+      .allow('')
       .description(
-        'For arrays of objects: use this key for equality comparison instead of deep equality.'
+        'For arrays of objects: use this key for equality comparison instead of deep equality. Omit or send an empty string to use deep equality.'
       ),
   }),
   handler: async (args) => {
@@ -421,7 +428,7 @@ export const setOperationsTool = new Tool({
     }
     if (!Array.isArray(a)) return 'Error: data_a must be a JSON array.'
 
-    if (dataB !== undefined) {
+    if (dataB !== undefined && dataB !== '') {
       try {
         b = JSON.parse(dataB)
       } catch {

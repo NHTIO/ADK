@@ -2,6 +2,7 @@ import { describe, test, afterAll } from 'vitest'
 import { RuleTester } from '@typescript-eslint/rule-tester'
 import { default as noModelInToolHandler } from '../../../src/eslint/rules/no_model_in_tool_handler'
 import { default as requireValidatorAnyRequired } from '../../../src/eslint/rules/require_validator_any_required'
+import { default as requireStringEmptyDisposition } from '../../../src/eslint/rules/require_string_empty_disposition'
 import { default as thoughtPayloadRequiresReplayTag } from '../../../src/eslint/rules/thought_payload_requires_replay_tag'
 import { default as tokenEncodingRequiresContextWindow } from '../../../src/eslint/rules/token_encoding_requires_context_window'
 import { default as artifactToolForbidsArtifactConstructor } from '../../../src/eslint/rules/artifact_tool_forbids_artifact_constructor'
@@ -38,6 +39,70 @@ ruleTester.run('require-validator-any-required', requireValidatorAnyRequired, {
       // enclosing .required() does NOT govern the inner .any()
       code: 'const s = validator.array().items(validator.any()).required()',
       errors: [{ messageId: 'declareIntent' }],
+    },
+  ],
+})
+
+ruleTester.run('require-string-empty-disposition', requireStringEmptyDisposition, {
+  valid: [
+    // Bare chain OUTSIDE any Tool/ArtifactTool inputSchema — e.g. a battery's own construction-
+    // options validation.ts. Must NOT be flagged by the published copy (the repo-internal copy's
+    // file-glob scope would flag this; that divergence is intentional and documented, not a bug).
+    {
+      code: 'const optionsSchema = validator.object({ baseURL: validator.string().optional() })',
+    },
+    {
+      code: "new Tool({ name: 't', inputSchema: validator.object({ q: validator.string().optional().allow('') }) })",
+    },
+    // `.empty('')` is a SEPARATE documented clearing method with its own branch in
+    // `chainHasEmptyStringClear` — it must be exercised independently of `.allow('')` so it cannot
+    // regress on its own. (Joi treats `.empty('')` as "coerce '' to undefined", which is a real
+    // disposition, not merely an alias for allowing the value through.)
+    {
+      code: "new Tool({ name: 't', inputSchema: validator.object({ q: validator.string().optional().empty('') }) })",
+    },
+    {
+      code: "new ArtifactTool({ name: 't', inputSchema: validator.object({ q: validator.string().default('x').empty('') }) })",
+    },
+    // .required() with no .optional()/.default() is out of scope entirely, even inside inputSchema.
+    {
+      code: "new Tool({ name: 't', inputSchema: validator.object({ q: validator.string().required() }) })",
+    },
+    // Policy A: an explicit .valid(...) enum is sufficient disposition on its own, '' or not.
+    {
+      code: "new Tool({ name: 't', inputSchema: validator.object({ q: validator.string().optional().valid('a', 'b') }) })",
+    },
+    // .forbidden() trivially clears — the value must be absent entirely.
+    {
+      code: "new ArtifactTool({ name: 't', inputSchema: validator.object({ q: validator.string().optional().forbidden() }) })",
+    },
+    // A helper-function-internal cross-branch shape (media's actual bug shape) is out of scope for
+    // the published copy even when it flows into an inputSchema — this copy only looks at the
+    // literal chain shape written directly inside the inputSchema value.
+    {
+      code: "new Tool({ name: 't', inputSchema: buildScrapperSchema() })",
+    },
+  ],
+  invalid: [
+    {
+      code: "new Tool({ name: 't', inputSchema: validator.object({ q: validator.string().optional() }) })",
+      errors: [{ messageId: 'requireEmptyDisposition' }],
+    },
+    {
+      code: "new ArtifactTool({ name: 't', inputSchema: validator.object({ q: validator.string().default('x') }) })",
+      errors: [{ messageId: 'requireEmptyDisposition' }],
+    },
+    // .allow(null) alone does not clear it — confirmed empirically it still rejects ''.
+    {
+      code: "new Tool({ name: 't', inputSchema: validator.object({ q: validator.string().optional().allow(null) }) })",
+      errors: [{ messageId: 'requireEmptyDisposition' }],
+    },
+    // The same argument check governs `.empty(...)`: only a bare `''` literal clears the rule, so
+    // `.empty(null)` must still report. Pairs with the `.allow(null)` case above so neither
+    // method's literal check can regress unnoticed.
+    {
+      code: "new Tool({ name: 't', inputSchema: validator.object({ q: validator.string().optional().empty(null) }) })",
+      errors: [{ messageId: 'requireEmptyDisposition' }],
     },
   ],
 })

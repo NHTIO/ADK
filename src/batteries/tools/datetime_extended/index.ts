@@ -60,7 +60,11 @@ export const dateNthWeekdayTool = new Tool({
       .description('Day of the week.'),
     month: validator.number().required().description('Month number (1–12).'),
     year: validator.number().optional().description('Year (defaults to current year).'),
-    timezone: validator.string().optional().description('IANA timezone (optional, defaults UTC).'),
+    timezone: validator
+      .string()
+      .optional()
+      .allow('')
+      .description('IANA timezone. Omit or send an empty string to use UTC.'),
   }),
   handler: async (args) => {
     const {
@@ -162,7 +166,11 @@ export const dateCalendarInfoTool = new Tool({
       .string()
       .required()
       .description('ISO 8601 date, natural language date, or "now".'),
-    timezone: validator.string().optional().description('IANA timezone (optional, defaults UTC).'),
+    timezone: validator
+      .string()
+      .optional()
+      .allow('')
+      .description('IANA timezone. Omit or send an empty string to use UTC.'),
     fiscal_year_start_month: validator
       .number()
       .default(1)
@@ -245,11 +253,15 @@ export const dateParseTool = new Tool({
     reference_date: validator
       .string()
       .optional()
-      .description('ISO date to treat as "now" for relative expressions (default: current time)'),
+      .allow('')
+      .description(
+        'ISO date to treat as "now" for relative expressions. Omit or send an empty string to use the current time.'
+      ),
     timezone: validator
       .string()
       .optional()
-      .description('IANA timezone for the result (optional, defaults UTC)'),
+      .allow('')
+      .description('IANA timezone for the result. Omit or send an empty string to use UTC.'),
   }),
   handler: async (args) => {
     const {
@@ -302,7 +314,11 @@ export const datePeriodTool = new Tool({
       .valid('start', 'end')
       .required()
       .description('"start" for the first moment, "end" for the last moment of the period'),
-    timezone: validator.string().optional().description('IANA timezone (optional, defaults UTC)'),
+    timezone: validator
+      .string()
+      .optional()
+      .allow('')
+      .description('IANA timezone. Omit or send an empty string to use UTC.'),
     fiscal_year_start_month: validator
       .number()
       .default(1)
@@ -400,12 +416,19 @@ export const dateBusinessDaysTool = new Tool({
     to: validator
       .string()
       .optional()
-      .description('End date (ISO 8601 or "now") — for counting business days between two dates'),
+      .allow('')
+      .description(
+        'End date (ISO 8601 or "now") — for counting business days between two dates. Omit or send an empty string when using "add_days" instead.'
+      ),
     add_days: validator
       .number()
       .optional()
       .description('Instead of "to": number of business days to add (negative to subtract)'),
-    timezone: validator.string().optional().description('IANA timezone (optional, defaults UTC)'),
+    timezone: validator
+      .string()
+      .optional()
+      .allow('')
+      .description('IANA timezone. Omit or send an empty string to use UTC.'),
   }),
   handler: async (args) => {
     const {

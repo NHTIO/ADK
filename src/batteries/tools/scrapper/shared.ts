@@ -92,6 +92,13 @@ export const buildScrapperSchema = (
  * Assemble the wire-kebab query params for one request: each spec's value is `fixed` (if pinned)
  * else the validated model/default value; then `fixedQuery` raw passthrough is layered on. `url`
  * is handled separately (it is the search target, never pinned).
+ *
+ * @remarks
+ * An empty string (`''`) is deliberately treated the same as `undefined`/`null` and never
+ * forwarded — this is what lets the schema's `.allow('')` on optional string specs actually
+ * mean "don't set this," instead of sending e.g. `user-agent=` to the wire. This applies
+ * generically to every spec (no per-spec-type branching), including a `fixed`-pinned value that
+ * happens to be `''` — an explicitly pinned empty string still means "don't send it."
  */
 export const buildWireParams = (
   args: Record<string, unknown>,
@@ -102,7 +109,8 @@ export const buildWireParams = (
   const out: Record<string, string> = {}
   for (const spec of specs) {
     const value = fixed && spec.key in fixed ? fixed[spec.key] : args[spec.key]
-    if (value !== undefined && value !== null) out[spec.wire] = toWire(value)
+    const isEmptyString = typeof value === 'string' && value.length === 0
+    if (value !== undefined && value !== null && !isEmptyString) out[spec.wire] = toWire(value)
   }
   for (const [k, v] of Object.entries(fixedQuery ?? {})) out[k] = v
   return out

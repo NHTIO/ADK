@@ -15,6 +15,38 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-08-30
+
+### Fixed
+
+- **`adk/require-string-empty-disposition` (repo-internal copy) mis-analyzed two variable shapes**, in ways that could both raise a false positive and silently miss a real one:
+  - A straight-line chain split across reassignments lost everything the earlier assignment applied — the accumulated call list was overwritten rather than appended to, so `let s = validator.string().allow(''); s = s.optional()` saw only `.optional()` and reported a schema that was correctly disposed.
+  - Tracked events were grouped by variable **name** alone, so a nested block shadowing an identifier joined the outer variable's event list. Since the inner declaration re-roots at `validator.string()` — a disqualifying re-root under the Shape-A grammar — it suppressed a genuine finding on the *outer* schema. Events now key on the declaring binding, with `var` correctly hoisted to its function scope rather than keyed to the block it is written in (`let`/`const` remain per-block).
+- **Tool-parameter descriptions across every battery touched by the 2026-08-28 empty-string fix now state what an empty string actually does.** The schemas accepted `""` but their descriptions never said so, and the description string is the only thing a model reads — a schema that silently accepts a value its documentation doesn't mention is a documentation defect, not a cosmetic one. Updated for `scrapper` (`device`/`user_agent`/`extra_http_headers`/`proxy_server`), `datetime_extended` (four `timezone` params plus `reference_date`/`to`), `datetime_math`, `time`, `memory`, `retrievables`, `searxng`, `data_structure`, `formatting`'s `currency`, `string_processing`'s `flags`, `parsing`'s `delimiter`, and `media`'s `redact.replace`.
+
+### Added
+
+- Published-plugin test coverage for the `.empty('')` clearing method, which shares one predicate with `.allow('')` but had never been exercised independently and could therefore regress unnoticed.
+
+## 2026-08-28
+
+### Added
+
+- New `adk/require-string-empty-disposition` ESLint rule, in both the repo-internal plugin (`eslint-rules/`, broader detection covering straight-line/bounded-conditional variable tracking and `ScrapperParamSpec`-shaped object literals) and the published `@nhtio/adk/eslint` plugin (narrower, scoped to a `validator.string()` chain written literally inside a `new Tool`/`new ArtifactTool` `inputSchema`). Flags an `.optional()`/`.default(...)` string schema with no `.allow('')`/`.empty('')`/`.valid(...)`/`.forbidden()` disposition — the exact shape behind the fixes below. `switch`-statement-based schema assembly is permanently out of scope for both copies (see the `media` fix below, found by direct source review instead).
+
+### Fixed
+
+- **`validator.string()` (Joi-based) rejects an empty string `""` on an `.optional()`/`.default(...)` schema, regardless of the modifier — including when `""` is the schema's own configured default.** A model filling in a tool call routinely sends `""` instead of omitting an unwanted optional parameter, which previously failed schema validation outright instead of degrading gracefully. Fixed across every battery the new lint rule (and, for `media`, direct source review) found affected:
+  - **`scrapper`** — `device`/`user_agent`/`extra_http_headers`/`proxy_server` now accept `""` and are correctly omitted from the outgoing request (an empty string is never forwarded as a wire query value, including when pinned via `config.fixed`).
+  - **`data_structure`**'s `set_operations` — `data_b`/`compare_key` now accept `""`, treated identically to omission.
+  - **`memory`/`retrievables`** — `content` (`update_memory`/`update_retrievable`) now treats `""` as "no change, keep the existing value"; `id` (`store_memory`/`store_retrievable`) now treats `""` as "auto-generate"; `source`/`kind` (`store_retrievable`) now normalize `""` to `undefined` on the newly constructed record.
+  - **`searxng`** — `categories`/`engines`/`language` now accept `""`, correctly omitted from the search request.
+  - **`sandbox`**'s `run_shell_command` — `cwd` now accepts an explicit `""`, resolving to the workspace root exactly like an omitted `cwd`.
+  - **`media`** — `granularSchemaFor`'s string-type verb args (19 args across 14 verbs, including `update_text.replace`/`redact.replace`) now accept `""`. This is a real functional fix, not just a validation nicety: `update_text`'s own documented contract ("empty string deletes") was previously unreachable through the granular per-verb tool surface. Note the accepted side effects: `update_text.anchor: ''` now inserts the replacement at position 0 (since `String.prototype.includes('')` is always `true`), and `data.set`/`data.delete` with `path: ''` passes schema validation but still fails cleanly at the handler level (`path must be a non-empty string`).
+  - **`datetime_extended`/`datetime_math`/`time`** — timezone-shaped params now accept `""`, resolving to UTC exactly like an omitted value (`time`'s `get_current_time`/`convert_time`, which lacked the other two batteries' existing falsy-check normalization, needed an additional handler-side fix to avoid a worse "Invalid timezone" error after the schema loosened).
+  - **`formatting`** — `currency` now accepts `""`, degrading to the same "currency required" error as omission; `locale` deliberately keeps rejecting `""` (not a valid BCP 47 tag) via an explicit lint-rule exception.
+  - **`string_processing`**'s `string_extract` — `flags` now accepts `""`, degrading to the same effective `'g'`-flag behavior as omission.
+
 ## 2026-08-27
 
 ### Added

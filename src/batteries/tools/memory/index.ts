@@ -94,7 +94,8 @@ export const storeMemoryTool = new Tool({
     id: validator
       .string()
       .optional()
-      .description('Optional stable id. Auto-generated when absent.'),
+      .allow('')
+      .description('Optional stable id. Auto-generated when absent or an empty string.'),
   }),
   artifactConstructor: () => SpooledJsonArtifact,
   handler: async (args, ctx) => {
@@ -107,7 +108,7 @@ export const storeMemoryTool = new Tool({
     try {
       const now = DateTime.now()
       const memory = new Memory({
-        id: id ?? uuidv6(),
+        id: (id || undefined) ?? uuidv6(),
         content,
         confidence,
         importance,
@@ -136,7 +137,11 @@ export const updateMemoryTool = new Tool({
     'Update an existing memory by id. Supply any subset of content / confidence / importance — omitted fields retain their prior values. updatedAt is always refreshed.',
   inputSchema: validator.object({
     id: validator.string().required().description('Id of the memory to update.'),
-    content: validator.string().optional().description('Replacement content.'),
+    content: validator
+      .string()
+      .optional()
+      .allow('')
+      .description('Replacement content. Omit or send an empty string to leave it unchanged.'),
     confidence: validator
       .number()
       .min(0)
@@ -166,7 +171,7 @@ export const updateMemoryTool = new Tool({
       }
       const updated = new Memory({
         id: existing.id,
-        content: content ?? existing.content,
+        content: (content || undefined) ?? existing.content,
         confidence: confidence ?? existing.confidence,
         importance: importance ?? existing.importance,
         createdAt: existing.createdAt,

@@ -620,6 +620,108 @@ describe('datetime_extended schema validation via callTool', () => {
   })
 })
 
+describe('datetime_extended empty-string param dispositions (C6)', () => {
+  it('date_nth_weekday: timezone "" resolves identically to omitting it (UTC)', async () => {
+    const outEmpty = await runNth({
+      nth: '2nd',
+      weekday: 'friday',
+      month: 3,
+      year: 2026,
+      timezone: '',
+    })
+    const outOmitted = await runNth({ nth: '2nd', weekday: 'friday', month: 3, year: 2026 })
+    expect(outEmpty).toBe(outOmitted)
+    expect(outEmpty).not.toMatch(/^Error/)
+  })
+
+  it('date_calendar_info: timezone "" resolves identically to omitting it (UTC)', async () => {
+    const outEmpty = await runCal({ date: '2026-03-15', timezone: '' })
+    const outOmitted = await runCal({ date: '2026-03-15' })
+    expect(outEmpty).toBe(outOmitted)
+  })
+
+  it('date_parse: timezone "" resolves identically to omitting it (UTC)', async () => {
+    const outEmpty = await runParse({
+      text: 'March 5, 2026',
+      reference_date: '2026-01-01T00:00:00Z',
+      timezone: '',
+    })
+    const outOmitted = await runParse({
+      text: 'March 5, 2026',
+      reference_date: '2026-01-01T00:00:00Z',
+    })
+    expect(outEmpty).toBe(outOmitted)
+  })
+
+  it('date_parse: reference_date "" resolves identically to omitting it', async () => {
+    const outEmpty = await runParse({ text: 'March 5, 2026', reference_date: '' })
+    const outOmitted = await runParse({ text: 'March 5, 2026' })
+    expect(outEmpty).toBe(outOmitted)
+    expect(outEmpty).not.toMatch(/^Error/)
+  })
+
+  it('date_period: timezone "" resolves identically to omitting it (UTC)', async () => {
+    const outEmpty = await runPeriod({
+      date: '2026-03-15',
+      period: 'month',
+      boundary: 'start',
+      timezone: '',
+    })
+    const outOmitted = await runPeriod({ date: '2026-03-15', period: 'month', boundary: 'start' })
+    expect(outEmpty).toBe(outOmitted)
+  })
+
+  it('date_business_days: timezone "" resolves identically to omitting it (UTC)', async () => {
+    const outEmpty = await runBiz({ from: '2026-03-02', to: '2026-03-06', timezone: '' })
+    const outOmitted = await runBiz({ from: '2026-03-02', to: '2026-03-06' })
+    expect(outEmpty).toBe(outOmitted)
+  })
+
+  it('date_business_days: to "" resolves identically to omitting it (both error "provide either")', async () => {
+    const outEmpty = await runBiz({ from: '2026-03-02', to: '' })
+    const outOmitted = await runBiz({ from: '2026-03-02' })
+    expect(outEmpty).toBe(outOmitted)
+    expect(outEmpty).toMatch(/^Error.*either/)
+  })
+
+  it('all seven flagged params pass schema validation when set to ""', async () => {
+    const rNth = await callTool(dateNthWeekdayTool, {
+      nth: '1st',
+      weekday: 'monday',
+      month: 1,
+      year: 2026,
+      timezone: '',
+    })
+    expect(rNth.kind).toBe('resolved')
+
+    const rCal = await callTool(dateCalendarInfoTool, { date: '2026-03-15', timezone: '' })
+    expect(rCal.kind).toBe('resolved')
+
+    const rParse = await callTool(dateParseTool, {
+      text: 'now',
+      reference_date: '',
+      timezone: '',
+    })
+    expect(rParse.kind).toBe('resolved')
+
+    const rPeriod = await callTool(datePeriodTool, {
+      date: '2026-03-15',
+      period: 'month',
+      boundary: 'start',
+      timezone: '',
+    })
+    expect(rPeriod.kind).toBe('resolved')
+
+    const rBiz = await callTool(dateBusinessDaysTool, {
+      from: '2026-03-02',
+      to: '',
+      add_days: 5,
+      timezone: '',
+    })
+    expect(rBiz.kind).toBe('resolved')
+  })
+})
+
 describe('datetime_extended garbage/input error handling', () => {
   it('date_parse rejects unparseable garbage text', async () => {
     const r = await callTool(dateParseTool, {

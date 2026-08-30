@@ -1158,6 +1158,27 @@ describe('setOperationsTool extended invariants', () => {
     // data_b is optional; when omitted, b defaults to []
     expect(JSON.parse(out)).toEqual([])
   })
+  it('empty-string data_b passes schema validation and behaves like omitting it', async () => {
+    const r = await callTool(setOperationsTool, {
+      data_a: '[1, 2, 3]',
+      data_b: '',
+      operation: 'intersection',
+    })
+    expect(r.kind).toBe('resolved')
+    if (r.kind === 'resolved') {
+      expect(JSON.parse(r.out)).toEqual([])
+    }
+    const omitted = await runSet({
+      data_a: '[1, 2, 3]',
+      operation: 'intersection',
+    })
+    const withEmptyString = await runSet({
+      data_a: '[1, 2, 3]',
+      data_b: '',
+      operation: 'intersection',
+    })
+    expect(withEmptyString).toBe(omitted)
+  })
   it('compare_key with null values handled', async () => {
     const out = await runSet({
       data_a: JSON.stringify([{ id: 1 }, { id: null }, { id: 1 }]),
@@ -1169,6 +1190,27 @@ describe('setOperationsTool extended invariants', () => {
     // Intersection: only null-keyed elements match
     expect(result).toHaveLength(1)
     expect(result[0].id).toBeNull()
+  })
+  it('empty-string compare_key passes schema validation and behaves like omitting it', async () => {
+    const r = await callTool(setOperationsTool, {
+      data_a: JSON.stringify([{ id: 1 }, { id: 1 }]),
+      data_b: JSON.stringify([{ id: 1 }]),
+      operation: 'intersection',
+      compare_key: '',
+    })
+    expect(r.kind).toBe('resolved')
+    const omitted = await runSet({
+      data_a: JSON.stringify([{ id: 1 }, { id: 1 }]),
+      data_b: JSON.stringify([{ id: 1 }]),
+      operation: 'intersection',
+    })
+    const withEmptyString = await runSet({
+      data_a: JSON.stringify([{ id: 1 }, { id: 1 }]),
+      data_b: JSON.stringify([{ id: 1 }]),
+      operation: 'intersection',
+      compare_key: '',
+    })
+    expect(withEmptyString).toBe(omitted)
   })
   it('compare_key with undefined key values', async () => {
     const out = await runSet({

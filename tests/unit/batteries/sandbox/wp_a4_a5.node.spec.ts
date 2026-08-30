@@ -120,6 +120,42 @@ describe('run_shell_command streaming seam', () => {
     // the sandbox deliberately hides, which is how a mangle-retry loop starts.
     await expect(run(enforcer, { cwd: '/src/lib' })).resolves.toBeTruthy()
   })
+  it('accepts an explicit cwd of "" and resolves it identically to omitting cwd entirely', async () => {
+    // `cwd: validator.string().default('')` means `''` is the schema's OWN default — but
+    // `validator.string()` rejects `''` unless `.allow('')` is also present. Without the fix, an
+    // explicit `cwd: ''` (a model replaying its own prior tool-call shape, or just being explicit
+    // about "use the default") would be rejected outright by schema validation, never reaching the
+    // handler or the translator at all.
+    const explicit = fakeEnforcer({ out: ['ok\n'] })
+    const tool = createRunShellCommandTool({
+      sandbox: explicit.enforcer,
+      policy,
+      translator,
+      gate: async () => {},
+    })
+    await expect(
+      tool.executor(makeDispatchContext())({ command: 'echo test', cwd: '', timeout_seconds: 1 })
+    ).resolves.toBeTruthy()
+    expect(explicit.spawned).toHaveBeenCalledOnce()
+    const explicitCwd = (explicit.spawned.mock.calls[0] as unknown as [{ cwd: string }])[0].cwd
+
+    const omitted = fakeEnforcer({ out: ['ok\n'] })
+    const omittedTool = createRunShellCommandTool({
+      sandbox: omitted.enforcer,
+      policy,
+      translator,
+      gate: async () => {},
+    })
+    await expect(
+      omittedTool.executor(makeDispatchContext())({ command: 'echo test', timeout_seconds: 1 })
+    ).resolves.toBeTruthy()
+    expect(omitted.spawned).toHaveBeenCalledOnce()
+    const omittedCwd = (omitted.spawned.mock.calls[0] as unknown as [{ cwd: string }])[0].cwd
+
+    // Both resolve to the same backend path: the workspace root.
+    expect(explicitCwd).toBe(omittedCwd)
+    expect(explicitCwd).toBe('/workspace/')
+  })
   it('throws narrated refusals and failures before spawn', async () => {
     for (const outcome of [
       { kind: 'gate-declined' as const },

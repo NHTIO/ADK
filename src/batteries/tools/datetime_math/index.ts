@@ -57,7 +57,10 @@ export const dateAddTool = new Tool({
     timezone: validator
       .string()
       .optional()
-      .description('IANA timezone for interpreting the date (optional, defaults UTC)'),
+      .allow('')
+      .description(
+        'IANA timezone for interpreting the date. Omit or send an empty string to use UTC.'
+      ),
   }),
   handler: async (args) => {
     const { date, direction, years, months, weeks, days, hours, minutes, seconds, timezone } =
@@ -125,7 +128,10 @@ export const dateDiffTool = new Tool({
     timezone: validator
       .string()
       .optional()
-      .description('IANA timezone for interpreting dates (optional, defaults UTC)'),
+      .allow('')
+      .description(
+        'IANA timezone for interpreting dates. Omit or send an empty string to use UTC.'
+      ),
   }),
   handler: async (args) => {
     const { from, to, unit, timezone } = args as {

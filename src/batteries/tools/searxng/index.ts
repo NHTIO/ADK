@@ -243,12 +243,24 @@ const assembleTool = (
     categories: validator
       .string()
       .optional()
-      .description('Comma-separated SearXNG categories (e.g. "general,news").'),
+      .allow('')
+      .description(
+        'Comma-separated SearXNG categories (e.g. "general,news"). Omit or send an empty string to search every category.'
+      ),
     engines: validator
       .string()
       .optional()
-      .description('Comma-separated SearXNG engines (e.g. "google,duckduckgo").'),
-    language: validator.string().optional().description('Language code (e.g. "en", "de").'),
+      .allow('')
+      .description(
+        'Comma-separated SearXNG engines (e.g. "google,duckduckgo"). Omit or send an empty string to search every engine.'
+      ),
+    language: validator
+      .string()
+      .optional()
+      .allow('')
+      .description(
+        'Language code (e.g. "en", "de"). Omit or send an empty string to search all languages.'
+      ),
     pageno: validator.number().min(1).default(1).description('Result page number (1-based).'),
     time_range: validator
       .string()

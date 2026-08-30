@@ -33,6 +33,10 @@ describe('formatNumberTool', () => {
       // de-DE: "1.234,5"
       expect(out).toMatch(/1\.234/)
     })
+
+    it('locale: "" still correctly rejects (regression guard — no .allow(\'\') was paired with the disable comment)', async () => {
+      await expect(runNum({ value: 1, locale: '' })).rejects.toBeInstanceOf(E_INVALID_TOOL_ARGS)
+    })
   })
 
   describe('currency', () => {
@@ -50,6 +54,14 @@ describe('formatNumberTool', () => {
     it('upper-cases the currency code (usd → USD)', async () => {
       const out = await runNum({ value: 100, style: 'currency', currency: 'usd' })
       expect(out).toContain('$100')
+    })
+
+    it('currency: "" passes validation and produces the same "currency required" error as omitting it', async () => {
+      const outEmpty = await runNum({ value: 100, style: 'currency', currency: '' })
+      const outOmitted = await runNum({ value: 100, style: 'currency' })
+      expect(outEmpty).toBe(outOmitted)
+      expect(outEmpty).toMatch(/^Error/)
+      expect(outEmpty).toContain('currency')
     })
   })
 

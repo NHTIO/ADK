@@ -64,6 +64,7 @@ export const createRunShellCommandTool = (options: RunShellCommandOptions): Tool
     cwd: validator
       .string()
       .default('')
+      .allow('')
       .description('Workspace-relative working directory; defaults to the workspace root.'),
     timeout_seconds: validator
       .number()

@@ -136,6 +136,30 @@ describe('createSearxngSearchTool — request building', () => {
   })
 })
 
+describe('createSearxngSearchTool — empty-string optional params', () => {
+  let fetchFn: ReturnType<typeof vi.fn>
+  beforeEach(() => {
+    fetchFn = stubFetch()
+  })
+
+  it('accepts categories/engines/language as "" and omits them from the built query params', async () => {
+    await run(
+      { instanceUrl: 'https://searx.example.org' },
+      {
+        query: 'hello world',
+        categories: '',
+        engines: '',
+        language: '',
+      }
+    )
+    const url = new URL(fetchFn.mock.calls[0][0] as URL)
+    expect(url.searchParams.get('q')).toBe('hello world')
+    expect(url.searchParams.get('categories')).toBeNull()
+    expect(url.searchParams.get('engines')).toBeNull()
+    expect(url.searchParams.get('language')).toBeNull()
+  })
+})
+
 describe('createSearxngSearchTool — output shapes', () => {
   beforeEach(() => stubFetch())
 
