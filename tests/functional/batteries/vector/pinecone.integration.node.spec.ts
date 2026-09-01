@@ -29,29 +29,51 @@ d('PineconeVectorStore (integration)', () => {
         namespacePrefix,
       },
     })
+    // REGISTER FOR CLEANUP FIRST. `connect()` and `createCollection()` below can both throw — and
+    // when the index is already at its namespace cap, they do. Pushing only after they succeed
+    // meant a store that failed to initialise was never tracked, so its namespace was never
+    // reclaimed: each failing run leaked, pushing the index further past the cap and making the
+    // next run fail harder. That is exactly how this index reached exactly 100 namespaces and had
+    // to be purged by hand. Tracking up front makes cleanup cover the failure path too.
+    created.push({ vs, ns: namespacePrefix })
     await vs.connect()
     // createCollection only records dims locally for Pinecone (no server-side create).
     await vs.schema.createCollection('docs', (c: CollectionBuilder) =>
       c.vector({ dimensions: 3, metric: 'cosine' })
     )
-    created.push({ vs, ns: namespacePrefix })
     return vs
   }
 
   afterAll(async () => {
     // Reclaim each store's namespace (drop the collection → empties it → Pinecone frees it).
-    // Best-effort: a failed cleanup must not fail the suite, but log it so leaks are visible.
+    // Still best-effort — a failed cleanup must not fail the suite, since the tests themselves may
+    // already have failed for an unrelated reason and masking that would be worse. But a leak is
+    // now reported LOUDLY and in aggregate rather than as a single `console.warn` per store buried
+    // in a passing run's output: silent per-store warnings are why this index accumulated to its
+    // 100-namespace cap unnoticed, and every subsequent run then failed on "max namespaces
+    // allowed" until it was purged by hand.
+    const leaked: string[] = []
     for (const { vs, ns } of created) {
       try {
         await vs.schema.dropCollectionIfExists('docs')
       } catch (err) {
-        console.warn(`pinecone namespace cleanup failed for ${ns}: ${String(err)}`)
+        leaked.push(`${ns}: ${String(err)}`)
       }
       try {
         await vs.close()
       } catch {
         /* ignore */
       }
+    }
+    if (leaked.length > 0) {
+      console.error(
+        `\n!!! PINECONE NAMESPACE LEAK — ${leaked.length}/${created.length} namespace(s) were not ` +
+          `reclaimed. Pinecone's serverless indexes cap at 100 namespaces per index; once that cap ` +
+          `is reached EVERY subsequent upsert fails with "max namespaces allowed ... (100)" and the ` +
+          `index must be purged manually. Leaked:\n` +
+          leaked.map((l) => `  - ${l}`).join('\n') +
+          `\n`
+      )
     }
   })
 

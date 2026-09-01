@@ -121,6 +121,68 @@ export type {
   AnthropicMessagesCountTokensDeps,
 } from './anthropic_messages'
 
+export { OpenAIResponsesAdapter } from './openai_responses'
+export { openAIResponsesOptionsSchema } from './openai_responses'
+export { validateOptions as validateOpenAIResponsesOptions } from './openai_responses'
+export {
+  E_INVALID_OPENAI_RESPONSES_OPTIONS,
+  E_OPENAI_RESPONSES_CONTEXT_OVERFLOW,
+  E_OPENAI_RESPONSES_HTTP_ERROR,
+  E_OPENAI_RESPONSES_STREAM_ERROR,
+  E_OPENAI_RESPONSES_STREAM_STALLED,
+  E_OPENAI_RESPONSES_REQUEST_TIMEOUT,
+  E_OPENAI_RESPONSES_INVALID_TOOL_CALL_ARGS,
+  E_OPENAI_RESPONSES_UNSUPPORTED_MEDIA_MODALITY,
+  E_OPENAI_RESPONSES_REASONING_REPLAY_REJECTED,
+} from './openai_responses'
+export type {
+  OpenAIResponsesInputContentBlock,
+  OpenAIResponsesMessageItem,
+  OpenAIResponsesOutputMessageContentPart,
+  OpenAIResponsesOutputMessageItem,
+  OpenAIResponsesFunctionCallItem,
+  OpenAIResponsesFunctionCallOutputItem,
+  OpenAIResponsesReasoningSummaryPart,
+  OpenAIResponsesReasoningContentPart,
+  OpenAIResponsesReasoningItem,
+  OpenAIResponsesOpaqueOutputItem,
+  OpenAIResponsesInputItem,
+  OpenAIResponsesOutputItem,
+  OpenAIResponsesTool,
+  OpenAIResponsesToolChoice,
+  OpenAIResponsesUsage,
+  OpenAIResponsesResponseObject,
+  OpenAIResponsesOutputItemAddedEvent,
+  OpenAIResponsesOutputItemDoneEvent,
+  OpenAIResponsesOutputTextDeltaEvent,
+  OpenAIResponsesOutputTextDoneEvent,
+  OpenAIResponsesRefusalDeltaEvent,
+  OpenAIResponsesRefusalDoneEvent,
+  OpenAIResponsesReasoningSummaryTextDeltaEvent,
+  OpenAIResponsesReasoningSummaryTextDoneEvent,
+  OpenAIResponsesReasoningTextDeltaEvent,
+  OpenAIResponsesReasoningTextDoneEvent,
+  OpenAIResponsesFunctionCallArgumentsDeltaEvent,
+  OpenAIResponsesFunctionCallArgumentsDoneEvent,
+  OpenAIResponsesCompletedEvent,
+  OpenAIResponsesIncompleteEvent,
+  OpenAIResponsesFailedEvent,
+  OpenAIResponsesErrorEvent,
+  OpenAIResponsesStreamEvent,
+  ResponsesTextSlot,
+  ResponsesThinkingSlot,
+  ResponsesToolCallSlot,
+  ResponsesOutputSlot,
+  ResponsesOutputSlotMachine,
+  OpenAIResponsesReasoningReplayPayload,
+  ReasoningReplayMode,
+  SystemPromptChannel,
+  OpenAIResponsesIncludable,
+  OpenAIResponsesRequestBody,
+  OpenAIResponsesHelpers,
+  OpenAIResponsesAdapterOptions,
+} from './openai_responses'
+
 export { TransformersJsAdapter } from './transformers_js'
 export { transformersJsOptionsSchema } from './transformers_js'
 export { validateOptions as validateTransformersJsOptions } from './transformers_js'

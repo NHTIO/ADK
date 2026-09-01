@@ -854,3 +854,413 @@ export const singleAnthropicStreamCassette = (
     },
   ],
 })
+
+// ─── OpenAI Responses (`/v1/responses`) builders ──────────────────────────────
+//
+// Unlike Anthropic's named-event SSE, the Responses API's SSE is data-only (like Chat
+// Completions) — every frame is `data: {"type": "...", ...}\n\n`, so the existing `{ json }`
+// SSEFrame variant already covers it verbatim; no cassette harness changes are needed (confirmed
+// against the plan's claim). There is also no `[DONE]` sentinel — termination is a terminal
+// `response.completed` / `.incomplete` / `.failed` event carrying the full `response` object.
+
+/** Minimal reasoning-item spec for the response/stream builders below. */
+export interface ResponsesReasoningSpec {
+  id?: string
+  summary?: string
+  content?: string
+  encryptedContent?: string
+}
+
+/** Minimal function-call spec for the response/stream builders below. */
+export interface ResponsesToolCallSpec {
+  callId?: string
+  itemId?: string
+  name: string
+  arguments: unknown
+}
+
+const responsesOutputMessageItem = (input: {
+  id?: string
+  content?: string
+  refusal?: string
+}): Record<string, unknown> => ({
+  type: 'message',
+  role: 'assistant',
+  status: 'completed',
+  id: input.id ?? synthId('msg'),
+  content: [
+    ...(input.refusal !== undefined ? [{ type: 'refusal', refusal: input.refusal }] : []),
+    ...(input.content !== undefined && input.refusal === undefined
+      ? [{ type: 'output_text', text: input.content, annotations: [] }]
+      : []),
+  ],
+})
+
+const responsesReasoningItem = (spec: ResponsesReasoningSpec): Record<string, unknown> => ({
+  type: 'reasoning',
+  id: spec.id ?? synthId('rs'),
+  summary: spec.summary !== undefined ? [{ type: 'summary_text', text: spec.summary }] : [],
+  ...(spec.content !== undefined
+    ? { content: [{ type: 'reasoning_text', text: spec.content }] }
+    : {}),
+  ...(spec.encryptedContent !== undefined ? { encrypted_content: spec.encryptedContent } : {}),
+})
+
+const responsesFunctionCallItem = (spec: ResponsesToolCallSpec): Record<string, unknown> => ({
+  type: 'function_call',
+  call_id: spec.callId ?? synthId('call'),
+  name: spec.name,
+  arguments: typeof spec.arguments === 'string' ? spec.arguments : JSON.stringify(spec.arguments),
+  id: spec.itemId ?? synthId('fc'),
+})
+
+/**
+ * Programmatically build a non-streaming (or terminal-event-embedded) `response` object for the
+ * OpenAI Responses API. Convenience fields (`content`/`refusal`/`toolCalls`/`reasoning`) each append
+ * one output item, in that order; `output` (raw items) is appended last for full manual control.
+ */
+export const buildResponsesResponse = (input: {
+  id?: string
+  model?: string
+  content?: string
+  refusal?: string
+  toolCalls?: ReadonlyArray<ResponsesToolCallSpec>
+  reasoning?: ReadonlyArray<ResponsesReasoningSpec>
+  output?: ReadonlyArray<Record<string, unknown>>
+  status?: 'completed' | 'incomplete' | 'failed' | 'cancelled' | 'in_progress' | 'queued'
+  incompleteReason?: string
+  usage?: {
+    input_tokens?: number
+    output_tokens?: number
+    total_tokens?: number
+    cached_tokens?: number
+  }
+  error?: { code?: string; message?: string; type?: string } | null
+}): Record<string, unknown> => {
+  const output: Array<Record<string, unknown>> = []
+  for (const r of input.reasoning ?? []) output.push(responsesReasoningItem(r))
+  if (input.content !== undefined || input.refusal !== undefined) {
+    output.push(responsesOutputMessageItem({ content: input.content, refusal: input.refusal }))
+  }
+  for (const tc of input.toolCalls ?? []) output.push(responsesFunctionCallItem(tc))
+  for (const raw of input.output ?? []) output.push(raw)
+
+  const usage = input.usage
+  return {
+    id: input.id ?? synthId('resp'),
+    object: 'response',
+    created_at: 1_700_000_000,
+    status: input.status ?? 'completed',
+    model: input.model ?? 'gpt-x-responses',
+    output,
+    ...(input.incompleteReason !== undefined
+      ? { incomplete_details: { reason: input.incompleteReason } }
+      : {}),
+    ...(usage
+      ? {
+          usage: {
+            input_tokens: usage.input_tokens ?? 0,
+            output_tokens: usage.output_tokens ?? 0,
+            total_tokens:
+              usage.total_tokens ?? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
+            ...(usage.cached_tokens !== undefined
+              ? { input_tokens_details: { cached_tokens: usage.cached_tokens } }
+              : {}),
+          },
+        }
+      : {}),
+    ...(input.error !== undefined ? { error: input.error } : {}),
+  }
+}
+
+// ─── Individual streaming-event frame builders (compose these directly for full,
+// hand-ordered control over interleaved multi-`output_index` sequences) ───────
+
+/** `response.output_item.added` frame. */
+export const responsesAddedFrame = (
+  outputIndex: number,
+  item: Record<string, unknown>
+): SSEFrame => ({
+  json: { type: 'response.output_item.added', output_index: outputIndex, item },
+})
+
+/** `response.output_item.done` frame. */
+export const responsesDoneFrame = (
+  outputIndex: number,
+  item: Record<string, unknown>
+): SSEFrame => ({
+  json: { type: 'response.output_item.done', output_index: outputIndex, item },
+})
+
+/** `response.output_text.delta` frame. */
+export const responsesTextDeltaFrame = (
+  outputIndex: number,
+  itemId: string,
+  delta: string
+): SSEFrame => ({
+  json: {
+    type: 'response.output_text.delta',
+    item_id: itemId,
+    output_index: outputIndex,
+    content_index: 0,
+    delta,
+  },
+})
+
+/** `response.refusal.delta` frame. */
+export const responsesRefusalDeltaFrame = (
+  outputIndex: number,
+  itemId: string,
+  delta: string
+): SSEFrame => ({
+  json: {
+    type: 'response.refusal.delta',
+    item_id: itemId,
+    output_index: outputIndex,
+    content_index: 0,
+    delta,
+  },
+})
+
+/** `response.reasoning_summary_text.delta` frame. */
+export const responsesReasoningSummaryDeltaFrame = (
+  outputIndex: number,
+  itemId: string,
+  delta: string
+): SSEFrame => ({
+  json: {
+    type: 'response.reasoning_summary_text.delta',
+    item_id: itemId,
+    output_index: outputIndex,
+    summary_index: 0,
+    delta,
+  },
+})
+
+/** `response.reasoning_text.delta` frame. */
+export const responsesReasoningTextDeltaFrame = (
+  outputIndex: number,
+  itemId: string,
+  delta: string
+): SSEFrame => ({
+  json: {
+    type: 'response.reasoning_text.delta',
+    item_id: itemId,
+    output_index: outputIndex,
+    content_index: 0,
+    delta,
+  },
+})
+
+/** `response.function_call_arguments.delta` frame. */
+export const responsesFunctionCallArgsDeltaFrame = (
+  outputIndex: number,
+  itemId: string,
+  delta: string
+): SSEFrame => ({
+  json: {
+    type: 'response.function_call_arguments.delta',
+    item_id: itemId,
+    output_index: outputIndex,
+    delta,
+  },
+})
+
+/** `response.function_call_arguments.done` frame — AUTHORITATIVE replace, not a merge. */
+export const responsesFunctionCallArgsDoneFrame = (
+  outputIndex: number,
+  itemId: string,
+  args: string
+): SSEFrame => ({
+  json: {
+    type: 'response.function_call_arguments.done',
+    item_id: itemId,
+    output_index: outputIndex,
+    arguments: args,
+  },
+})
+
+/** A terminal `response.completed` / `.incomplete` / `.failed` frame carrying the full `response`. */
+export const responsesTerminalFrame = (
+  status: 'completed' | 'incomplete' | 'failed',
+  response: Record<string, unknown>
+): SSEFrame => ({
+  json: {
+    type: status === 'completed' ? 'response.completed' : `response.${status}`,
+    response,
+  },
+})
+
+/** A bare stream-level `error` frame (distinct from a `response.failed` terminal event). */
+export const responsesErrorFrame = (message: string, code?: string): SSEFrame => ({
+  json: { type: 'error', code: code ?? null, message },
+})
+
+/**
+ * One step in a sequential (non-interleaved) streamed Responses generation — each step emits its
+ * `added` frame, then its deltas in order, then its `done` frame, before the next step starts. For
+ * genuinely INTERLEAVED multi-`output_index` sequences, compose the individual frame builders above
+ * directly instead of using this convenience wrapper.
+ */
+export type ResponsesStreamStep =
+  | { kind: 'text'; outputIndex?: number; itemId?: string; deltas: ReadonlyArray<string> }
+  | { kind: 'refusal'; outputIndex?: number; itemId?: string; deltas: ReadonlyArray<string> }
+  | {
+      kind: 'reasoning'
+      outputIndex?: number
+      itemId?: string
+      summaryDeltas?: ReadonlyArray<string>
+      reasoningDeltas?: ReadonlyArray<string>
+      encryptedContent?: string
+    }
+  | {
+      kind: 'toolCall'
+      outputIndex?: number
+      itemId?: string
+      callId?: string
+      name: string
+      argumentDeltas?: ReadonlyArray<string>
+      argumentsDone?: string
+    }
+  | { kind: 'opaque'; outputIndex?: number; itemType: string; itemId?: string }
+
+/**
+ * Programmatically build SSE frames for a streaming OpenAI Responses generation: one or more
+ * sequential steps (see {@link ResponsesStreamStep}), followed by a terminal
+ * `response.completed`/`.incomplete`/`.failed` frame built via {@link buildResponsesResponse}. Steps
+ * are assigned `output_index` 0..N in array order unless a step specifies its own.
+ */
+export const buildResponsesStreamFrames = (input: {
+  steps: ReadonlyArray<ResponsesStreamStep>
+  model?: string
+  id?: string
+  status?: 'completed' | 'incomplete' | 'failed'
+  incompleteReason?: string
+  usage?: {
+    input_tokens?: number
+    output_tokens?: number
+    total_tokens?: number
+    cached_tokens?: number
+  }
+  error?: { code?: string; message?: string; type?: string } | null
+  /** Suppress the trailing terminal frame entirely (EOF-without-terminal-event tests). */
+  omitTerminal?: boolean
+}): SSEFrame[] => {
+  const frames: SSEFrame[] = []
+  const finalOutput: Array<Record<string, unknown>> = []
+
+  input.steps.forEach((step, i) => {
+    const outputIndex = step.outputIndex ?? i
+    if (step.kind === 'text') {
+      const itemId = step.itemId ?? synthId('msg')
+      const item = responsesOutputMessageItem({ id: itemId })
+      frames.push(responsesAddedFrame(outputIndex, item))
+      for (const d of step.deltas) frames.push(responsesTextDeltaFrame(outputIndex, itemId, d))
+      const doneItem = responsesOutputMessageItem({ id: itemId, content: step.deltas.join('') })
+      frames.push(responsesDoneFrame(outputIndex, doneItem))
+      finalOutput.push(doneItem)
+    } else if (step.kind === 'refusal') {
+      const itemId = step.itemId ?? synthId('msg')
+      const item = responsesOutputMessageItem({ id: itemId })
+      frames.push(responsesAddedFrame(outputIndex, item))
+      for (const d of step.deltas) frames.push(responsesRefusalDeltaFrame(outputIndex, itemId, d))
+      const doneItem = responsesOutputMessageItem({ id: itemId, refusal: step.deltas.join('') })
+      frames.push(responsesDoneFrame(outputIndex, doneItem))
+      finalOutput.push(doneItem)
+    } else if (step.kind === 'reasoning') {
+      const itemId = step.itemId ?? synthId('rs')
+      const item = responsesReasoningItem({ id: itemId })
+      frames.push(responsesAddedFrame(outputIndex, item))
+      for (const d of step.summaryDeltas ?? []) {
+        frames.push(responsesReasoningSummaryDeltaFrame(outputIndex, itemId, d))
+      }
+      for (const d of step.reasoningDeltas ?? []) {
+        frames.push(responsesReasoningTextDeltaFrame(outputIndex, itemId, d))
+      }
+      const doneItem = responsesReasoningItem({
+        id: itemId,
+        summary: (step.summaryDeltas ?? []).join('') || undefined,
+        content: (step.reasoningDeltas ?? []).join('') || undefined,
+        encryptedContent: step.encryptedContent,
+      })
+      frames.push(responsesDoneFrame(outputIndex, doneItem))
+      finalOutput.push(doneItem)
+    } else if (step.kind === 'toolCall') {
+      const itemId = step.itemId ?? synthId('fc')
+      const callId = step.callId ?? synthId('call')
+      const item = responsesFunctionCallItem({ itemId, callId, name: step.name, arguments: '' })
+      frames.push(responsesAddedFrame(outputIndex, item))
+      for (const d of step.argumentDeltas ?? []) {
+        frames.push(responsesFunctionCallArgsDeltaFrame(outputIndex, itemId, d))
+      }
+      const finalArgs = step.argumentsDone ?? (step.argumentDeltas ?? []).join('')
+      frames.push(responsesFunctionCallArgsDoneFrame(outputIndex, itemId, finalArgs))
+      const doneItem = responsesFunctionCallItem({
+        itemId,
+        callId,
+        name: step.name,
+        arguments: finalArgs,
+      })
+      frames.push(responsesDoneFrame(outputIndex, doneItem))
+      finalOutput.push(doneItem)
+    } else {
+      // opaque / hosted-tool item type — added + done, no deltas, no slot expected.
+      const itemId = step.itemId ?? synthId('hosted')
+      const item = { type: step.itemType, id: itemId }
+      frames.push(responsesAddedFrame(outputIndex, item))
+      frames.push(responsesDoneFrame(outputIndex, item))
+      finalOutput.push(item)
+    }
+  })
+
+  if (input.omitTerminal !== true) {
+    const response = buildResponsesResponse({
+      id: input.id,
+      model: input.model,
+      output: finalOutput,
+      status: input.status ?? 'completed',
+      incompleteReason: input.incompleteReason,
+      usage: input.usage,
+      error: input.error,
+    })
+    if (input.status === 'failed') {
+      frames.push(responsesTerminalFrame('failed', response))
+    } else {
+      frames.push(
+        responsesTerminalFrame(input.status === 'incomplete' ? 'incomplete' : 'completed', response)
+      )
+    }
+  }
+
+  return frames
+}
+
+/** One-liner cassette for a single non-streaming OpenAI Responses `/v1/responses` response. */
+export const singleResponsesResponseCassette = (
+  name: string,
+  input: Parameters<typeof buildResponsesResponse>[0]
+): Cassette => ({
+  name,
+  interactions: [
+    {
+      label: 'single-responses-response',
+      request: { method: 'POST' },
+      response: { body: buildResponsesResponse(input) },
+    },
+  ],
+})
+
+/** One-liner cassette for a single streaming OpenAI Responses `/v1/responses` response. */
+export const singleResponsesStreamCassette = (
+  name: string,
+  input: Parameters<typeof buildResponsesStreamFrames>[0]
+): Cassette => ({
+  name,
+  interactions: [
+    {
+      label: 'single-responses-stream',
+      request: { method: 'POST' },
+      response: { sse: buildResponsesStreamFrames(input) },
+    },
+  ],
+})

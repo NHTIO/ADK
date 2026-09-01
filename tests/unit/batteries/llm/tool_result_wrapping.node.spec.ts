@@ -13,10 +13,12 @@ import { AnthropicMessagesAdapter } from '@nhtio/adk/batteries/llm/anthropic_mes
 import { WebLLMChatCompletionsAdapter } from '@nhtio/adk/batteries/llm/webllm_chat_completions'
 import { OpenAIChatCompletionsAdapter } from '@nhtio/adk/batteries/llm/openai_chat_completions'
 import { renderChatCompletionsToolCallResult } from '@nhtio/adk/batteries/llm/openai_chat_completions'
+// `chat_common/helpers` is a deliberately un-`@module`-tagged private module, absent from the
+// published `exports` map. Both symbols are re-exported publicly by the litert_lm barrel.
 import {
   looksLikeSpooledArtifact,
   renderArtifactHandleBody,
-} from '@nhtio/adk/batteries/llm/chat_common/helpers'
+} from '@nhtio/adk/batteries/llm/litert_lm'
 import {
   Media,
   SpooledArtifact,

@@ -14,6 +14,7 @@
  * carries no import edge back to any individual battery.
  */
 
+import { isObject } from '@nhtio/adk/guards'
 import type {
   Tool,
   ArtifactTool,
@@ -932,3 +933,41 @@ export const renderChatCompletionsSystemPrompt = async (input: {
 }
 /** Default system-prompt renderer; alias of {@link renderChatCompletionsSystemPrompt}. */
 export const defaultRenderChatCompletionsSystemPrompt = renderChatCompletionsSystemPrompt
+
+// ─── canonicalFingerprint (wire-agnostic replay-prefix fingerprinting) ────────
+
+/**
+ * Canonical JSON-ish stringification with recursively sorted object keys.
+ *
+ * @remarks
+ * Array order and value identity are preserved verbatim; only object key order is normalised, so
+ * two structurally identical inputs built with keys in a different order fingerprint identically.
+ */
+const canonical = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
+  if (isObject(value))
+    return `{${Object.keys(value as object)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k])}`)
+      .join(',')}}`
+  return JSON.stringify(value)
+}
+
+/**
+ * Computes a SHA-256 fingerprint of `value` via {@link canonical} canonicalisation, over its UTF-8
+ * bytes, using `globalThis.crypto.subtle.digest`.
+ *
+ * @remarks
+ * Wire-shape-agnostic replay-prefix fingerprinting primitive shared across the Chat-family LLM
+ * batteries' "reasoning replay" features (Anthropic's signed `thinking` blocks, and any sibling
+ * battery's equivalent). Each battery assembles its own wire-shaped prefix object — e.g. `{ model,
+ * system, tools, messages }` for Anthropic Messages — and passes it here; this primitive carries no
+ * knowledge of any individual wire shape.
+ */
+export const canonicalFingerprint = async (value: unknown): Promise<string> => {
+  const bytes = new TextEncoder().encode(canonical(value))
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest), (x) => x.toString(16).padStart(2, '0')).join('')
+}
+/** Default canonical-fingerprint primitive; alias of {@link canonicalFingerprint}. */
+export const defaultCanonicalFingerprint = canonicalFingerprint

@@ -5,7 +5,6 @@
  */
 
 import { Media } from '@nhtio/adk/common'
-import { isObject } from '@nhtio/adk/guards'
 
 export {
   descriptionToChatCompletionsJsonSchema,
@@ -45,13 +44,6 @@ export {
 
 import { E_ANTHROPIC_MESSAGES_UNSUPPORTED_MEDIA_MODALITY } from './exceptions'
 import {
-  descriptionToChatCompletionsJsonSchema,
-  renderUntrustedContent,
-  renderTrustedContent,
-  defaultRenderArtifactHandleBody,
-  looksLikeSpooledArtifact,
-} from '../chat_common/helpers'
-import {
   escapeXmlAttribute,
   floorTrustTier,
   memoryToAttrs,
@@ -59,6 +51,14 @@ import {
   retrievableToAttrs,
   sanitizeFilenameForDescription,
   sanitizeMimeType,
+} from '../chat_common/helpers'
+import {
+  descriptionToChatCompletionsJsonSchema,
+  renderUntrustedContent,
+  renderTrustedContent,
+  defaultRenderArtifactHandleBody,
+  looksLikeSpooledArtifact,
+  canonicalFingerprint,
 } from '../chat_common/helpers'
 import type { ChatHelpersCommon } from '../chat_common/types'
 import type {
@@ -410,27 +410,14 @@ export const renderAnthropicSegmentedSystemPrompt = async (input: {
 /** Default segmented system renderer. */
 export const defaultRenderAnthropicSegmentedSystemPrompt = renderAnthropicSegmentedSystemPrompt
 
-const canonical = (value: unknown): string => {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
-  if (isObject(value))
-    return `{${Object.keys(value as object)
-      .sort()
-      .map((k) => `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k])}`)
-      .join(',')}}`
-  return JSON.stringify(value)
-}
-const fingerprint = async (value: unknown): Promise<string> => {
-  const bytes = new TextEncoder().encode(canonical(value))
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes)
-  return Array.from(new Uint8Array(digest), (x) => x.toString(16).padStart(2, '0')).join('')
-}
-
 /**
  * Computes the SHA-256 fingerprint used for Anthropic thinking replay.
  *
  * The input is the exact assembled request prefix: model, resolved system, tools, and messages
- * through the content block immediately before the thinking block. Object keys are recursively sorted;
- * array order and block boundaries are preserved.
+ * through the content block immediately before the thinking block. Assembles the Anthropic-shaped
+ * prefix object and delegates the canonicalisation + hashing to the shared, wire-agnostic
+ * {@link canonicalFingerprint} primitive: object keys are recursively sorted; array order and block
+ * boundaries are preserved.
  */
 export const fingerprintAnthropicMessagesPrefix = async (input: {
   model: string
@@ -449,7 +436,7 @@ export const fingerprintAnthropicMessagesPrefix = async (input: {
               ? message.content.slice(0, input.throughBlock!.contentIndex)
               : message.content,
         }))
-  return fingerprint({
+  return canonicalFingerprint({
     model: input.model,
     system: input.system,
     tools: input.tools,

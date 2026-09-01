@@ -15,6 +15,26 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-09-01
+
+### Added
+
+- **New `openai_responses` LLM battery** — a vanilla adapter for OpenAI's Responses API, distinct from `openai_chat_completions` in wire shape rather than in provider. The Responses API replaces the flat `messages[]` array with a flat `input: Item[]` array, where a tool call and its result are two *sibling top-level items* (`function_call` then `function_call_output`) rather than one message carrying both; the system prompt lives in a top-level `instructions` string by default (`systemPromptChannel` can render it as a leading `developer`/`system` item instead for gateways that only understand the item form). Hand-rolled `fetch` + SSE, no `openai` SDK dependency, matching the sibling batteries.
+  - **Native reasoning-item replay** (`reasoningReplay: 'off' | 'encrypted' | 'summary-only'`, default `'off'`; also requires `replayCompatibility: ['openai-responses-reasoning-v1']`, which defaults to an empty list). Guarded by an adjacency-sweep pass over the assembled `input`, because the Responses API enforces an **undocumented** constraint — a `reasoning` item must sit immediately beside its paired output item, in both directions ([`openai/openai-node#1791`](https://github.com/openai/openai-node/issues/1791), reproduced across five official SDKs). OpenAI's own docs state the opposite (that stray reasoning items are silently discarded), so a rejection is treated as *recoverable*: the adapter strips every reasoning item and retries once, degrading to no-replay rather than failing the turn.
+  - **Document media** (`Media.kind === 'document'` → `input_file`) with the wire contract confirmed against the live API. Audio and video have no Responses representation and route through `unsupportedMediaPolicy` — unlike `openai_chat_completions`, which supports audio natively.
+  - **Deliberately stateless.** `store` is hard-rejected as a settable option (always sent `false`), and `previous_response_id` / `conversation` / `prompt` / `context_management` are refused outright: ADK owns history, and the full `input` array is resent every iteration. `background: true` is rejected at validation time, since the adapter has no polling/resumption path for an async response.
+  - Extracted the canonical-JSON + SHA-256 prefix-fingerprinting primitive out of `anthropic_messages`'s private helpers into a shared `canonicalFingerprint()` in `chat_common`, now used by both batteries (a refactor with no behaviour change to the Anthropic path).
+- New `tests/unit/build/published_subpath_imports.node.spec.ts` — asserts every `@nhtio/adk/...` subpath the test suite imports actually exists in the published `exports` map, using the same `getEntries` the packaging step uses. Subpaths exist only for `@module`-tagged modules, and several (`batteries/llm/chat_common` and its `helpers`/`types`) are deliberately private; because only the master-only smoke jobs resolve the built package, a bad import previously survived every MR pipeline and broke master. This closes that gap on every MR.
+
+### Fixed
+
+- **`tests/_fixtures/scripted_executor.ts` imported a subpath that is not published**, which took all four smoke checks and 19 functional suites down at import time with `Missing "./batteries/llm/chat_common/helpers" specifier`. The bad import dated to 2026-08-11 and had simply never met a master smoke run.
+- **Pinecone integration tests leaked namespaces** until the `adk-vector-test` index hit its 100-namespace serverless cap and every subsequent upsert failed. Two causes: the cleanup list was populated only *after* `connect()`/`createCollection()` succeeded — so a store that failed to initialise (which is what happens once the cap is reached) was never tracked and never reclaimed, making each failing run leak further; and a failed reclaim logged one `console.warn` per store, which scrolls past unread in an otherwise-passing run. Cleanup now registers up front and reports leaks loudly, in aggregate.
+
+### Changed
+
+- The `AI Code Review` CI job now runs with `NODE_OPTIONS=--max-old-space-size=8192`. Node caps its default old-space around 4 GB regardless of host memory, so the `bigmem` runner tag was supplying memory V8 would not use; the job died with `Reached heap limit … JavaScript heap out of memory` (exit 134) after climbing to ~2.5 GB. Peak heap scales with the concurrent reviewer count and the diff size, so a further OOM at 8 GiB means fewer seats in `REVIEW_MODELS`, not a larger ceiling.
+
 ## 2026-08-30
 
 ### Fixed
@@ -27,6 +47,21 @@ upgrading.
 ### Added
 
 - Published-plugin test coverage for the `.empty('')` clearing method, which shares one predicate with `.allow('')` but had never been exercised independently and could therefore regress unnoticed.
+
+## 2026-08-29
+
+### Fixed
+
+- `openai_responses` battery: fixed four issues surfaced by AI code review on the `openai_responses`/empty-string-fixes MR:
+  - Timeline media rendering ignored a caller-supplied `renderUntrustedContent`/`renderTrustedContent` override, falling back to the module defaults on nested media blocks instead.
+  - Reasoning-item persistence recorded the *preceding* item's id as `pairedItemId` instead of the *following* item's id, undermining the reasoning/output-item adjacency-sweep validation.
+  - Streaming SSE frame parsing only split on a bare `\n\n`, silently dropping every event once a gateway/proxy normalised line endings to CRLF.
+  - A terminal event (or any other event) arriving as the very last bytes of a stream, with no trailing blank-line separator before EOF, was left sitting unprocessed in the internal buffer and silently dropped — the decoder is now flushed and the final buffered frame is processed once more after EOF.
+  - `reasoningReplay: 'summary-only'` returned the stored reasoning item verbatim instead of stripping `content`/`encrypted_content`, leaking full reasoning text the mode promises to omit.
+
+### Changed
+
+- `openai_responses` battery: `background: true` is now rejected at validation time (`E_INVALID_OPENAI_RESPONSES_OPTIONS`) rather than silently accepted and mishandled — the adapter has no polling/resumption logic for a `queued`/`in_progress` background response, so it was previously treating the initial async response as a completed, empty answer and discarding whatever the background job eventually produced. `background: false`/omitted (the default, synchronous request) is unaffected.
 
 ## 2026-08-28
 
@@ -46,6 +81,12 @@ upgrading.
   - **`datetime_extended`/`datetime_math`/`time`** — timezone-shaped params now accept `""`, resolving to UTC exactly like an omitted value (`time`'s `get_current_time`/`convert_time`, which lacked the other two batteries' existing falsy-check normalization, needed an additional handler-side fix to avoid a worse "Invalid timezone" error after the schema loosened).
   - **`formatting`** — `currency` now accepts `""`, degrading to the same "currency required" error as omission; `locale` deliberately keeps rejecting `""` (not a valid BCP 47 tag) via an explicit lint-rule exception.
   - **`string_processing`**'s `string_extract` — `flags` now accepts `""`, degrading to the same effective `'g'`-flag behavior as omission.
+
+- New `openai_responses` LLM battery: a vanilla adapter for OpenAI's Responses API, wrapping the flat `input: Item[]` wire shape (a tool call and its result are two sibling top-level items — `function_call`/`function_call_output` — not one message containing both) rather than the Chat Completions `messages[]` array. Ships hand-rolled `fetch`+SSE streaming (no `openai` SDK dependency), the same swappable-translation-helper and three-layer-options-merge design as the sibling Chat Completions/Anthropic batteries, native reasoning-item replay (`reasoningReplay: 'off' | 'encrypted' | 'summary-only'`, with a reasoning/output-item adjacency-sweep pass working around an undocumented pairing constraint in the upstream API), and document-media support (`Media.kind === 'document'` → `input_file` with a `data:<mime>;base64,<b64>` payload, confirmed against the real API). The adapter is deliberately stateless: `store` is hard-rejected as a settable option (always sent as `false`), and `previous_response_id`/`conversation`/`prompt`/`context_management` are all rejected outright — the full `input` array is resent every iteration, same as every other battery. No Azure/Codex/Mistral/Gemini/Bedrock variants shipped alongside it; this is the vanilla OpenAI Responses API only.
+
+### Fixed
+
+- Extracted the canonical-JSON-plus-SHA-256 prefix-fingerprinting primitive out of `anthropic_messages`'s private `fingerprint()`/`canonical()` pair into a new exported `canonicalFingerprint()` in `chat_common/helpers.ts`, reused by both the Anthropic battery (refactor only, no behavior change) and the new `openai_responses` battery's reasoning-replay adjacency sweep.
 
 ## 2026-08-27
 

@@ -32,7 +32,11 @@ import {
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { Cassette } from '../../../../_fixtures/cassette'
 import type { DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
-import type { RawGenerationObservation } from '@nhtio/adk/batteries/llm/chat_common'
+// `chat_common` (and its `types`/`helpers`) are deliberately un-`@module`-tagged private modules,
+// so they are absent from the published `exports` map — importing from there resolves under
+// vitest's source aliases but breaks against the installed package. Consume the identical type
+// through a battery barrel that re-exports it publicly.
+import type { RawGenerationObservation } from '@nhtio/adk/batteries/llm/openai_chat_completions'
 import type { AnthropicMessagesErrorStatusInput } from '@nhtio/adk/batteries/llm/anthropic_messages'
 
 const dt = (iso: string) => DateTime.fromISO(iso, { zone: 'utc' })
