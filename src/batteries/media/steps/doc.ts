@@ -17,6 +17,8 @@ import { MIME } from '../formats'
 import { argOf } from '../runtime'
 import { isError } from '@nhtio/adk/guards'
 import { E_MEDIA_STEP_FAILED } from '../exceptions'
+import { isTextual } from '@nhtio/adk/lib/mime/is_textual'
+import { decodeText } from '@nhtio/adk/lib/text/decode_text'
 import { redactStep as textRedactStep, updateTextStep as textUpdateTextStep } from './text'
 import type { default as JSZipNS } from 'jszip'
 import type { RegExpRef, MediaArgScalar } from '../plan'
@@ -305,7 +307,7 @@ const redactPdf = async (
  */
 export const docRedactStep: StepImpl = async (ctx) => {
   const mime = ctx.payload.mimeType.toLowerCase().split(';')[0].trim()
-  if (mime.startsWith('text/')) return textRedactStep(ctx)
+  if (isTextual(mime)) return textRedactStep(ctx)
   const raw = ctx.step.args.match
   const patterns = (Array.isArray(raw) ? raw : [raw]) as MediaArgScalar[]
   const replacement = argOf<string>(ctx.step, 'replace') ?? '█'
@@ -372,8 +374,8 @@ const sanitizeTextNodes = (xml: string, textTag: 'w:t' | 'a:t'): string =>
 /** `sanitize` — strip blocked control characters from text nodes / text media. */
 export const docSanitizeStep: StepImpl = async (ctx) => {
   const mime = ctx.payload.mimeType.toLowerCase().split(';')[0].trim()
-  if (mime.startsWith('text/')) {
-    const text = new TextDecoder().decode(ctx.payload.bytes)
+  if (isTextual(mime)) {
+    const text = decodeText(ctx.payload.bytes)
     const cleaned = stripControlChars(text)
     return { kind: 'media', payload: { ...ctx.payload, bytes: new TextEncoder().encode(cleaned) } }
   }
@@ -395,8 +397,8 @@ const normalizeText = (text: string): string =>
 /** `normalize` — CRLF→LF + trailing-whitespace removal in text nodes / text media. */
 export const docNormalizeStep: StepImpl = async (ctx) => {
   const mime = ctx.payload.mimeType.toLowerCase().split(';')[0].trim()
-  if (mime.startsWith('text/')) {
-    const text = new TextDecoder().decode(ctx.payload.bytes)
+  if (isTextual(mime)) {
+    const text = decodeText(ctx.payload.bytes)
     return {
       kind: 'media',
       payload: { ...ctx.payload, bytes: new TextEncoder().encode(normalizeText(text)) },
@@ -422,7 +424,7 @@ export const docNormalizeStep: StepImpl = async (ctx) => {
 /** `update_text` — anchor replacement; DOCX/PPTX/ODF in-place, TARGET_NOT_FOUND when absent. */
 export const docUpdateTextStep: StepImpl = async (ctx) => {
   const mime = ctx.payload.mimeType.toLowerCase().split(';')[0].trim()
-  if (mime.startsWith('text/')) return textUpdateTextStep(ctx)
+  if (isTextual(mime)) return textUpdateTextStep(ctx)
   const anchor = argOf<string>(ctx.step, 'anchor') as string
   const replace = argOf<string>(ctx.step, 'replace') ?? ''
   const escapedAnchor = anchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')

@@ -5,7 +5,7 @@ import {
   parseStructuredPatch,
   applyUpdateHunks,
   normalizeWorkspacePath,
-} from '../../../../src/batteries/media/steps/patch'
+} from '../../../../src/lib/patch'
 import type { StepPayload } from '../../../../src/batteries/media'
 
 /**
@@ -66,6 +66,24 @@ describe('structured apply_patch — parser', () => {
     expect(() =>
       applyUpdateHunks('a\nb\n', [{ oldLines: ['zzz'], newLines: ['y'], added: 1, removed: 1 }])
     ).toThrow(/could not be applied cleanly/)
+  })
+
+  // A localized edit must not rewrite every line of a CRLF file. Without the convention-aware
+  // join this returns all-LF text, so a one-line change reads as a whole-file diff.
+  it('preserves the CRLF convention of the file it edits', () => {
+    const out = applyUpdateHunks('a\r\nb\r\nc\r\n', [
+      { oldLines: ['b'], newLines: ['edited'], added: 1, removed: 1 },
+    ])
+    expect(out).toBe('a\r\nedited\r\nc\r\n')
+    expect(out).not.toContain('\n\n')
+  })
+
+  it('leaves an LF file on LF', () => {
+    expect(
+      applyUpdateHunks('a\nb\nc\n', [
+        { oldLines: ['b'], newLines: ['edited'], added: 1, removed: 1 },
+      ])
+    ).toBe('a\nedited\nc\n')
   })
 })
 

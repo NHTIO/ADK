@@ -70,12 +70,25 @@ export const createRipgrepSearch = (
     root: string
     pattern: string
     maxDepth: number
+    limit: number
+    ignoreCase?: boolean
+    literal?: boolean
+    glob?: string
+    iglob?: string
+    follow?: boolean
+    hidden?: boolean
+    noIgnore?: boolean
     signal?: AbortSignal
   }): AsyncIterable<HitFrame>
   findPaths(o: {
     root: string
     glob: string
     maxDepth: number
+    limit: number
+    iglob?: string
+    follow?: boolean
+    hidden?: boolean
+    noIgnore?: boolean
     signal?: AbortSignal
   }): AsyncIterable<PathFrame>
 } => {
@@ -119,9 +132,19 @@ export const createRipgrepSearch = (
   }
   return {
     async *searchContent(o) {
+      if (!Number.isInteger(o.limit) || o.limit < 1)
+        throw new Error('limit must be a positive integer')
+      if (o.follow)
+        throw new Error('follow is refused: descendant symlink containment audit pending')
       const argv = [
         'rg',
         '--json',
+        ...(o.ignoreCase ? ['--ignore-case'] : []),
+        ...(o.literal ? ['--fixed-strings'] : []),
+        ...(o.glob ? ['--glob', assertArgvValue(o.glob)] : []),
+        ...(o.iglob ? ['--iglob', assertArgvValue(o.iglob)] : []),
+        ...(o.hidden ? ['--hidden'] : []),
+        ...(o.noIgnore ? ['--no-ignore'] : []),
         '--max-depth',
         String(o.maxDepth),
         '--',
@@ -137,6 +160,8 @@ export const createRipgrepSearch = (
         }
         throw toRipgrepError(result.failure)
       }
+      let shown = 0
+      let overLimit = false
       for (const line of result.out.split('\n')) {
         if (!line) continue
         try {
@@ -149,28 +174,44 @@ export const createRipgrepSearch = (
             item.data?.path?.text &&
             item.data.line_number &&
             item.data.lines
-          )
+          ) {
+            if (shown >= o.limit) {
+              overLimit = true
+              break
+            }
             yield {
               kind: 'item',
               path: item.data.path.text,
               line: item.data.line_number,
               text: item.data.lines.text ?? '',
             }
+            shown++
+          }
         } catch {
           /* malformed rg diagnostics are an I/O failure in the real adapter */
         }
       }
-      yield { kind: 'done', complete: true }
+      yield overLimit
+        ? { kind: 'done', complete: false, omitted: 'over-limit', bound: 'limit', shown }
+        : { kind: 'done', complete: true }
     },
     async *findPaths(o) {
+      if (!Number.isInteger(o.limit) || o.limit < 1)
+        throw new Error('limit must be a positive integer')
+      if (o.follow)
+        throw new Error('follow is refused: descendant symlink containment audit pending')
       const argv = [
         'rg',
         '--files',
         '--glob',
         assertArgvValue(o.glob),
+        ...(o.iglob ? ['--iglob', assertArgvValue(o.iglob)] : []),
+        ...(o.hidden ? ['--hidden'] : []),
+        ...(o.noIgnore ? ['--no-ignore'] : []),
         '--max-depth',
         String(o.maxDepth),
-        o.root,
+        '--',
+        assertArgvValue(o.root),
       ]
       assertAdapterFlags(argv)
       const result = await run(argv, o.root, o.signal)
@@ -181,8 +222,20 @@ export const createRipgrepSearch = (
         }
         throw toRipgrepError(result.failure)
       }
-      for (const path of result.out.split('\n')) if (path) yield { kind: 'item', path }
-      yield { kind: 'done', complete: true }
+      let shown = 0
+      let overLimit = false
+      for (const path of result.out.split('\n')) {
+        if (!path) continue
+        if (shown >= o.limit) {
+          overLimit = true
+          break
+        }
+        yield { kind: 'item', path }
+        shown++
+      }
+      yield overLimit
+        ? { kind: 'done', complete: false, omitted: 'over-limit', bound: 'limit', shown }
+        : { kind: 'done', complete: true }
     },
   }
 }

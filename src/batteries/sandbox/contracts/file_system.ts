@@ -23,6 +23,15 @@ export interface SandboxFileSystem {
     bytes: ReadableStream<Uint8Array> | Uint8Array,
     o?: { signal?: AbortSignal }
   ): Promise<void>
+  /** Delete a path. Deletion is idempotent: deleting an absent path resolves. */
+  delete?(path: string, o?: { signal?: AbortSignal }): Promise<void>
+  /**
+   * Move a path. MUST overwrite an existing destination (POSIX move semantics).
+   * Dev-tools relies on this behaviour when breaking rename cycles.
+   */
+  rename?(from: string, to: string, o?: { signal?: AbortSignal }): Promise<void>
+  /** Create a directory. */
+  mkdir?(path: string, o?: { signal?: AbortSignal }): Promise<void>
 }
 
 /** Duck-type schema. */

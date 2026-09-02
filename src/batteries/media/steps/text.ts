@@ -11,16 +11,18 @@
 import { argOf } from '../runtime'
 import { isError } from '@nhtio/adk/guards'
 import { E_MEDIA_STEP_FAILED } from '../exceptions'
+import { isTextual } from '@nhtio/adk/lib/mime/is_textual'
+import { decodeText } from '@nhtio/adk/lib/text/decode_text'
 import { familyOf, replaceExtension, MIME } from '../formats'
 import {
   isStructuredPatch,
   parseStructuredPatch,
   applyOperations,
   normalizeWorkspacePath,
-} from './patch'
-import type { ParsedApplyPatch, WorkspaceFile } from './patch'
+} from '../../../lib/patch'
 import type { RegExpRef, MediaRef, MediaArgScalar } from '../plan'
 import type { StepImpl, StepResult, StepPayload } from '../runtime'
+import type { ParsedApplyPatch, WorkspaceFile } from '../../../lib/patch'
 
 /** One text chunk with its position in the source. */
 export interface Chunk {
@@ -101,21 +103,9 @@ export const splitFixed = (text: string, chunkSize: number, overlap: number): Ch
   return chunks
 }
 
-const decoder = new TextDecoder('utf-8', { fatal: false })
 const encoder = new TextEncoder()
 
-/** Decode payload bytes as UTF-8 text (UTF-16 BOM aware). */
-export const decodeText = (bytes: Uint8Array): string => {
-  if (bytes.length >= 2) {
-    if (bytes[0] === 0xff && bytes[1] === 0xfe) {
-      return new TextDecoder('utf-16le').decode(bytes.subarray(2))
-    }
-    if (bytes[0] === 0xfe && bytes[1] === 0xff) {
-      return new TextDecoder('utf-16be').decode(bytes.subarray(2))
-    }
-  }
-  return decoder.decode(bytes).replace(/\r\n?/g, '\n')
-}
+export { decodeText } from '@nhtio/adk/lib/text/decode_text'
 
 const textPayload = (source: StepPayload, text: string, suffix: string): StepPayload => ({
   bytes: encoder.encode(text),
@@ -148,8 +138,7 @@ export const chunkStep: StepImpl = async (ctx) => {
 export const extractTextStep: StepImpl = async (ctx) => {
   const family = familyOf(ctx.payload.mimeType)
   const mime = ctx.payload.mimeType.toLowerCase().split(';')[0].trim()
-  const isNativeText =
-    mime.startsWith('text/') || mime === MIME.JSON || mime === MIME.MD || mime === MIME.CSV
+  const isNativeText = isTextual(mime)
   if (!isNativeText) {
     throw new E_MEDIA_STEP_FAILED([
       'extract.text',
@@ -196,7 +185,7 @@ const applyRedaction = (text: string, patterns: MediaArgScalar[], replacement: s
 /** `redact` — Phase 0: the text-media path. Document-format in-place redaction lands later. */
 export const redactStep: StepImpl = async (ctx) => {
   const mime = ctx.payload.mimeType.toLowerCase()
-  if (!mime.startsWith('text/')) {
+  if (!isTextual(mime)) {
     throw new E_MEDIA_STEP_FAILED([
       'redact',
       `redaction for ${ctx.payload.mimeType} is not yet implemented in this build`,
@@ -212,7 +201,7 @@ export const redactStep: StepImpl = async (ctx) => {
 /** `update_text` — Phase 0: the text-media path. */
 export const updateTextStep: StepImpl = async (ctx) => {
   const mime = ctx.payload.mimeType.toLowerCase()
-  if (!mime.startsWith('text/')) {
+  if (!isTextual(mime)) {
     throw new E_MEDIA_STEP_FAILED([
       'update_text',
       `text update for ${ctx.payload.mimeType} is not yet implemented in this build`,

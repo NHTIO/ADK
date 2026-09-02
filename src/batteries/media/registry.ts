@@ -257,14 +257,18 @@ export const buildEngineRegistry = (
     const mw = new Middleware<EngineSelectionMiddlewareFn>()
     for (const fn of selection) mw.add(fn)
     let failed: unknown
+    // Flag, not a value test: `throw undefined` is legal JS and `failed !== undefined` cannot
+    // tell it from "no error", so a stage rejecting with undefined would be silently ignored.
+    let didFail = false
     await mw
       .runner()
       .errorHandler(async (error: unknown) => {
+        didFail = true
         failed = error
       })
       .finalHandler(async () => {})
       .run((fn, next) => Promise.resolve(fn(ctx, next)))
-    if (failed !== undefined) throw failed
+    if (didFail) throw failed
     // Re-filter: stages narrow/reorder, never widen. First survivor in the stages' order wins.
     for (const engine of ctx.candidates) {
       const survivor = candidates.find((c) => c.engine === engine)

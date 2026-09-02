@@ -125,6 +125,7 @@ export interface DerivedRules {
 export type Done =
   | { kind: 'done'; complete: true }
   | { kind: 'done'; complete: false; omitted: 'unexplored'; bound: 'maxDepth'; atDepth: number }
+  | { kind: 'done'; complete: false; omitted: 'over-limit'; bound: 'limit'; shown: number }
 /** List item frames followed by exactly one {@link Done}. */
 export type ListFrame = { kind: 'item'; path: string; entryKind: 'file' | 'dir' } | Done
 /** Path-search item frames followed by exactly one {@link Done}. */

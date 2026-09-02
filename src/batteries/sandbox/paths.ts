@@ -1,3 +1,4 @@
+import { isInstanceOf } from '../../lib/utils/guards'
 import { E_INVALID_SANDBOX_CONFIG, E_SANDBOX_PATH_ESCAPE } from './exceptions'
 import type { SandboxFileSystem } from './contracts/file_system'
 import type { PathTranslator } from './contracts/path_translator'
@@ -52,6 +53,31 @@ export const normalizeSandboxPath = (input: string): string => {
     } else parts.push(part)
   }
   return parts.join('/')
+}
+
+/**
+ * Create a symlink guard for paths whose final component may not exist yet.
+ * Stat failures are treated as absence, matching the sandbox regular-file helpers.
+ */
+export const createExistingSymlinkGuard = (
+  root: string,
+  fileSystem: SandboxFileSystem
+): ((relative: string) => Promise<void>) => {
+  const canonicalRoot = root.replaceAll('\\', '/').replace(/\/+$/g, '') || '/'
+  return async (relative: string): Promise<void> => {
+    const parts = relative ? relative.split('/') : []
+    for (let index = 0; index <= parts.length; index += 1) {
+      const candidate = parts.slice(0, index).join('/')
+      try {
+        const metadata = await fileSystem.stat(joinSandboxBackendPath(canonicalRoot, candidate))
+        if (metadata.kind === 'symlink')
+          throw new E_SANDBOX_PATH_ESCAPE([`Path rejected: ${relative}`])
+      } catch (error) {
+        if (isInstanceOf(error, 'E_SANDBOX_PATH_ESCAPE', E_SANDBOX_PATH_ESCAPE)) throw error
+        break
+      }
+    }
+  }
 }
 
 /** Create a translator that applies the five-step, workspace-relative path policy. */

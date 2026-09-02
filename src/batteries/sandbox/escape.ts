@@ -21,6 +21,8 @@ export const DOUBLE_DASH_BINARIES = ['cp', 'rg'] as const
  */
 export const ALLOWED_RIPGREP_FLAGS = [
   '--files',
+  '--ignore-case',
+  '--fixed-strings',
   '--hidden',
   '--follow',
   '--no-ignore',

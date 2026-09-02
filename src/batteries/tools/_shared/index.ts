@@ -215,9 +215,13 @@ export const runInputPipeline = async <C>(
 ): Promise<string | undefined> => {
   let reached = false
   let caught: unknown
+  // Flag, not a value test: `throw undefined` is legal JS and `caught !== undefined`
+  // cannot tell it from "no error", so a stage rejecting with undefined is ignored.
+  let didCatch = false
   await mw
     .runner()
     .errorHandler(async (error: unknown) => {
+      didCatch = true
       caught = error
     })
     .finalHandler(async () => {
@@ -225,7 +229,7 @@ export const runInputPipeline = async <C>(
     })
     .run((fn, next) => Promise.resolve(fn(ctx, next)))
 
-  if (caught !== undefined) {
+  if (didCatch) {
     if (isShortCircuit(caught)) return caught.result
     throw caught
   }
@@ -250,9 +254,13 @@ export const runOutputPipeline = async <C>(
 ): Promise<void> => {
   let reached = false
   let caught: unknown
+  // Flag, not a value test: `throw undefined` is legal JS and `caught !== undefined`
+  // cannot tell it from "no error", so a stage rejecting with undefined is ignored.
+  let didCatch = false
   await mw
     .runner()
     .errorHandler(async (error: unknown) => {
+      didCatch = true
       caught = error
     })
     .finalHandler(async () => {
@@ -260,7 +268,7 @@ export const runOutputPipeline = async <C>(
     })
     .run((fn, next) => Promise.resolve(fn(ctx, next)))
 
-  if (caught !== undefined) throw caught
+  if (didCatch) throw caught
   if (!reached) throw new Error(`${label} output pipeline did not call next().`)
 }
 

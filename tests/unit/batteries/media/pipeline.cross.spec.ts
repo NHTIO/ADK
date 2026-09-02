@@ -214,6 +214,38 @@ describe('step interceptors (the use seam)', () => {
     await expect(mp(textPayload('x')).extractText()).rejects.toThrow(/DLP scan rejected/)
   })
 
+  it('an interceptor that does not call next or short-circuit fails the step', async () => {
+    const blocker: MediaStepMiddlewareFn = async () => {
+      // Intentionally return without advancing the onion.
+    }
+    const mp = await createMediaPipeline({ use: [blocker] })
+    await expect(mp(textPayload('x')).extractText()).rejects.toThrow(
+      /did not call next\(\) and did not short-circuit/
+    )
+  })
+
+  // `throw undefined` is legal JS, so a sentinel that tests the captured VALUE cannot tell it
+  // from "nothing was thrown" — the onion would resolve as a success and the step would appear
+  // to have run. The capture is flagged instead, and this pins that.
+  it('surfaces an interceptor that throws undefined rather than swallowing it', async () => {
+    const nihilist: MediaStepMiddlewareFn = async () => {
+      throw undefined
+    }
+    const mp = await createMediaPipeline({ use: [nihilist] })
+    let thrown: any = '(nothing thrown)'
+    try {
+      await mp(textPayload('x')).extractText()
+    } catch (error) {
+      thrown = error
+    }
+    // It surfaces as a wrapped step failure (media wraps any non-E_MEDIA_ throw), but the
+    // DETAIL must not be the did-not-call-next diagnostic: with a value-test sentinel the onion
+    // sees "no error", falls through to `onNoNext`, and blames the interceptor's contract for
+    // what was actually a rejection.
+    expect(thrown?.name).toBe('E_MEDIA_STEP_FAILED')
+    expect(String(thrown?.message)).not.toMatch(/did not call next\(\)/)
+  })
+
   it('the same chain can be awaited twice (fresh runner per execution)', async () => {
     const mp = await createMediaPipeline({ use: [async (_ctx, next) => next()] })
     const chain = mp(textPayload('a.\n\nb.')).chunk()

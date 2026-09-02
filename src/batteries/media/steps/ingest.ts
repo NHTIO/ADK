@@ -12,10 +12,11 @@
  */
 
 import { argOf } from '../runtime'
-import { decodeText } from './text'
 import { isError } from '@nhtio/adk/guards'
 import { MIME, familyOf } from '../formats'
 import { E_MEDIA_STEP_FAILED } from '../exceptions'
+import { isTextual } from '@nhtio/adk/lib/mime/is_textual'
+import { decodeText } from '@nhtio/adk/lib/text/decode_text'
 import type { default as JSZipNS } from 'jszip'
 import type { default as ExcelJSNS } from 'exceljs'
 import type { StepImpl, StepContext } from '../runtime'
@@ -186,6 +187,8 @@ export const extractTextDeepStep: StepImpl = async (ctx) => {
     asText: text,
   })
 
+  if (isTextual(mime) && ocrMode !== 'force') return asData(decodeText(ctx.payload.bytes))
+
   if (mime.startsWith('image/')) return asData(await runOcr(ctx))
 
   if (ocrMode === 'force') return asData(await runOcr(ctx))
@@ -211,9 +214,6 @@ export const extractTextDeepStep: StepImpl = async (ctx) => {
     return asData(await extractOdfText(ctx))
   }
   if (mime === MIME.PPTX) return asData(await extractPptxText(ctx))
-  if (mime.startsWith('text/') || mime === MIME.JSON) {
-    return asData(decodeText(ctx.payload.bytes))
-  }
   fail(
     VERB,
     `text extraction for ${mime} is not supported in this build. For PPT/legacy formats: convert to=pptx | extract text (requires a convert engine).`

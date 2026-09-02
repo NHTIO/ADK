@@ -13,6 +13,7 @@ export type SandboxOutcome =
       limit: number
     }
   | { kind: 'scope-limited'; shown: number; atDepth: number; bound: 'maxDepth' }
+  | { kind: 'result-limited'; shown: number; limit: number; bound: 'limit' }
   | { kind: 'not-a-regular-file'; path: string; kind_: string }
   | { kind: 'is-a-directory'; path: string }
   | {
@@ -83,6 +84,8 @@ export const defaultSandboxNarrator: SandboxNarrator = (o) => {
       return `Output exceeded ${o.bound} (${o.observedAtLeast}+ bytes; limit ${o.limit}); retry with a smaller request or raise the limit.`
     case 'scope-limited':
       return `Search stopped at depth ${o.atDepth}; raise max_depth and try again.`
+    case 'result-limited':
+      return `Search stopped after ${o.shown} results; raise the limit (${o.limit}) and try again.`
     case 'not-a-regular-file':
       return `Not a regular file: <${o.path}>; retry with a regular file or use the directory operation.`
     case 'is-a-directory':

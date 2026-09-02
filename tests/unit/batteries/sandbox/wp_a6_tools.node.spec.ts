@@ -191,6 +191,15 @@ describe('WP-A6 workspace tools', () => {
     expect(result).toContain('5 bytes')
   })
 
+  it('rejects omitted, zero, and non-integer search limits', async () => {
+    const { fs } = makeFs({})
+    const all = await tools(() => ({ approved: true }), fs)
+    const search = all.find((x) => x.name === 'search_files')!
+    await expect(search.executor(ctx({ n: 0 }))({ pattern: 'x' })).rejects.toThrow()
+    await expect(search.executor(ctx({ n: 0 }))({ pattern: 'x', limit: 0 })).rejects.toThrow()
+    await expect(search.executor(ctx({ n: 0 }))({ pattern: 'x', limit: 1.5 })).rejects.toThrow()
+  })
+
   it('uses max_depth defaults and overrides, and announces scope without phantom counts', async () => {
     const { fs } = makeFs({})
     fs.list = async function* (_p, o) {
@@ -252,7 +261,7 @@ describe('WP-A6 workspace tools', () => {
       },
     }
     const ss = await createSandboxTools(opts)
-    const result = await ss[6].executor(ctx(writes))({ pattern: 'none', path: '' })
+    const result = await ss[6].executor(ctx(writes))({ pattern: 'none', path: '', limit: 100 })
     const text = await (result as SpooledJsonArtifact).asString()
     expect(text).toMatch(/^No matches/)
     fs.list = async function* () {
@@ -262,6 +271,114 @@ describe('WP-A6 workspace tools', () => {
       cause: expect.objectContaining({ code: 'E_SANDBOX_FAILED' }),
     })
     expect(search.name).toBe('search_files')
+  })
+
+  // The BYO half of the follow rule: an adapter that HAS verified containment declares it and
+  // gets the full option back. Without this, narrowing the shared schema would silently disable
+  // the flag for every deployment, which is what makes the narrowing safe rather than blunt.
+  it('accepts follow when the adapter declares it contains symlinked descendants', async () => {
+    const { fs } = makeFs({})
+    const opts = options(() => ({ approved: true }), fs) as any
+    const seen: any[] = []
+    opts.search = {
+      supportsFollow: true,
+      searchContent: async function* () {
+        yield { kind: 'done', complete: true }
+      },
+      findPaths: async function* (a: any) {
+        seen.push(a)
+        yield { kind: 'done', complete: true }
+      },
+    }
+    const all = await createSandboxTools(opts)
+    const find = all.find((x) => x.name === 'find_files')!
+    await find.executor(ctx({ n: 0 }))({ glob: '*.ts', limit: 1, follow: true })
+    expect(seen[0]).toMatchObject({ follow: true })
+  })
+
+  it('forwards content-only search fields, truncates over-limit finds, and rejects over-limit list frames', async () => {
+    const { fs } = makeFs({})
+    const opts = options(() => ({ approved: true }), fs) as any
+    const calls: any[] = []
+    const findCalls: any[] = []
+    opts.search = {
+      searchContent: async function* (a: any) {
+        calls.push(a)
+        yield { kind: 'done', complete: false, omitted: 'over-limit', bound: 'limit', shown: 1 }
+      },
+      findPaths: async function* (a: any) {
+        findCalls.push(a)
+        yield { kind: 'item', path: '/one.ts' }
+        yield { kind: 'done', complete: true }
+      },
+    }
+    const all = await createSandboxTools(opts)
+    const content = all.find((x) => x.name === 'search_files')!
+    const result = await content.executor(ctx({ n: 0 }))({
+      pattern: 'x',
+      limit: 1,
+      ignore_case: true,
+      literal: true,
+      glob: '*.ts',
+      iglob: '*.TS',
+      hidden: true,
+      no_ignore: true,
+    })
+    expect(calls[0]).toMatchObject({
+      ignoreCase: true,
+      literal: true,
+      glob: '*.ts',
+      iglob: '*.TS',
+      hidden: true,
+      noIgnore: true,
+    })
+    expect(await (result as SpooledJsonArtifact).asString()).toMatch(/1.*1/)
+    const find = all.find((x) => x.name === 'find_files')!
+    await find.executor(ctx({ n: 0 }))({ glob: '*.ts', limit: 1 })
+    expect(findCalls).toHaveLength(1)
+    expect(findCalls[0]).not.toHaveProperty('ignoreCase')
+    expect(findCalls[0]).not.toHaveProperty('literal')
+    opts.search.findPaths = async function* (a: any) {
+      findCalls.push(a)
+      yield { kind: 'item', path: '/one.ts' }
+      yield { kind: 'done', complete: false, omitted: 'over-limit', bound: 'limit', shown: 1 }
+    }
+    // find_files takes a required `limit`, so an over-limit frame is its ORDINARY truncation
+    // outcome, not a protocol violation: it returns the matched paths plus a result-limited
+    // note. Only `list_directory`, which has no limit, treats such a frame as a backend fault.
+    const truncated = await find.executor(ctx({ n: 0 }))({ glob: '*.ts', limit: 1 })
+    const truncatedText = await (truncated as SpooledJsonArtifact).asString()
+    expect(truncatedText).toContain('one.ts')
+    expect(truncatedText).toMatch(/limit/i)
+    expect(truncatedText).not.toMatch(/I\/O failure/i)
+    // `follow` is rejected at VALIDATION, not at execution, when the adapter has not declared
+    // containment of symlinked descendants — no option is advertised that always fails. The rule
+    // is a narrowed copy, so an adapter that declares `supportsFollow` still gets the full option.
+    await expect(
+      find.executor(ctx({ n: 0 }))({ glob: '*.ts', limit: 1, follow: true })
+    ).rejects.toThrow()
+    await expect(
+      content.executor(ctx({ n: 0 }))({ pattern: 'x', limit: 1, follow: true })
+    ).rejects.toThrow()
+    await expect(
+      find.executor(ctx({ n: 0 }))({ glob: '*.ts', limit: 1, ignore_case: true })
+    ).rejects.toThrow()
+    await expect(
+      find.executor(ctx({ n: 0 }))({ glob: '*.ts', limit: 1, literal: true })
+    ).rejects.toThrow()
+    fs.list = async function* () {
+      yield { kind: 'done', complete: false, omitted: 'over-limit', bound: 'limit', shown: 1 }
+    } as never
+    const list = all.find((x) => x.name === 'list_directory')!
+    let listError: unknown
+    try {
+      await list.executor(ctx({ n: 0 }))({ path: 'root' })
+    } catch (error) {
+      listError = error
+    }
+    const listMessage = ((listError as { cause?: Error }).cause ?? (listError as Error)).message
+    expect(listMessage).toMatch(/I\/O failure/i)
+    expect(listMessage).toMatch(/backend/i)
   })
 
   it('narrates a symlinked-component refusal from save_media rather than leaking the translator error', async () => {

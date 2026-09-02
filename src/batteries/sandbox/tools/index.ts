@@ -129,7 +129,10 @@ const narrateThrow = (outcome: SandboxOutcome, refused = true): never => {
  * @param reason - The `path-rejected` reason to narrate.
  * @returns The operation's result.
  */
-const narratingPath = async <T>(operation: () => T | Promise<T>, input: string): Promise<T> => {
+export const narratingPath = async <T>(
+  operation: () => T | Promise<T>,
+  input: string
+): Promise<T> => {
   try {
     return await operation()
   } catch (error) {
@@ -467,6 +470,18 @@ export const createSandboxTools = async (options: SandboxToolsOptions): Promise<
           )
             frames.push({ ...frame, path: relativeFramePath(backend, frame.path) })
           if (frame.kind === 'done') {
+            // `list_directory` HAS NO `limit` — its only boundary is max_depth — so a
+            // `bound: 'limit'` frame cannot be a legitimate truncation here and means the backend
+            // is broken. `Done` is a union shared with the search frames, which is the only reason
+            // the shape is expressible at all.
+            //
+            // This is deliberately the OPPOSITE of `search_files`/`find_files` (see `makeSearch`
+            // below): those take a required `limit`, so the same frame is their ORDINARY
+            // truncation outcome and narrates `result-limited`. The rule is per-operation, not
+            // per-frame, and this throw belongs to `list_directory` alone — a copy of it inside
+            // `makeSearch` made every broad `find_files` query fail on its own limit.
+            if (!frame.complete && frame.bound === 'limit')
+              throw new Error('list backend emitted an over-limit frame')
             sawDone = true
             limited = !frame.complete
           }
@@ -490,21 +505,74 @@ export const createSandboxTools = async (options: SandboxToolsOptions): Promise<
       )
     },
   })
+  /**
+   * `follow` is deliberately schema-VALID while the bundled ripgrep adapter refuses it. The schema
+   * is shared by every deployment, and a BYO `SandboxSearch` that has verified its own containment
+   * of symlinked descendants may honour the flag; narrowing the schema to `valid(false)` would make
+   * it unreachable for them too. The bundled refusal is adapter-specific and names the pending
+   * containment audit, so a caller learns why rather than finding the option silently absent.
+   */
+  // `follow` traverses symlinked DESCENDANTS, which never pass through the path translator, so
+  // an uncontained backend turns it into an unbounded read. The tools layer cannot see what is
+  // behind `SandboxSearch`, so the ADAPTER declares whether it contains them. Undeclared, the
+  // schema rejects `follow: true` at validation rather than advertising an option that fails at
+  // execution — a narrowed COPY of the permissive rule, so an adapter that HAS verified
+  // containment still gets the full option.
+  // Over-limit is the ORDINARY outcome for these two: `limit` is required, so exceeding it
+  // narrates `result-limited` and returns the bounded results. Contrast `list_directory` above,
+  // which has no `limit` and treats the same frame as a backend protocol violation.
+  const permissiveFollow = validator.boolean().default(false)
+  // REJECTS `follow: true` unless the adapter declared containment. `.valid(false)` on a COPY,
+  // so an adapter that DID declare it still gets the permissive rule.
+  const followRejectedUnlessDeclared = options.search?.supportsFollow
+    ? permissiveFollow
+    : permissiveFollow.valid(false)
   const makeSearch = (name: string, content: boolean) =>
     new Tool({
       name,
       description: content
-        ? 'Search file contents on disk that you have not opened; artifact_grep searches one artifact you already opened. Every whole hit is queryable JSON; max_depth is the only boundary.'
-        : 'Find file names across the disk tree, rather than searching contents. Every result is queryable JSON; max_depth is the only boundary.',
+        ? 'Search file contents on disk that you have not opened; artifact_grep searches one artifact you already opened. Every whole hit is queryable JSON. Bounded by max_depth and a required limit; exceeding limit returns the bounded hits with a result-limited note, not an error. follow (symlink traversal) is not available in this deployment.'
+        : 'Find file names across the disk tree, rather than searching contents. Every result is queryable JSON. Bounded by max_depth and a required limit; exceeding limit returns the bounded paths with a result-limited note, not an error. follow (symlink traversal) is not available in this deployment.',
       trusted: false,
       inputSchema: validator.object({
         [content ? 'pattern' : 'glob']: validator.string().required(),
         path: validator.string().allow('').default(''),
         max_depth: depth,
+        limit: validator.number().integer().min(1).required(),
+        ...(content
+          ? {
+              ignore_case: validator.boolean().default(false),
+              literal: validator.boolean().default(false),
+              glob: validator.string().allow('').optional(),
+              iglob: validator.string().allow('').optional(),
+              // Rejects `true` at validation unless the adapter set `supportsFollow` (see above).
+              follow: followRejectedUnlessDeclared,
+              hidden: validator.boolean().default(false),
+              no_ignore: validator.boolean().default(false),
+            }
+          : {
+              iglob: validator.string().allow('').optional(),
+              // Rejects `true` at validation unless the adapter set `supportsFollow` (see above).
+              follow: followRejectedUnlessDeclared,
+              hidden: validator.boolean().default(false),
+              no_ignore: validator.boolean().default(false),
+            }),
       }),
       handler: async (raw, ctx) => {
         await gated(options, ctx, name, raw)
-        const a = raw as { pattern?: string; glob?: string; path: string; max_depth: number }
+        const a = raw as {
+          pattern?: string
+          glob?: string
+          path: string
+          max_depth: number
+          limit: number
+          ignore_case?: boolean
+          literal?: boolean
+          iglob?: string
+          follow?: boolean
+          hidden?: boolean
+          no_ignore?: boolean
+        }
         const root = await narratingPath(() => options.pathTranslator.toRelative(a.path), a.path)
         const search = options.search
         if (!search)
@@ -523,16 +591,31 @@ export const createSandboxTools = async (options: SandboxToolsOptions): Promise<
               root: backendRoot,
               pattern: a.pattern!,
               maxDepth: a.max_depth,
+              limit: a.limit,
+              ignoreCase: a.ignore_case,
+              literal: a.literal,
+              glob: a.glob,
+              iglob: a.iglob,
+              follow: a.follow,
+              hidden: a.hidden,
+              noIgnore: a.no_ignore,
               signal: ctx.abortSignal,
             })
           : search!.findPaths({
               root: backendRoot,
               glob: a.glob!,
               maxDepth: a.max_depth,
+              limit: a.limit,
+              iglob: a.iglob,
+              follow: a.follow,
+              hidden: a.hidden,
+              noIgnore: a.no_ignore,
               signal: ctx.abortSignal,
             })
         const frames: unknown[] = []
-        let limited = false
+        let terminal:
+          | Extract<typeof iterable extends AsyncIterable<infer F> ? F : never, { kind: 'done' }>
+          | undefined
         let sawDone = false
         try {
           for await (const frame of iterable) {
@@ -543,7 +626,7 @@ export const createSandboxTools = async (options: SandboxToolsOptions): Promise<
               })
             else {
               sawDone = true
-              limited = !frame.complete
+              terminal = frame
             }
           }
           if (!sawDone) throw new Error('search ended without a done frame')
@@ -561,13 +644,24 @@ export const createSandboxTools = async (options: SandboxToolsOptions): Promise<
           ctx,
           `${ctx.id}:${name}:${root}`,
           frames,
-          limited
-            ? defaultSandboxNarrator({
-                kind: 'scope-limited',
-                shown: 0,
-                atDepth: a.max_depth,
-                bound: 'maxDepth',
-              })
+          terminal && !terminal.complete
+            ? // `limit` is REQUIRED on both search tools, so an over-limit terminal frame is the
+              // ordinary truncation outcome: narrate it and return the bounded results. It is NOT
+              // an error here, unlike `list_directory`, which has no `limit` and treats the same
+              // frame as a backend protocol violation.
+              terminal.bound === 'limit'
+              ? defaultSandboxNarrator({
+                  kind: 'result-limited',
+                  shown: terminal.shown,
+                  limit: a.limit,
+                  bound: 'limit',
+                })
+              : defaultSandboxNarrator({
+                  kind: 'scope-limited',
+                  shown: frames.length,
+                  atDepth: terminal.atDepth,
+                  bound: 'maxDepth',
+                })
             : note
         )
       },

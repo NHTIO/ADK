@@ -238,12 +238,34 @@ describe('sandbox WP0 contracts', () => {
       // than conservative, so the suite must REJECT them — that is the property under test.
       [{ kind: 'done', complete: false, omitted: 'proven' }],
       [{ kind: 'done', complete: false, bound: 'maxResults' }],
+      // The over-limit arm is exact-key validated: these near misses must not be accepted.
+      [{ kind: 'done', complete: false, omitted: 'over-limit', bound: 'maxDepth', shown: 1 }],
+      [{ kind: 'done', complete: false, omitted: 'over-limit', bound: 'limit' }],
+      [
+        {
+          kind: 'done',
+          complete: false,
+          omitted: 'over-limit',
+          bound: 'limit',
+          shown: 1,
+          extra: true,
+        },
+      ],
       [{ kind: 'item', path: 'x' }],
     ]
     for (const frames of rejected) {
       await expect(runSandboxConformance(base(source(frames)))).rejects.toThrow()
     }
     await expect(runSandboxConformance(base(source([valid])))).resolves.toBeUndefined()
+    await expect(
+      runSandboxConformance(
+        base(
+          source([
+            { kind: 'done', complete: false, omitted: 'over-limit', bound: 'limit', shown: 1 },
+          ])
+        )
+      )
+    ).resolves.toBeUndefined()
   })
   it('narrates every outcome and hides existence', () => {
     const outcomes: SandboxOutcome[] = [
@@ -258,6 +280,7 @@ describe('sandbox WP0 contracts', () => {
         limit: 2,
       },
       { kind: 'scope-limited', shown: 1, atDepth: 2, bound: 'maxDepth' },
+      { kind: 'result-limited', shown: 2, limit: 3, bound: 'limit' },
       { kind: 'not-a-regular-file', path: 'x', kind_: 'other' },
       { kind: 'is-a-directory', path: 'x' },
       { kind: 'path-rejected', input: 'x', reason: 'escape' },
@@ -318,6 +341,11 @@ describe('sandbox WP0 contracts', () => {
         case 'scope-limited':
           expect(narration).toContain(String(outcome.atDepth))
           expect(narration).toContain('max_depth')
+          break
+        case 'result-limited':
+          expect(narration).toContain(String(outcome.shown))
+          expect(narration).toContain(String(outcome.limit))
+          expect(narration).not.toContain('max_depth')
           break
         case 'path-rejected':
           expect(narration).toContain(outcome.input)

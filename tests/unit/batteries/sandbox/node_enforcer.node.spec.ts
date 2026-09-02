@@ -230,6 +230,7 @@ describe('sandbox node enforcer and adapters', () => {
           root: '.',
           glob: 'x',
           maxDepth: 1,
+          limit: 100,
         }))
           expect(frame).toBeTruthy()
       })()
@@ -243,6 +244,7 @@ describe('sandbox node enforcer and adapters', () => {
           root: '.',
           glob: 'x',
           maxDepth: 1,
+          limit: 100,
         }))
           expect(frame).toBeTruthy()
       })()

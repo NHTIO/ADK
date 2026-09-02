@@ -79,6 +79,7 @@ describe.skipIf(!RUN)('sandbox — live enforcement fails closed (release)', () 
             root: '/etc',
             pattern: '[',
             maxDepth: 1,
+            limit: 100,
           })) {
             void frameValue
           }
@@ -94,6 +95,7 @@ describe.skipIf(!RUN)('sandbox — live enforcement fails closed (release)', () 
             root: '/etc',
             pattern: 'x',
             maxDepth: 1,
+            limit: 100,
           })) {
             void frameValue
           }

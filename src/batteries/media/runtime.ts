@@ -19,7 +19,7 @@
  */
 
 import { VERB_INDEX } from './verbs'
-import { Middleware } from '@nhtio/middleware'
+import { runOnion } from '@nhtio/adk/lib/middleware/run_onion'
 import { isError, isObject, isInstanceOf } from '@nhtio/adk/guards'
 import { E_MEDIA_STEP_FAILED, E_MEDIA_STEP_UNAVAILABLE } from './exceptions'
 import type { NextFn } from '@nhtio/middleware'
@@ -194,32 +194,17 @@ const runStep = async (
   impl: StepImpl,
   use: readonly MediaStepMiddlewareFn[]
 ): Promise<StepResult> => {
-  if (use.length === 0) {
-    return validated(ctx, await impl(ctx))
-  }
-  const mw = new Middleware<MediaStepMiddlewareFn>()
-  for (const fn of use) mw.add(fn)
-
-  let result: StepResult | undefined
-  let caught: unknown
-  await mw
-    .runner()
-    .errorHandler(async (error: unknown) => {
-      caught = error
-    })
-    .finalHandler(async () => {
-      result = validated(ctx, await impl(ctx))
-    })
-    .run((fn, next) => Promise.resolve(fn(ctx, next)))
-
-  if (caught !== undefined) throw caught
-  if (result === undefined) {
-    throw new E_MEDIA_STEP_FAILED([
-      ctx.step.verb,
-      'a step interceptor did not call next() and did not short-circuit',
-    ])
-  }
-  return result
+  return runOnion(
+    ctx,
+    use,
+    async () => validated(ctx, await impl(ctx)),
+    () => {
+      throw new E_MEDIA_STEP_FAILED([
+        ctx.step.verb,
+        'a step interceptor did not call next() and did not short-circuit',
+      ])
+    }
+  )
 }
 
 /** Validate a step implementation's output shape at the boundary. */
