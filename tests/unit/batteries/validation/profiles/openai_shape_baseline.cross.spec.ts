@@ -61,8 +61,8 @@ describe('openai shape baseline profile', () => {
         timeline([message('m1', 'assistant', 2)], [], [call('c1', 1)]),
         openaiShapeBaseline
       )
-      expect(result.blocking).toHaveLength(1)
-      expect(result.blocking[0]).toEqual(
+      expect(result.advisories).toHaveLength(1)
+      expect(result.advisories[0]).toEqual(
         expect.objectContaining({
           ruleId: 'message-not-immediately-after-tool-call',
           ruleType: 'adjacency',
@@ -78,12 +78,8 @@ describe('openai shape baseline profile', () => {
         evaluateOrderingProfile(entries, openaiShapeBaseline).blocking
       )
       expect(result.repaired).toHaveLength(0)
-      expect(result.unrepaired).toEqual([
-        expect.objectContaining({
-          ruleId: 'message-not-immediately-after-tool-call',
-          ruleType: 'adjacency',
-        }),
-      ])
+      // An advisory never reaches the repair path, so there is nothing to leave unrepaired.
+      expect(result.unrepaired).toHaveLength(0)
 
       const values = new Map<string, unknown>()
       const ctx = {
@@ -107,8 +103,11 @@ describe('openai shape baseline profile', () => {
         action: 'mutate',
       })(ctx as never, next)
 
-      expect(ctx.nack).toHaveBeenCalledOnce()
-      expect(next).not.toHaveBeenCalled()
+      // Advisory by default: the finding is REPORTED, dispatch PROCEEDS. Before the severity
+      // default flipped this nacked — and a live audit showed the vendor accepts this shape, so
+      // the nack was rejecting a dispatch the model would have served.
+      expect(ctx.nack).not.toHaveBeenCalled()
+      expect(next).toHaveBeenCalledOnce()
       expect(values.has(ORDERING_GUARD_EFFECTIVE_TIMELINE_STASH_KEY)).toBe(true)
     })
   })

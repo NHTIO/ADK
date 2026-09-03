@@ -65,6 +65,20 @@ export interface OrderRule {
    * intentionally ignored, as with Anthropic's current-turn thinking requirement.
    */
   onlyLatestGroup?: boolean
+  /**
+   * Whether a violation blocks dispatch. Omitted means **advisory**.
+   *
+   * @remarks
+   * Advisory is the default because this catalog's rules were derived from vendor DOCUMENTATION,
+   * and a live audit against each rule's own native API found that most of them block turn state
+   * the vendor accepts (16 of 17 rules measured; only `thought-signature-required` was confirmed
+   * enforced). Documentation describes what a vendor says it requires; only observation shows what
+   * it does. Defaulting to advisory keeps the catalog's knowledge — you still learn which primitive
+   * broke which vendor's stated contract — without rejecting dispatches the model would have
+   * served. Opt into `blocking` per rule when you have verified the constraint on the surface you
+   * dispatch through. See `docs/batteries/validation/api-surface-scope.md`.
+   */
+  severity?: 'blocking' | 'advisory'
 }
 
 /** Requires provider-specific metadata on selected primitives. */
@@ -103,6 +117,25 @@ export interface RequiredMetadataRule {
    * mutate-mode fallback repair, never by validation or ordinary mutation.
    */
   fallbackReplayCompatibility?: string
+  /**
+   * Whether THIS rule's {@link fallbackPayloadValue} may be applied in mutate mode without
+   * {@link OrderingGuardOptions.allowMetadataFallbackRepair}.
+   *
+   * @remarks
+   * The global flag exists because a fallback value asserts provenance the ADK cannot verify, and
+   * that should be an explicit choice. But a global flag is the wrong granularity for a sentinel
+   * the VENDOR itself publishes for exactly this case: gating Gemini's documented, portable
+   * `skip_thought_signature_validator` behind the same switch as an arbitrary fabricated value left
+   * `gemini-3` unable to dispatch a replayed tool call under ANY configuration — `enforce` nacks,
+   * `mutate` nacks, and the only working setting is a flag whose own documentation warns against
+   * enabling it casually. That is issue #15 defect 3.
+   *
+   * Set this only where the fallback is a vendor-documented escape hatch rather than an invented
+   * value. It authorizes ONE rule's fallback; it does not enable fallback repair catalog-wide, and
+   * `allowMetadataFallbackRepair` still authorizes rules that do not declare it. Defaults to
+   * `false`, preserving the existing behaviour for every rule that does not opt in.
+   */
+  fallbackRepairAuthorized?: boolean
 }
 
 /** Requires a strict sequence of conversation roles. */
@@ -120,6 +153,20 @@ export interface AlternationRule {
    * limitation is represented as `1`; Llama 4 lifts that limitation by omitting this field.
    */
   maxPerGroup?: number
+  /**
+   * Whether a violation blocks dispatch. Omitted means **advisory**.
+   *
+   * @remarks
+   * Advisory is the default because this catalog's rules were derived from vendor DOCUMENTATION,
+   * and a live audit against each rule's own native API found that most of them block turn state
+   * the vendor accepts (16 of 17 rules measured; only `thought-signature-required` was confirmed
+   * enforced). Documentation describes what a vendor says it requires; only observation shows what
+   * it does. Defaulting to advisory keeps the catalog's knowledge — you still learn which primitive
+   * broke which vendor's stated contract — without rejecting dispatches the model would have
+   * served. Opt into `blocking` per rule when you have verified the constraint on the surface you
+   * dispatch through. See `docs/batteries/validation/api-surface-scope.md`.
+   */
+  severity?: 'blocking' | 'advisory'
 }
 
 /**
@@ -139,6 +186,20 @@ export interface AdjacencyRule {
   first: OrderingPrimitiveKind
   /** Primitive kinds that may not immediately follow a `first`-kind primitive. */
   disallowBetween: OrderingPrimitiveKind[]
+  /**
+   * Whether a violation blocks dispatch. Omitted means **advisory**.
+   *
+   * @remarks
+   * Advisory is the default because this catalog's rules were derived from vendor DOCUMENTATION,
+   * and a live audit against each rule's own native API found that most of them block turn state
+   * the vendor accepts (16 of 17 rules measured; only `thought-signature-required` was confirmed
+   * enforced). Documentation describes what a vendor says it requires; only observation shows what
+   * it does. Defaulting to advisory keeps the catalog's knowledge — you still learn which primitive
+   * broke which vendor's stated contract — without rejecting dispatches the model would have
+   * served. Opt into `blocking` per rule when you have verified the constraint on the surface you
+   * dispatch through. See `docs/batteries/validation/api-surface-scope.md`.
+   */
+  severity?: 'blocking' | 'advisory'
 }
 
 /** Requires historical primitive content to remain present and/or stable. */
@@ -166,6 +227,20 @@ export interface PreservationRule {
   payloadField?: string
   /** Reset the comparison baseline when the producing model changes. */
   resetOnModelSwitch?: boolean
+  /**
+   * Whether a violation blocks dispatch. Omitted means **advisory**.
+   *
+   * @remarks
+   * Advisory is the default because this catalog's rules were derived from vendor DOCUMENTATION,
+   * and a live audit against each rule's own native API found that most of them block turn state
+   * the vendor accepts (16 of 17 rules measured; only `thought-signature-required` was confirmed
+   * enforced). Documentation describes what a vendor says it requires; only observation shows what
+   * it does. Defaulting to advisory keeps the catalog's knowledge — you still learn which primitive
+   * broke which vendor's stated contract — without rejecting dispatches the model would have
+   * served. Opt into `blocking` per rule when you have verified the constraint on the surface you
+   * dispatch through. See `docs/batteries/validation/api-surface-scope.md`.
+   */
+  severity?: 'blocking' | 'advisory'
 }
 
 /** Describes a required provider wire-role mapping for a primitive. */
@@ -178,8 +253,21 @@ export interface RoleRemapRule {
   kind: OrderingPrimitiveKind
   /** Profile-defined mapping variant, such as a Granite generation. */
   variant: string
-  /** Dot-path into `value.payload` containing the producer's expected wire-role tag. */
+  /**
+   * Dot-path resolved INSIDE `value.payload` — i.e. `'roleTag'` reads `payload.roleTag`, exactly
+   * as {@link RequiredMetadataRule.requiredPayloadKey} does. It must NOT re-state the `payload`
+   * prefix: a value of `'payload.roleTag'` resolves `payload.payload.roleTag`, which no ordinary
+   * payload can satisfy.
+   */
   expectedRoleTag: string
+  /**
+   * Whether a mismatched or absent tag blocks dispatch. Omitted means `advisory`, because the tag
+   * is a CONSUMER-SUPPLIED annotation: nothing in the ADK writes or reads `payload.roleTag`, so a
+   * blocking default rejects every tool call for any consumer who has not hand-populated a field
+   * this codebase never documents how to populate. A consumer that does populate it may opt into
+   * `blocking` to have the guard enforce their own convention.
+   */
+  severity?: 'blocking' | 'advisory'
 }
 
 /**
@@ -206,6 +294,108 @@ export interface StaleContentAdvisoryRule {
   optOutOptionKey: string
 }
 
+/**
+ * Requires a ToolCall's identifier to satisfy a provider's format constraints.
+ *
+ * @remarks
+ * Both known constraints are hard rejections that name neither the field nor the offending
+ * character, and both fail on EVERY credential — so a violation exhausts a provider pool rather
+ * than degrading:
+ *
+ *  - OpenAI Codex 400s an id longer than 64 characters. The LB's own translator documents an
+ *    ADK-generated id embedding a UUID plus an iteration counter as the trigger.
+ *  - Bedrock Converse rejects a `toolUseId` outside `[A-Za-z0-9_-]`.
+ *
+ * The ADK's own uuidv6 ids satisfy both; a consumer-supplied id may not.
+ */
+export interface IdentifierFormatRule {
+  /** Discriminator selecting the identifier-format evaluator. */
+  type: 'identifierFormat'
+  /** Stable identifier used in findings. */
+  id: string
+  /** Primitive whose identifier is constrained. */
+  kind: OrderingPrimitiveKind
+  /** Maximum identifier length, when the provider caps it. */
+  maxLength?: number
+  /** Characters the identifier may contain. Anchored automatically. */
+  allowedPattern?: string
+  /** See {@link OrderRule.severity}. Omitted means advisory. */
+  severity?: 'blocking' | 'advisory'
+}
+
+/**
+ * Requires a turn to carry something the provider can interpret.
+ *
+ * @remarks
+ * Two vendors reject an assistant turn that is empty of both prose and a tool call, in two
+ * different ways, and one is silent:
+ *
+ *  - Mistral answers a 400: "Assistant message must have either content or tool_calls, but not
+ *    none."
+ *  - Gemini rejects a request whose final `model` turn carries only a `thought: true` part with
+ *    `finishReason: MALFORMED_RESPONSE` — measured 4 of 4, against STOP-with-text when the same
+ *    history ends on the user turn.
+ *
+ * Both are the same underlying defect: a turn the model cannot act on.
+ */
+export interface NonEmptyTurnRule {
+  /** Discriminator selecting the empty-turn evaluator. */
+  type: 'nonEmptyTurn'
+  /** Stable identifier used in findings. */
+  id: string
+  /** Role whose turns must not be empty. */
+  role: 'assistant' | 'user'
+  /**
+   * When true, only the FINAL turn is checked. Gemini's constraint is terminal-position specific;
+   * Mistral's applies to any assistant turn in the history.
+   */
+  onlyTerminal?: boolean
+  /** See {@link OrderRule.severity}. Omitted means advisory. */
+  severity?: 'blocking' | 'advisory'
+}
+
+/**
+ * Requires a replayed tool result to name a tool the request actually declares.
+ *
+ * @remarks
+ * A ROOT CAUSE of the silent empty-generation class. Gemini matches a `functionResponse.name`
+ * against its `functionDeclarations`; a name that resolves to nothing — an opaque call id, or a
+ * tool no longer offered this turn — makes it return an empty candidate
+ * (`parts: [{text: ''}]`, `STOP`, no `candidatesTokenCount`) a large fraction of the time. The
+ * gateway then forwards that as an ordinary `finish_reason: stop` with `content: null` and NO
+ * error, so the caller sees a successful turn that produced nothing.
+ *
+ * Requires the tool registry; the evaluator skips this rule when none is supplied.
+ */
+export interface ToolIdentityRule {
+  /** Discriminator selecting the tool-identity evaluator. */
+  type: 'toolIdentity'
+  /** Stable identifier used in findings. */
+  id: string
+  /** See {@link OrderRule.severity}. Omitted means advisory. */
+  severity?: 'blocking' | 'advisory'
+}
+
+/**
+ * Requires a declared tool's input schema to be internally satisfiable.
+ *
+ * @remarks
+ * The other ROOT CAUSE of the silent-failure class, and the more insidious one. A schema whose
+ * `required` list names a key absent from `properties` cannot be satisfied by any argument object.
+ * Nova answers such a request with a normal HTTP 200 that simply OMITS the field — the LB's own
+ * translator records 25 production responses silently missing it. There is no error at any layer.
+ *
+ * Requires the tool registry; the evaluator skips this rule when none is supplied.
+ */
+export interface SchemaIntegrityRule {
+  /** Discriminator selecting the schema-integrity evaluator. */
+  type: 'schemaIntegrity'
+  /** Stable identifier used in findings. */
+  id: string
+  /** See {@link OrderRule.severity}. Omitted means advisory. */
+  severity?: 'blocking' | 'advisory'
+}
+
 /** Every declarative ordering rule supported by the validation battery. */
 export type OrderingRule =
   | OrderRule
@@ -215,6 +405,10 @@ export type OrderingRule =
   | PreservationRule
   | RoleRemapRule
   | StaleContentAdvisoryRule
+  | IdentifierFormatRule
+  | NonEmptyTurnRule
+  | ToolIdentityRule
+  | SchemaIntegrityRule
 
 /** A named collection of ordering rules for a model or hosting layer. */
 export interface OrderingProfile {
@@ -278,8 +472,22 @@ export interface BlockingOrderingViolation {
 export interface OrderingAdvisoryViolation {
   /** Stable advisory rule identifier. */
   ruleId: string
-  /** Advisory-producing rule types; required metadata is included when `severity: 'advisory'`. */
-  ruleType: StaleContentAdvisoryRule['type'] | RequiredMetadataRule['type']
+  /**
+   * Advisory-producing rule types; required metadata and role remap are included when their
+   * configured `severity` is `advisory` (role remap's default).
+   */
+  ruleType:
+    | StaleContentAdvisoryRule['type']
+    | RequiredMetadataRule['type']
+    | RoleRemapRule['type']
+    | OrderRule['type']
+    | AlternationRule['type']
+    | AdjacencyRule['type']
+    | PreservationRule['type']
+    | IdentifierFormatRule['type']
+    | NonEmptyTurnRule['type']
+    | ToolIdentityRule['type']
+    | SchemaIntegrityRule['type']
   /**
    * Required discriminant proving this entry can never feed the nack/throw path. Advisory
    * required-metadata findings use this shape when their configured severity is `advisory`.
@@ -301,7 +509,21 @@ export interface OrderingRepair {
   /** The blocking violation this repair addressed. */
   violation: BlockingOrderingViolation
   /** Safe repair strategy used by mutate mode. */
-  strategy: 'reorder' | 'insert-alternation-filler' | 'fill-required-metadata'
+  strategy:
+    | 'reorder'
+    | 'insert-alternation-filler'
+    | 'fill-required-metadata'
+    /**
+     * Move the primitive that immediately follows an adjacency starter to just BEFORE it.
+     *
+     * @remarks
+     * Adjacency had no repair at all (issue #15 defect 1), so `mutate` and `enforce` were
+     * behaviourally identical for the 27 family recipes carrying such a rule: the guard could only
+     * ever reject. A reorder is the one safe repair available — it preserves every primitive and
+     * only changes relative position, where dropping the offending message would lose content the
+     * caller meant to send.
+     */
+    | 'reorder-adjacent'
   /** Description of the concrete timeline or primitive change. */
   detail: string
   /** `'reorder'` only: id of the primitive that was moved. Typed so the applying middleware never

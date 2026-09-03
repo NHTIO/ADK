@@ -15,6 +15,85 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-09-03
+
+### Added
+
+- **Two new LLM batteries that speak a vendor's own wire**, for when you need to reason about what
+  the VENDOR received rather than what a translator sent on your behalf — a wire-shape audit, an
+  ordering guard, a bug report filed upstream. Both are ordinary {@link DispatchExecutorFn}s and
+  wire in one line like every other battery.
+  - `@nhtio/adk/batteries/llm/gemini_generate_content` — {@link GeminiGenerateContentAdapter},
+    Google's native `:generateContent` over plain `fetch`. `contents[]` with role `model` (never
+    `assistant`), no `system` role (top-level `systemInstruction`), heterogeneous `parts[]`, and
+    `functionCall`/`functionResponse` parts correlated BY DECLARED TOOL NAME rather than a call id.
+    Handles Gemini 3+ thought signatures, and sanitizes tool schemas of the JSON-Schema keywords
+    Google's OpenAPI parser rejects. `STASH_KEY` `geminiGenerateContent`.
+    See [Gemini generateContent](/batteries/llm/gemini).
+  - `@nhtio/adk/batteries/llm/bedrock_converse` — {@link BedrockConverseAdapter}, Bedrock's native
+    Converse over plain HTTPS with a bearer `ABSK` key. No AWS SDK and no SigV4 signer, so it stays
+    cross-environment. Typed content blocks, tool results on a `user` turn, a selectable
+    `alternationPolicy` (`'merge'` | `'filler'` | `'reject'`), and the `toolConfig` backfill that
+    makes history replay possible at all. `STASH_KEY` `bedrockConverse`.
+    See [AWS Bedrock Converse](/batteries/llm/bedrock-converse).
+
+- **Four ordering rule types derived from measured vendor behaviour**, rather than from
+  documentation: `identifierFormat`, `nonEmptyTurn`, `toolIdentity`, and `schemaIntegrity`.
+  The last two read the request's declared tools, which surfaced two real causes of the
+  "successful response with no content" outcome: a `functionResponse.name` that matches no
+  declared tool, and a tool schema requiring a key absent from its own `properties`.
+
+### Fixed
+
+- **`@nhtio/adk/batteries/validation`: `action: 'mutate'` no longer rejects dispatches it is
+  supposed to repair.** Three independent defects made the ordering guard a net negative for
+  most family recipes — on a nine-seat review panel, six seats died at iteration 0–2 and the
+  three survivors were exactly those whose family carried no structural rule
+  ([#15](https://gitlab.com/nhtio/adk/-/issues/15)).
+  - **`AdjacencyRule` had no repair strategy at all**, so `mutate` and `enforce` were
+    behaviourally identical for the 25 of 38 recipes carrying `openai_shape_baseline` — the
+    guard could only ever reject. Adjacency violations now repair via `reorder-adjacent`,
+    which moves the disallowed successor to just before the primitive it may not follow.
+    Every primitive survives; only relative position changes.
+  - **Alternation fillers had no lifecycle.** They were stored and never removed, so each
+    dispatch re-evaluated the previous dispatch's output and generated fillers *between its
+    own fillers*, with ids nesting exponentially (2 → 5 → 9 fillers, duplicate ids, and a
+    139-character id by the second iteration) until the guard reported `repaired` **and**
+    `unrepaired` for the same pass and nacked anyway. Each pass now reaps the previous pass's
+    fillers through `ctx.deleteMessage` and excludes any that remain from the timeline it
+    evaluates, giving the repair a fixed point. A filler's content is also now a neutral
+    acknowledgement rather than its own `__ordering-guard-filler-…` id, which was being sent
+    to the model as a literal turn.
+  - **`gemini-3` had no working configuration.** `thought_signature_required` is blocking and
+    its only repair sat behind the global `allowMetadataFallbackRepair`, so replayed or
+    cross-vendor history could not dispatch under any setting: `enforce` rejected it, `mutate`
+    rejected it, and the one flag that worked is documented as a last resort. A rule may now
+    authorize its own fallback with `fallbackRepairAuthorized: true`, reserved for values the
+    vendor itself publishes — a sentinel is not a forged signature, it is a documented way of
+    stating that no signature exists. `thought_signature_required` sets it; every other rule
+    still requires the global opt-in, which is unchanged.
+
+### Changed
+
+- **Ordering rules are now advisory by default.** A live audit dispatched every rule in the
+  catalog against its own **native** vendor API and found 16 of 17 describe shapes the vendor
+  in fact accepts. `severity` is now available on every rule type (previously only
+  `requiredMetadata` and `roleRemap`) and defaults to `'advisory'`, so a rule records its
+  finding without rejecting a dispatch. `thought_signature_required` is the one rule that
+  keeps `severity: 'blocking'` explicitly: Gemini genuinely returns a `400` naming both the
+  field and its position, and the same history with a sentinel returns `200`.
+
+  This is a bugfix for behaviour that shipped broken, not a contract change — a guard that
+  rejected valid turn state was never the intended behaviour. Recipes that want the old
+  gating can set `severity: 'blocking'` per rule.
+
+- **A rule is a claim about a model reached through a specific API, not about the model.**
+  Every intermediary normalizes, and a gateway's repair is invisible in the response — AWS's
+  Converse API is itself a translator, and an OpenAI-compatible gateway merges same-role turns
+  before the vendor ever sees them. Applying a rule on a surface it was not derived from
+  guards against a constraint that layer already handles. See
+  [API surface scope](/batteries/validation/api-surface-scope).
+
 ## 2026-09-02
 
 ### Added

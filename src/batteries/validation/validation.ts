@@ -23,6 +23,8 @@ const orderRuleSchema = validator
     after: primitiveKindSchema.required(),
     scope: validator.string().valid('adjacent-same-role-group', 'entire-turn').required(),
     onlyLatestGroup: validator.boolean().optional(),
+    // Optional; absent means `advisory` for EVERY rule type. See OrderRule.severity.
+    severity: validator.string().valid('blocking', 'advisory').optional(),
   })
   .unknown(false)
 
@@ -37,6 +39,7 @@ const requiredMetadataRuleSchema = validator
     gatedByReplayCompatibility: validator.array().items(validator.string()).optional(),
     fallbackPayloadValue: validator.any().optional(),
     fallbackReplayCompatibility: validator.string().optional(),
+    fallbackRepairAuthorized: validator.boolean().optional(),
   })
   .unknown(false)
 
@@ -47,6 +50,8 @@ const alternationRuleSchema = validator
     roles: validator.array().items(roleSchema).required(),
     mode: validator.string().valid('strict').required(),
     maxPerGroup: validator.number().integer().min(0).optional(),
+    // Optional; absent means `advisory` for EVERY rule type. See OrderRule.severity.
+    severity: validator.string().valid('blocking', 'advisory').optional(),
   })
   .unknown(false)
 
@@ -56,6 +61,8 @@ const adjacencyRuleSchema = validator
     id: validator.string().required(),
     first: primitiveKindSchema.required(),
     disallowBetween: validator.array().items(primitiveKindSchema).required(),
+    // Optional; absent means `advisory` for EVERY rule type. See OrderRule.severity.
+    severity: validator.string().valid('blocking', 'advisory').optional(),
   })
   .unknown(false)
 
@@ -70,6 +77,8 @@ const preservationRuleSchema = validator
       .required(),
     payloadField: validator.string().optional(),
     resetOnModelSwitch: validator.boolean().optional(),
+    // Optional; absent means `advisory` for EVERY rule type. See OrderRule.severity.
+    severity: validator.string().valid('blocking', 'advisory').optional(),
   })
   .unknown(false)
 
@@ -80,6 +89,46 @@ const roleRemapRuleSchema = validator
     kind: primitiveKindSchema.required(),
     variant: validator.string().required(),
     expectedRoleTag: validator.string().required(),
+    // Optional; absent means `advisory`. See RoleRemapRule.severity — the tag is a
+    // consumer-supplied payload field, so blocking is opt-in rather than the default.
+    severity: validator.string().valid('blocking', 'advisory').optional(),
+  })
+  .unknown(false)
+
+const identifierFormatRuleSchema = validator
+  .object({
+    type: validator.string().valid('identifierFormat').required(),
+    id: validator.string().required(),
+    kind: primitiveKindSchema.required(),
+    maxLength: validator.number().integer().positive().optional(),
+    allowedPattern: validator.string().optional(),
+    severity: validator.string().valid('blocking', 'advisory').optional(),
+  })
+  .unknown(false)
+
+const nonEmptyTurnRuleSchema = validator
+  .object({
+    type: validator.string().valid('nonEmptyTurn').required(),
+    id: validator.string().required(),
+    role: validator.string().valid('assistant', 'user').required(),
+    onlyTerminal: validator.boolean().optional(),
+    severity: validator.string().valid('blocking', 'advisory').optional(),
+  })
+  .unknown(false)
+
+const toolIdentityRuleSchema = validator
+  .object({
+    type: validator.string().valid('toolIdentity').required(),
+    id: validator.string().required(),
+    severity: validator.string().valid('blocking', 'advisory').optional(),
+  })
+  .unknown(false)
+
+const schemaIntegrityRuleSchema = validator
+  .object({
+    type: validator.string().valid('schemaIntegrity').required(),
+    id: validator.string().required(),
+    severity: validator.string().valid('blocking', 'advisory').optional(),
   })
   .unknown(false)
 
@@ -100,7 +149,11 @@ const orderingRuleSchema = validator.alternatives(
   adjacencyRuleSchema,
   preservationRuleSchema,
   roleRemapRuleSchema,
-  staleContentAdvisoryRuleSchema
+  staleContentAdvisoryRuleSchema,
+  identifierFormatRuleSchema,
+  nonEmptyTurnRuleSchema,
+  toolIdentityRuleSchema,
+  schemaIntegrityRuleSchema
 )
 
 const orderingProfileSchema = validator

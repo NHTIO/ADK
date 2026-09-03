@@ -28,7 +28,20 @@ export const thoughtSignatureRequired: OrderingProfile = {
       kind: 'toolCall',
       applyTo: 'first-in-group',
       requiredPayloadKey: 'thoughtSignature',
+      // THE ONE RULE THIS CATALOG HAS CONFIRMED. A live audit against each rule's own native API
+      // found 16 of 17 blocking turn state their vendor accepts; this is the exception. Gemini
+      // rejects an unsigned historical `functionCall` with a 400 naming the field and the position
+      // ("Function call is missing a thought_signature in functionCall parts … position 2"), and
+      // the same history with the sentinel returns 200. So it keeps `blocking` explicitly while the
+      // rest of the catalog defaults to advisory — see OrderRule.severity.
+      severity: 'blocking',
       fallbackPayloadValue: 'skip_thought_signature_validator',
+      // Issue #15 defect 3: this fallback is GOOGLE'S OWN published sentinel for replaying
+      // non-Gemini-originated history, not a fabricated provenance claim — so mutate mode may apply
+      // it without the global `allowMetadataFallbackRepair`. Without this, `gemini-3` had no working
+      // configuration at all: enforce nacked, mutate nacked, and the only setting that dispatched
+      // was a flag documented as a last resort. Authorizes THIS rule only.
+      fallbackRepairAuthorized: true,
       // Consumer convention (not ADK-reserved) identifying Gemini's sentinel replay shape.
       fallbackReplayCompatibility: 'gemini-thought-signature-sentinel-v1',
     },

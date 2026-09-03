@@ -75,6 +75,17 @@ const entry = (
     value: { id } as OrderingTimelineEntry['value'],
   }) as OrderingTimelineEntry
 
+/**
+ * The shipped profile is ADVISORY by default (OrderRule.severity — a live audit found these rules
+ * block turn state their vendors accept). Only a BLOCKING finding reaches `repairViolations`, so
+ * the mutation tests drive this explicitly-blocking variant of the same rule; the advisory tests
+ * use the shipped profile unchanged.
+ */
+const converseTextBeforeToolUseBlocking = {
+  ...converseTextBeforeToolUse,
+  rules: converseTextBeforeToolUse.rules.map((r) => ({ ...r, severity: 'blocking' as const })),
+}
+
 describe('converse-text-before-tool-use profile', () => {
   it('happy path places assistant text before tool use', () => {
     expect(
@@ -103,22 +114,22 @@ describe('converse-text-before-tool-use profile', () => {
     }
     expect(evaluateOrderingProfile(timeline, adjacentProfile).blocking).toHaveLength(0)
     const result = evaluateOrderingProfile(timeline, converseTextBeforeToolUse)
-    expect(result.blocking).toHaveLength(1)
-    expect(result.blocking[0].ruleId).toBe('converse-text-before-tool-use')
+    expect(result.advisories).toHaveLength(1)
+    expect(result.advisories[0].ruleId).toBe('converse-text-before-tool-use')
   })
 
   it('mutation reorders the message and ToolCall and clears the violation end-to-end', async () => {
     const timeline = [entry('toolCall', 'call', 1, 1), entry('message', 'text', 2, 0, 'assistant')]
-    const violations = evaluateOrderingProfile(timeline, converseTextBeforeToolUse).blocking
+    const violations = evaluateOrderingProfile(timeline, converseTextBeforeToolUseBlocking).blocking
     const repaired = repairViolations(timeline, violations)
     expect(repaired.repaired[0].strategy).toBe('reorder')
     expect(
-      evaluateOrderingProfile(repaired.timeline, converseTextBeforeToolUse).blocking
+      evaluateOrderingProfile(repaired.timeline, converseTextBeforeToolUseBlocking).blocking
     ).toHaveLength(0)
     const ctx = context([message('text', 'assistant', 2)], [toolCall('call', 1)])
     const next = vi.fn(async () => undefined)
     await orderingGuardDispatchMiddleware({
-      profiles: [converseTextBeforeToolUse],
+      profiles: [converseTextBeforeToolUseBlocking],
       action: 'mutate',
     })(ctx as never, next)
     expect(ctx.nack).not.toHaveBeenCalled()
@@ -126,7 +137,9 @@ describe('converse-text-before-tool-use profile', () => {
     const effective = ctx.stash.get<OrderingTimelineEntry[]>(
       ORDERING_GUARD_EFFECTIVE_TIMELINE_STASH_KEY
     )
-    expect(evaluateOrderingProfile(effective, converseTextBeforeToolUse).blocking).toHaveLength(0)
+    expect(
+      evaluateOrderingProfile(effective, converseTextBeforeToolUseBlocking).blocking
+    ).toHaveLength(0)
 
     // The guard's own effectiveTimeline is not enough on its own — the repair must reach the
     // REAL turn state, since that is what an LLM adapter's own history assembly reads from.
@@ -135,6 +148,8 @@ describe('converse-text-before-tool-use profile', () => {
     const [liveMessage] = [...ctx.turnMessages]
     expect(liveMessage.createdAt.toMillis()).toBeLessThan(liveToolCall.createdAt.toMillis())
     const rebuilt = buildOrderingTimeline(ctx.turnMessages, ctx.turnThoughts, ctx.turnToolCalls)
-    expect(evaluateOrderingProfile(rebuilt, converseTextBeforeToolUse).blocking).toHaveLength(0)
+    expect(
+      evaluateOrderingProfile(rebuilt, converseTextBeforeToolUseBlocking).blocking
+    ).toHaveLength(0)
   })
 })

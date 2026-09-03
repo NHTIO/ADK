@@ -42,6 +42,19 @@ const context = (stash: Map<string, unknown>, kind: 'toolCall' | 'thought', pres
   abort: vi.fn(),
 })
 
+/**
+ * Shipped ADVISORY by default (OrderRule.severity — a live audit found the catalog's rules block
+ * turn state their vendors accept). Only a BLOCKING finding gates dispatch or reaches the repair
+ * path, so tests asserting those drive this helper; the reporting tests use the shipped profile.
+ */
+const blocking = (profile: { rules: readonly unknown[] }) => ({
+  ...profile,
+  rules: (profile.rules as Array<Record<string, unknown>>).map((r) => ({
+    ...r,
+    severity: 'blocking' as const,
+  })),
+})
+
 describe('full history preservation profiles', () => {
   it.each(['toolCall', 'thought'] as const)(
     'accepts an established and retained %s history',
@@ -50,7 +63,7 @@ describe('full history preservation profiles', () => {
       const ctx = context(stash, kind, true)
       const next = vi.fn(async () => undefined)
       const middleware = orderingGuardDispatchMiddleware({
-        profiles: [fullHistoryPreservation(kind)],
+        profiles: [blocking(fullHistoryPreservation(kind)) as never],
       })
       await middleware(ctx as never, next)
       await middleware(ctx as never, next)
@@ -66,7 +79,7 @@ describe('full history preservation profiles', () => {
       const ctx = context(stash, kind, true)
       const next = vi.fn(async () => undefined)
       const middleware = orderingGuardDispatchMiddleware({
-        profiles: [fullHistoryPreservation(kind)],
+        profiles: [blocking(fullHistoryPreservation(kind)) as never],
       })
       await middleware(ctx as never, next)
       expect(ctx.nack).not.toHaveBeenCalled()
@@ -88,7 +101,7 @@ describe('full history preservation profiles', () => {
       const next = vi.fn(async () => undefined)
       const middleware = orderingGuardDispatchMiddleware({
         action: 'mutate',
-        profiles: [fullHistoryPreservation(kind)],
+        profiles: [blocking(fullHistoryPreservation(kind)) as never],
       })
       await middleware(ctx as never, next)
       const entries = kind === 'thought' ? ctx.turnThoughts : ctx.turnToolCalls

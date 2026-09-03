@@ -17,27 +17,40 @@ const entry = (id: string, payload?: unknown): OrderingTimelineEntry => ({
 })
 
 // The evaluator checks the generic marker string, not a vendor wire-role name.
-const valid = [entry('call', { payload: { roleTag: 'granite-4.x' } })]
+//
+// NOTE the payload shape. `expectedRoleTag` is resolved INSIDE `value.payload`, so the tag lives at
+// `payload.roleTag` — one level, exactly as a caller would write it. These fixtures previously
+// double-nested it (`{ payload: { roleTag } }`) to satisfy a rule that declared the path as
+// `'payload.roleTag'` and therefore read `payload.payload.roleTag`. That made the profile
+// unsatisfiable for every real ToolCall: the middleware assertion below used a SINGLY-nested
+// payload and "passed" only because it nacked — the fixtures encoded the bug rather than catching it.
+const valid = [entry('call', { roleTag: 'granite-4.x' })]
 const sabotage = [entry('call', { payload: { roleTag: 'tool_response' } })]
+
+// The profile is a FACTORY: the caller supplies which payload field carries the tag, what
+// value to require, and the severity. Defaults reproduce the documented Granite shape.
+const profile = roleRemapInlineToolCall()
 
 describe('role-remap-inline-tool-call profile', () => {
   it('accepts a ToolCall carrying the Granite 4.x marker', () => {
-    expect(evaluateOrderingProfile(valid, roleRemapInlineToolCall).blocking).toHaveLength(0)
+    expect(evaluateOrderingProfile(valid, profile).blocking).toHaveLength(0)
   })
 
-  it('blocks a ToolCall carrying the wrong role marker', () => {
-    const result = evaluateOrderingProfile(sabotage, roleRemapInlineToolCall)
-    expect(result.blocking).toHaveLength(1)
-    expect(result.blocking[0].ruleId).toBe('granite-4-x-inline-tool-call')
+  it('reports a wrong role marker as an ADVISORY without blocking dispatch', () => {
+    const result = evaluateOrderingProfile(sabotage, profile)
+    // `payload.roleTag` is a consumer-supplied annotation that nothing in the ADK writes, so this
+    // rule defaults to advisory: a missing/mismatched tag is reported, never gated on.
+    expect(result.blocking).toHaveLength(0)
+    expect(result.advisories).toHaveLength(1)
+    expect(result.advisories[0].ruleId).toBe('granite-4-x-inline-tool-call')
+    expect(result.advisories[0].severity).toBe('advisory')
   })
 
-  it('leaves the role-remap violation unrepaired and blocks dispatch', async () => {
-    const result = repairViolations(
-      sabotage,
-      evaluateOrderingProfile(sabotage, roleRemapInlineToolCall).blocking
-    )
+  it('permits dispatch: nothing to repair, nothing to block', async () => {
+    const result = repairViolations(sabotage, evaluateOrderingProfile(sabotage, profile).blocking)
+    // Nothing reaches the repair path at all now — the finding is an advisory, not a violation.
     expect(result.repaired).toHaveLength(0)
-    expect(result.unrepaired).toHaveLength(1)
+    expect(result.unrepaired).toHaveLength(0)
 
     const date = DateTime.fromMillis(1000)
     const call = new ToolCall({
@@ -71,10 +84,11 @@ describe('role-remap-inline-tool-call profile', () => {
     }
     const next = vi.fn(async () => undefined)
     await orderingGuardDispatchMiddleware({
-      profiles: [roleRemapInlineToolCall],
+      profiles: [profile],
       action: 'mutate',
     })(ctx as never, next)
-    expect(ctx.nack).toHaveBeenCalledOnce()
-    expect(next).not.toHaveBeenCalled()
+    // Before the fix this nacked, making both Granite families unable to dispatch ANY tool call.
+    expect(ctx.nack).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledOnce()
   })
 })

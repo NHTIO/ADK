@@ -2,6 +2,10 @@
  * Registry of atomic ordering behaviors; family names belong in `families.ts`, not here.
  */
 import { permissive } from './permissive'
+import { toolIdentity } from './tool_identity'
+import { nonEmptyTurn } from './non_empty_turn'
+import { schemaIntegrity } from './schema_integrity'
+import { toolCallIdFormat } from './tool_call_id_format'
 import { strictAlternation } from './strict_alternation'
 import { E_UNKNOWN_ORDERING_PROFILE } from '../exceptions'
 import { openaiShapeBaseline } from './openai_shape_baseline'
@@ -20,7 +24,14 @@ import { converseTextBeforeToolUse } from './converse_text_before_tool_use'
 import { reasoningPrunedAfterLatestTurn } from './reasoning_pruned_after_latest_turn'
 import type { OrderingProfile, OrderingPrimitiveKind } from '../types'
 
-export { fullHistoryPreservation, payloadFieldPreservation }
+export {
+  fullHistoryPreservation,
+  payloadFieldPreservation,
+  nonEmptyTurn,
+  toolCallIdFormat,
+  roleRemapSplitToolRoles,
+  roleRemapInlineToolCall,
+}
 
 export type OrderingProfileFactory = (...args: never[]) => OrderingProfile
 export type RegisteredOrderingProfile = OrderingProfile | OrderingProfileFactory
@@ -39,10 +50,17 @@ export const ORDERING_PROFILES: Readonly<Record<string, RegisteredOrderingProfil
   payload_field_preservation: payloadFieldPreservation as unknown as OrderingProfileFactory,
   reasoning_pruned_after_latest_turn: reasoningPrunedAfterLatestTurn,
   stale_thinking_advisory: staleThinkingAdvisory,
-  role_remap_split_tool_roles: roleRemapSplitToolRoles,
-  role_remap_inline_tool_call: roleRemapInlineToolCall,
+  role_remap_split_tool_roles: roleRemapSplitToolRoles as unknown as OrderingProfileFactory,
+  role_remap_inline_tool_call: roleRemapInlineToolCall as unknown as OrderingProfileFactory,
   harmony_commentary_channel: harmonyCommentaryChannel,
   converse_text_before_tool_use: converseTextBeforeToolUse,
+  // MEASURED rules — added from live vendor behaviour rather than vendor documentation. The first
+  // two catch the SILENT failure class: a provider answering 200 with nothing, or with a field
+  // quietly missing. See each profile's remarks for the evidence.
+  tool_identity: toolIdentity,
+  schema_integrity: schemaIntegrity,
+  non_empty_turn: nonEmptyTurn as unknown as OrderingProfileFactory,
+  tool_call_id_format: toolCallIdFormat as unknown as OrderingProfileFactory,
 }
 
 /** Resolves a non-parameterized behavior by its registry name. */
@@ -60,11 +78,24 @@ export const resolveOrderingBehavior = (name: string): OrderingProfile => {
     return fullHistoryPreservation(args[0] as OrderingPrimitiveKind)
   if (behavior === 'payload_field_preservation' && args.length >= 1)
     return payloadFieldPreservation(args.join(':'), 'thought')
+  // `role_remap_*[:field[:variant[:severity]]]` — the tag is a consumer-supplied payload field that
+  // nothing in the ADK writes, so the recipe says which field carries it and what value to require.
+  // Bare `role_remap_split_tool_roles` keeps the documented Granite defaults.
+  if (behavior === 'non_empty_turn')
+    return nonEmptyTurn(args[0] === 'terminal', (args[1] as 'assistant' | 'user') ?? 'assistant')
+  if (behavior === 'tool_call_id_format')
+    return toolCallIdFormat(args[0] ? Number(args[0]) : undefined, args[1])
+  if (behavior === 'role_remap_split_tool_roles')
+    return roleRemapSplitToolRoles(...(args as [string?, string?, ('blocking' | 'advisory')?]))
+  if (behavior === 'role_remap_inline_tool_call')
+    return roleRemapInlineToolCall(...(args as [string?, string?, ('blocking' | 'advisory')?]))
   return getOrderingProfile(name)
 }
 
 export {
   permissive,
+  toolIdentity,
+  schemaIntegrity,
   openaiShapeBaseline,
   strictAlternation,
   singleToolCallPerTurn,
@@ -74,8 +105,6 @@ export {
   functionResponseAdjacency,
   reasoningPrunedAfterLatestTurn,
   staleThinkingAdvisory,
-  roleRemapSplitToolRoles,
-  roleRemapInlineToolCall,
   harmonyCommentaryChannel,
   converseTextBeforeToolUse,
 }

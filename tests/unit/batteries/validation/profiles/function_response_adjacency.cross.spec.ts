@@ -32,13 +32,25 @@ const call = new ToolCall({
 const result = (messages: Message[], calls: ToolCall[]) =>
   evaluateOrderingProfile(buildOrderingTimeline(messages, [], calls), functionResponseAdjacency)
 
+/**
+ * Shipped ADVISORY by default (OrderRule.severity — a live audit found these rules block turn
+ * state their vendors accept). Only a BLOCKING finding reaches `repairViolations`, so the mutation
+ * test drives this variant; the advisory tests use the shipped profile unchanged.
+ */
+const functionResponseAdjacencyBlocking = {
+  ...functionResponseAdjacency,
+  rules: functionResponseAdjacency.rules.map((r) => ({ ...r, severity: 'blocking' as const })),
+}
+
 describe('function response adjacency profile', () => {
   it('accepts a tool call followed by a non-message successor', () => {
     expect(result([], [call]).blocking).toHaveLength(0)
   })
 
   it('rejects a message immediately after a tool call', () => {
-    expect(result([message], [call]).blocking).toEqual([
+    // Advisory by default — the finding is reported, not gated.
+    expect(result([message], [call]).blocking).toHaveLength(0)
+    expect(result([message], [call]).advisories).toEqual([
       expect.objectContaining({ ruleId: 'message-not-immediately-after-function-call' }),
     ])
   })
@@ -47,14 +59,19 @@ describe('function response adjacency profile', () => {
     expect(result([], [call]).blocking).toHaveLength(0)
   })
 
-  it('leaves adjacency violations unrepaired and blocks mutate dispatch', async () => {
+  it('repairs an adjacency violation by reordering, and lets the dispatch proceed', async () => {
     const timeline = buildOrderingTimeline([message], [], [call])
-    const violations = evaluateOrderingProfile(timeline, functionResponseAdjacency).blocking
+    const violations = evaluateOrderingProfile(timeline, functionResponseAdjacencyBlocking).blocking
     const repaired = repairViolations(timeline, violations)
-    expect(repaired.repaired).toHaveLength(0)
-    expect(repaired.unrepaired).toEqual([
-      expect.objectContaining({ ruleId: 'message-not-immediately-after-function-call' }),
+    // Driven with the BLOCKING variant, so the finding reaches the repair path. Issue #15 defect 1
+    // was that adjacency had NO repair strategy there, making `mutate` identical to `enforce`; it
+    // now reorders, so the violation is repaired rather than fatal.
+    expect(repaired.unrepaired).toHaveLength(0)
+    expect(repaired.repaired).toEqual([
+      expect.objectContaining({ strategy: 'reorder-adjacent', targetId: message.id }),
     ])
+    // The repair MOVES the successor rather than dropping it: every primitive survives.
+    expect(repaired.timeline.map((entry) => entry.kind)).toEqual(['message', 'toolCall'])
 
     const stash = new Map<string, unknown>()
     const ctx = {
@@ -68,18 +85,21 @@ describe('function response adjacency profile', () => {
       storeMessage: vi.fn(async () => undefined),
       mutateThought: vi.fn(async () => undefined),
       mutateToolCall: vi.fn(async () => undefined),
+      mutateMessage: vi.fn(async () => undefined),
       nack: vi.fn(),
       abort: vi.fn(),
     }
     const next = vi.fn(async () => undefined)
     await orderingGuardDispatchMiddleware({
       action: 'mutate',
-      profiles: [functionResponseAdjacency],
+      profiles: [functionResponseAdjacencyBlocking],
     })(ctx as never, next)
-    expect(ctx.nack).toHaveBeenCalledOnce()
-    expect(next).not.toHaveBeenCalled()
-    expect((ctx.nack.mock.calls[0][0] as { violations: { ruleId: string }[] }).violations).toEqual([
-      expect.objectContaining({ ruleId: 'message-not-immediately-after-function-call' }),
-    ])
+    // The repair is re-evaluated before the dispatch is allowed through, so `next` running is
+    // evidence the reorder actually cleared the violation — not merely that it was reported.
+    expect(ctx.nack).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledOnce()
+    // Reordering a Message is materialised as a createdAt nudge, since history assembly sorts by
+    // timestamp — an in-memory splice alone would never reach the wire.
+    expect(ctx.mutateMessage).toHaveBeenCalledOnce()
   })
 })

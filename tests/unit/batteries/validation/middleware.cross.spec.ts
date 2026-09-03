@@ -108,6 +108,9 @@ const alternation: OrderingGuardOptions = {
           id: 'strict-alternation',
           roles: ['user', 'assistant'],
           mode: 'strict',
+          // Explicit: these fixtures exercise the middleware's BLOCKING/repair paths. Shipped
+          // profiles default to advisory (OrderRule.severity) — covered by the profile specs.
+          severity: 'blocking',
         },
       ],
     },
@@ -126,6 +129,7 @@ const order: OrderingGuardOptions = {
           before: 'thought',
           after: 'toolCall',
           scope: 'entire-turn',
+          severity: 'blocking',
         },
       ],
     },
@@ -144,6 +148,7 @@ const preservation: OrderingGuardOptions = {
           id: 'keep-tools',
           kind: 'toolCall',
           invariant: 'count-non-decreasing',
+          severity: 'blocking',
         },
       ],
     },
@@ -180,12 +185,18 @@ describe('ordering guard middleware', () => {
     )
     await orderingGuardDispatchMiddleware({ profiles: ['gemini-3'] })(familyCtx as never, next)
 
-    expect(atomicCtx.nack).toHaveBeenCalledOnce()
+    // Both resolve through the registries — the point of this test. `strict_alternation` is
+    // ADVISORY by default so it reports without gating; `gemini-3` carries
+    // `thought-signature-required`, the one rule a live audit confirmed the vendor enforces, which
+    // remains blocking. See OrderRule.severity.
+    expect(atomicCtx.nack).not.toHaveBeenCalled()
     expect(familyCtx.nack).toHaveBeenCalledOnce()
     expect(
       (familyCtx.nack.mock.calls[0][0] as Error & { violations: { ruleId: string }[] }).violations
     ).toEqual([expect.objectContaining({ ruleId: 'thought-signature-required' })])
-    expect(next).not.toHaveBeenCalled()
+    // `next` ran ONCE — for the advisory `strict_alternation` dispatch, which proceeds. The
+    // blocking gemini-3 dispatch did not call it.
+    expect(next).toHaveBeenCalledOnce()
   })
 
   it('aborts a turn by default and throws only when explicitly configured', async () => {
@@ -331,6 +342,7 @@ describe('ordering guard middleware', () => {
               before: 'message',
               after: 'message',
               scope: 'entire-turn',
+              severity: 'blocking',
             },
           ],
         },

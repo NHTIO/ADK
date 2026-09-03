@@ -12,6 +12,16 @@ export const harmonyCommentaryChannel: OrderingProfile = {
       kind: 'toolCall',
       applyTo: 'every',
       requiredPayloadKey: 'channel',
+      // Advisory by default like the rest of the catalog (OrderRule.severity): the live audit
+      // measured gpt-oss ACCEPTING a ToolCall with no channel tag, so blocking would reject a
+      // dispatch the model serves.
+      severity: 'advisory',
+      // Defect #4 from issue #15: this rule declared NO fallbackPayloadValue, so mutate-mode
+      // repair skipped it at helpers.ts's `fallbackPayloadValue !== undefined` guard and every
+      // gpt-oss tool dispatch landed in `unrepaired`. `'commentary'` is Harmony's own channel name
+      // for a function call, so a consumer opting into `blocking` now gets a repairable rule
+      // rather than an unrepairable one.
+      fallbackPayloadValue: 'commentary',
     },
   ],
 }

@@ -29,7 +29,20 @@ const context = (stash: Map<string, unknown>, messages: Message[], thoughts: Tho
 })
 const options = (action?: 'mutate' | 'enforce') => ({
   action,
-  profiles: [reasoningPrunedAfterLatestTurn],
+  profiles: [blocking(reasoningPrunedAfterLatestTurn) as never],
+})
+
+/**
+ * Shipped ADVISORY by default (OrderRule.severity — a live audit found the catalog's rules block
+ * turn state their vendors accept). Only a BLOCKING finding gates dispatch or reaches the repair
+ * path, so tests asserting those drive this helper; the reporting tests use the shipped profile.
+ */
+const blocking = (profile: { rules: readonly unknown[] }) => ({
+  ...profile,
+  rules: (profile.rules as Array<Record<string, unknown>>).map((r) => ({
+    ...r,
+    severity: 'blocking' as const,
+  })),
 })
 
 describe('reasoning pruning preservation profile', () => {

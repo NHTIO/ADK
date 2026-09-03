@@ -32,13 +32,26 @@ const context = (stash: Map<string, unknown>, signature: string) => ({
   abort: vi.fn(),
 })
 
+/**
+ * Shipped ADVISORY by default (OrderRule.severity — a live audit found the catalog's rules block
+ * turn state their vendors accept). Only a BLOCKING finding gates dispatch or reaches the repair
+ * path, so tests asserting those drive this helper; the reporting tests use the shipped profile.
+ */
+const blocking = (profile: { rules: readonly unknown[] }) => ({
+  ...profile,
+  rules: (profile.rules as Array<Record<string, unknown>>).map((r) => ({
+    ...r,
+    severity: 'blocking' as const,
+  })),
+})
+
 describe('payload field preservation profile', () => {
   it('accepts an established thought signature that remains stable', async () => {
     const stash = new Map<string, unknown>()
     const ctx = context(stash, 'abc')
     const next = vi.fn(async () => undefined)
     const middleware = orderingGuardDispatchMiddleware({
-      profiles: [payloadFieldPreservation('signature')],
+      profiles: [blocking(payloadFieldPreservation('signature')) as never],
     })
     await middleware(ctx as never, next)
     await middleware(ctx as never, next)
@@ -51,7 +64,7 @@ describe('payload field preservation profile', () => {
     const ctx = context(stash, 'abc')
     const next = vi.fn(async () => undefined)
     const middleware = orderingGuardDispatchMiddleware({
-      profiles: [payloadFieldPreservation('signature')],
+      profiles: [blocking(payloadFieldPreservation('signature')) as never],
     })
     await middleware(ctx as never, next)
     ctx.turnThoughts.clear()
@@ -69,7 +82,7 @@ describe('payload field preservation profile', () => {
     const next = vi.fn(async () => undefined)
     const middleware = orderingGuardDispatchMiddleware({
       action: 'mutate',
-      profiles: [payloadFieldPreservation('signature')],
+      profiles: [blocking(payloadFieldPreservation('signature')) as never],
     })
     await middleware(ctx as never, next)
     ctx.turnThoughts.clear()

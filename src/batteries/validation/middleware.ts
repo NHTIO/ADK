@@ -21,6 +21,7 @@ import type {
 } from '@nhtio/adk/types'
 import type {
   BlockingOrderingViolation,
+  OrderingAdvisoryViolation,
   OrderingGuardOptions,
   OrderingGuardResult,
   OrderingProfile,
@@ -34,6 +35,34 @@ import type {
  *  `PreservationRule`" section. Exported (as `ORDERING_GUARD_SNAPSHOT_STASH_KEY`) so a caller
  *  can pass a custom `options.snapshotStashKey` without guessing the default's exact string. */
 const SNAPSHOT = '__orderingGuardSnapshot'
+/**
+ * Id prefix marking a message this guard synthesised as an alternation filler.
+ *
+ * @remarks
+ * Load-bearing in two places: fillers are excluded from the timeline the guard evaluates (so its
+ * own output can never become its next input), and a consumer can recognise and drop them when
+ * persisting turn state.
+ */
+const FILLER_PREFIX = '__ordering-guard-filler-'
+/**
+ * Body of a synthesised filler turn.
+ *
+ * @remarks
+ * Deliberately anodyne. A filler exists only to satisfy a provider's role-alternation grammar, so
+ * its content should be the least assertive thing that still counts as a turn — it must not put
+ * words in the model's mouth or in the user's.
+ */
+const FILLER_CONTENT = 'Understood.'
+/**
+ * Monotonic source of filler ids, never reset.
+ *
+ * @remarks
+ * Per-dispatch numbering would repeat ids across dispatches, which only stays harmless while
+ * `ctx.deleteMessage` is available to reap the previous batch. `deleteMessage` is optional on
+ * {@link GuardContext}, so a store that keeps them would end up holding several messages under one
+ * id. Counting for the life of the process costs nothing and removes that dependency.
+ */
+let fillerSequence = 0
 /** `ctx.stash` key under which the most recent {@link OrderingGuardResult} (repaired +
  *  unrepaired + advisories) is recorded, so a caller or a later pipeline stage can inspect
  *  exactly what this middleware did on the current iteration without parsing the nack error. */
@@ -54,6 +83,10 @@ type GuardContext = Pick<
   | 'mutateToolCall'
   | 'mutateThought'
 > &
+  // Optional: `toolIdentity` and `schemaIntegrity` read the request's declared tools, and
+  // `deleteMessage` reaps this guard's own spent fillers. Optional so every existing caller — and
+  // every test double — keeps working without them.
+  Partial<Pick<TurnContext, 'tools' | 'deleteMessage'>> &
   Partial<Pick<DispatchContext, 'nack'>> &
   Pick<TurnContext, 'abort'>
 
@@ -94,10 +127,11 @@ const preservationViolations = (
   timeline: OrderingTimelineEntry[],
   prior: Snapshot | undefined,
   profiles: OrderingProfile[]
-): BlockingOrderingViolation[] => {
-  if (!prior) return []
+): { blocking: BlockingOrderingViolation[]; advisories: OrderingAdvisoryViolation[] } => {
+  if (!prior) return { blocking: [], advisories: [] }
   const current = snapshotOf(timeline)
   const output: BlockingOrderingViolation[] = []
+  const advisories: OrderingAdvisoryViolation[] = []
   const seen = new Set<string>()
   for (const profile of profiles) {
     for (const rule of profile.rules) {
@@ -134,18 +168,23 @@ const preservationViolations = (
         })
       }
       if (broken.length > 0) {
-        output.push({
+        const detail = `Preservation invariant ${rule.invariant} was violated for ${rule.kind}.`
+        const shared = {
           ruleId: rule.id,
-          ruleType: 'preservation',
-          severity: 'blocking',
+          ruleType: 'preservation' as const,
           profileName: profile.name,
           primitiveIds: broken.map((entry) => entry.id),
-          detail: `Preservation invariant ${rule.invariant} was violated for ${rule.kind}.`,
-        })
+          detail,
+        }
+        // Honour the rule's own severity, defaulting to ADVISORY like every other rule type. This
+        // was hardcoded `blocking`, which meant a preservation profile gated dispatch regardless of
+        // what the recipe asked for. See OrderRule.severity for why advisory is the default.
+        if (rule.severity === 'blocking') output.push({ ...shared, severity: 'blocking' })
+        else advisories.push({ ...shared, severity: 'advisory' })
       }
     }
   }
-  return output
+  return { blocking: output, advisories }
 }
 
 const resolveProfiles = (options: OrderingGuardOptions): OrderingProfile[] => {
@@ -228,7 +267,10 @@ const applyRepairs = async (
       effective[effective.indexOf(entry)] = { ...entry, value: replacement }
       continue
     }
-    if (repair.strategy === 'reorder') {
+    // `reorder-adjacent` (adjacency) and `reorder` (order) differ in how helpers.ts CHOOSES the
+    // pair, not in how the move is applied: both name a target to place before a blocker, and both
+    // populate the same typed fields. One materialiser serves both.
+    if (repair.strategy === 'reorder' || repair.strategy === 'reorder-adjacent') {
       // Typed fields, not a prose-parsing regex against `detail` — `detail` is a human-readable
       // description that can legitimately be reworded in helpers.ts without this consumer noticing,
       // and a silently-broken parse here would let a violation continue to report as "repaired"
@@ -278,12 +320,19 @@ const applyRepairs = async (
     if (!first || !second) continue
     const role = first.role === 'user' ? 'assistant' : 'user'
     const at = (first.at + second.at) / 2
-    const id = `__ordering-guard-filler-${firstId}-${secondId}`
+    // A CONTENT-FREE id. It used to embed both neighbour ids, which is precisely why they nested:
+    // a filler placed between two fillers inherited both of their already-compound ids. A counter
+    // keeps it bounded and readable, and uniqueness now comes from position rather than lineage.
+    const id = `${FILLER_PREFIX}${fillerSequence++}`
     const date = new Date(at)
     const message = new Message({
       id,
       role,
-      content: id,
+      // Neutral prose, NOT the id. The content used to be the id itself, so a
+      // `__ordering-guard-filler-…` string was sent to the model as a genuine conversational turn —
+      // a synthetic token sequence no vendor has ever seen, inserted to satisfy a role-alternation
+      // check. This says the minimum a turn can say while still being a turn.
+      content: FILLER_CONTENT,
       createdAt: date,
       updatedAt: date,
     })
@@ -311,26 +360,87 @@ const runGuard = async (
   result: OrderingGuardResult
 }> => {
   const profiles = resolveProfiles(options)
-  const timeline = buildOrderingTimeline(ctx.turnMessages, ctx.turnThoughts, ctx.turnToolCalls)
-  const evaluations = profiles.map((profile) => evaluateOrderingProfile(timeline, profile))
+  // Reap the previous dispatch's fillers before doing anything else.
+  //
+  // A filler is scaffolding for ONE dispatch: it exists to satisfy a provider's role-alternation
+  // grammar for the request about to be sent, and has no meaning in the persisted transcript. Left
+  // behind it accumulates without bound — issue #15 defect 2 — so each dispatch removes what the
+  // last one built and re-derives from the real turn state. Excluding them from the timeline (just
+  // below) keeps the guard correct even where `deleteMessage` is unavailable; this keeps the STORE
+  // clean too.
+  if (ctx.deleteMessage !== undefined) {
+    for (const message of ctx.turnMessages) {
+      if (message.id.startsWith(FILLER_PREFIX)) await ctx.deleteMessage(message.id)
+    }
+  }
+
+  // Exclude this guard's OWN fillers from the timeline it evaluates.
+  //
+  // Issue #15 defect 2: a filler was materialised via `ctx.storeMessage` and never removed, so on
+  // the next dispatch it was itself an input to alternation checking — the guard generated fillers
+  // BETWEEN its own fillers, with ids nesting exponentially. Measured before this fix: 2 -> 5 -> 9
+  // fillers over three iterations, ids reaching 139 characters, 5 of them duplicates, and
+  // `repaired` AND `unrepaired` both non-empty for the same dispatch. A repair function whose
+  // output is its own next input has no fixed point; excluding them gives it one.
+  const timeline = buildOrderingTimeline(
+    ctx.turnMessages,
+    ctx.turnThoughts,
+    ctx.turnToolCalls
+  ).filter((entry) => !idOf(entry).startsWith(FILLER_PREFIX))
+  // Supply the request's declared tools so `toolIdentity` and `schemaIntegrity` can run. Both
+  // catch SILENT failures — a tool result naming an undeclared tool, and a schema whose `required`
+  // names a key its `properties` omit — that providers answer with a normal 200 and no error.
+  const declaredTools = (
+    ctx as { tools?: { all?: () => ReadonlyArray<{ name: string; describe?: () => unknown }> } }
+  ).tools
+    ?.all?.()
+    ?.map((tool) => {
+      const described = tool.describe?.() as { name?: string; inputSchema?: unknown } | undefined
+      return {
+        name: described?.name ?? tool.name,
+        inputSchema: described?.inputSchema,
+      }
+    })
+  const evaluationContext = declaredTools === undefined ? undefined : { tools: declaredTools }
+  const evaluations = profiles.map((profile) =>
+    evaluateOrderingProfile(timeline, profile, evaluationContext)
+  )
   const blocked = evaluations.flatMap((evaluation) => evaluation.blocking)
   const advisories = evaluations
     .flatMap((evaluation) => evaluation.advisories)
     .filter((violation) => !options.disableAdvisoryRuleIds?.includes(violation.ruleId))
   const prior = ctx.stash.get<Snapshot | undefined>(options.snapshotStashKey ?? SNAPSHOT)
   const preservation = preservationViolations(timeline, prior, profiles)
-  const allBlocked = [...blocked, ...preservation]
+  const allBlocked = [...blocked, ...preservation.blocking]
+  // Preservation advisories join the evaluator's own, and are subject to the same opt-out.
+  const allAdvisories = [
+    ...advisories,
+    ...preservation.advisories.filter(
+      (violation) => !options.disableAdvisoryRuleIds?.includes(violation.ruleId)
+    ),
+  ]
   // The snapshot is replaced even on rejection so retries compare against the state just observed.
   ctx.stash.set(options.snapshotStashKey ?? SNAPSHOT, snapshotOf(timeline))
   if (options.action !== 'mutate')
     return {
       blocked: allBlocked,
-      result: { repaired: [], unrepaired: allBlocked, advisories },
+      result: { repaired: [], unrepaired: allBlocked, advisories: allAdvisories },
     }
   const repaired = repairViolations(
     timeline,
     allBlocked,
-    options.allowMetadataFallbackRepair === true ? profiles : undefined
+    options.allowMetadataFallbackRepair === true ? profiles : undefined,
+    // Rules that authorize their own fallback are repairable WITHOUT the global flag. Narrowed to
+    // just those rules, so enabling one vendor's documented sentinel never widens the surface to
+    // sibling rules in the same profile.
+    profiles
+      .map((profile) => ({
+        ...profile,
+        rules: profile.rules.filter(
+          (rule) => rule.type === 'requiredMetadata' && rule.fallbackRepairAuthorized === true
+        ),
+      }))
+      .filter((profile) => profile.rules.length > 0)
   )
   const applied = await applyRepairs(ctx, repaired.repaired, timeline, profiles)
   const effectiveTimeline = [...repaired.timeline]
@@ -339,9 +449,7 @@ const runGuard = async (
     if (index >= 0) effectiveTimeline[index] = entry
   }
   const synthetic = {
-    timeline: applied.timeline.filter((entry) =>
-      idOf(entry).startsWith('__ordering-guard-filler-')
-    ),
+    timeline: applied.timeline.filter((entry) => idOf(entry).startsWith(FILLER_PREFIX)),
     placement: applied.placement,
   }
   for (const entry of synthetic.timeline) {
@@ -402,7 +510,7 @@ const runGuard = async (
   })
   ctx.stash.set(EFFECTIVE_TIMELINE, stashableTimeline)
   const postRepairBlocking = profiles.flatMap(
-    (profile) => evaluateOrderingProfile(effectiveTimeline, profile).blocking
+    (profile) => evaluateOrderingProfile(effectiveTimeline, profile, evaluationContext).blocking
   )
   const unrepaired = [...repaired.unrepaired]
   const known = new Set(

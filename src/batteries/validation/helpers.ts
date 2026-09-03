@@ -1,4 +1,5 @@
-import { isObject } from '@nhtio/adk/guards'
+import { Tokenizable } from '@nhtio/adk/common'
+import { isObject, isInstanceOf } from '@nhtio/adk/guards'
 import type { Message, Thought, ToolCall } from '@nhtio/adk/common'
 import type {
   BlockingOrderingViolation,
@@ -76,7 +77,7 @@ const advisory = (
 })
 
 const metadataAdvisory = (
-  rule: Extract<OrderingRule, { type: 'requiredMetadata' }>,
+  rule: OrderingRule,
   profile: OrderingProfile,
   entry: OrderingTimelineEntry,
   detail: string
@@ -88,6 +89,27 @@ const metadataAdvisory = (
   primitiveIds: [idOf(entry)],
   detail,
 })
+
+/**
+ * Route a finding to `blocking` or `advisories` per the rule's own severity.
+ *
+ * @remarks
+ * Omitted severity means ADVISORY for every rule type. See {@link OrderRule.severity} for why:
+ * a live audit found 16 of 17 rules blocked turn state their own vendor accepts, so the catalog
+ * reports by default and gates only where a consumer has verified the constraint.
+ */
+const record = (
+  result: { blocking: BlockingOrderingViolation[]; advisories: OrderingAdvisoryViolation[] },
+  // Every rule type EXCEPT staleContentAdvisory, which is advisory-only and has its own branch.
+  rule: Exclude<OrderingRule, { type: 'staleContentAdvisory' }>,
+  profile: OrderingProfile,
+  entries: OrderingTimelineEntry[],
+  detail: string
+): void => {
+  const severity = (rule as { severity?: 'blocking' | 'advisory' }).severity
+  if (severity === 'blocking') result.blocking.push(blocking(rule, profile, entries, detail))
+  else result.advisories.push(metadataAdvisory(rule, profile, entries[0]!, detail))
+}
 
 const entriesForKind = (timeline: OrderingTimelineEntry[], kind: OrderingTimelineEntry['kind']) =>
   timeline.filter((entry) => entry.kind === kind)
@@ -199,7 +221,13 @@ export const buildOrderingTimeline = (
  */
 export const evaluateOrderingProfile = (
   timeline: OrderingTimelineEntry[],
-  profile: OrderingProfile
+  profile: OrderingProfile,
+  /**
+   * Optional request context. `toolIdentity` and `schemaIntegrity` need the tools the request
+   * actually declares, which the timeline alone cannot supply; both skip silently when it is
+   * absent, so every existing caller keeps working unchanged.
+   */
+  context?: { tools?: ReadonlyArray<{ name: string; inputSchema?: unknown }> }
 ): {
   blocking: BlockingOrderingViolation[]
   advisories: OrderingAdvisoryViolation[]
@@ -221,13 +249,12 @@ export const evaluateOrderingProfile = (
           after.length > 0 &&
           group.indexOf(before[before.length - 1]) > group.indexOf(after[0])
         ) {
-          result.blocking.push(
-            blocking(
-              rule,
-              profile,
-              [...before, ...after],
-              `${rule.before} must precede ${rule.after} in its ordering group.`
-            )
+          record(
+            result,
+            rule,
+            profile,
+            [...before, ...after],
+            `${rule.before} must precede ${rule.after} in its ordering group.`
           )
         }
       }
@@ -251,13 +278,12 @@ export const evaluateOrderingProfile = (
       )
       for (let index = 1; index < messages.length; index++) {
         if (messages[index].role === messages[index - 1].role) {
-          result.blocking.push(
-            blocking(
-              rule,
-              profile,
-              messages.slice(index - 1, index + 1),
-              `Message roles must alternate; both entries are ${messages[index].role}.`
-            )
+          record(
+            result,
+            rule,
+            profile,
+            messages.slice(index - 1, index + 1),
+            `Message roles must alternate; both entries are ${messages[index].role}.`
           )
         }
       }
@@ -265,13 +291,12 @@ export const evaluateOrderingProfile = (
         for (const group of roleGroups(timeline)) {
           const calls = group.filter((entry) => entry.kind === 'toolCall')
           if (calls.length > rule.maxPerGroup) {
-            result.blocking.push(
-              blocking(
-                rule,
-                profile,
-                calls,
-                `At most ${rule.maxPerGroup} tool call(s) are allowed in one role group.`
-              )
+            record(
+              result,
+              rule,
+              profile,
+              calls,
+              `At most ${rule.maxPerGroup} tool call(s) are allowed in one role group.`
             )
           }
         }
@@ -283,13 +308,12 @@ export const evaluateOrderingProfile = (
         const next = timeline[firstIndex + 1]
         // The final entry has no successor, so there is no primitive that can violate adjacency.
         if (next !== undefined && rule.disallowBetween.includes(next.kind)) {
-          result.blocking.push(
-            blocking(
-              rule,
-              profile,
-              [first, next],
-              `A ${next.kind} may not immediately follow this ${rule.first}.`
-            )
+          record(
+            result,
+            rule,
+            profile,
+            [first, next],
+            `A ${next.kind} may not immediately follow this ${rule.first}.`
           )
         }
       }
@@ -299,14 +323,135 @@ export const evaluateOrderingProfile = (
           getDotPath((entry.value as { payload?: unknown }).payload, rule.expectedRoleTag) !==
           rule.variant
         ) {
-          result.blocking.push(
-            blocking(
+          const detail = `Expected role-remap tag ${rule.expectedRoleTag} to equal ${rule.variant}.`
+          // Advisory unless the profile explicitly opts into blocking. `payload.roleTag` is a
+          // consumer-supplied annotation that nothing in the ADK writes, so a blocking default
+          // rejected EVERY ToolCall for both Granite families — with no repair strategy for
+          // `roleRemap`, that left them unable to dispatch a tool call under any configuration.
+          if (rule.severity === 'blocking') {
+            result.blocking.push(blocking(rule, profile, [entry], detail))
+          } else {
+            result.advisories.push(metadataAdvisory(rule, profile, entry, detail))
+          }
+        }
+      }
+    } else if (rule.type === 'identifierFormat') {
+      for (const entry of entriesForKind(timeline, rule.kind)) {
+        const id = String(idOf(entry))
+        if (rule.maxLength !== undefined && id.length > rule.maxLength) {
+          record(
+            result,
+            rule,
+            profile,
+            [entry],
+            `Identifier is ${id.length} characters; this provider caps it at ${rule.maxLength}.`
+          )
+          continue
+        }
+        if (
+          rule.allowedPattern !== undefined &&
+          !new RegExp(`^(?:${rule.allowedPattern})+$`).test(id)
+        ) {
+          record(
+            result,
+            rule,
+            profile,
+            [entry],
+            `Identifier contains characters outside ${rule.allowedPattern}.`
+          )
+        }
+      }
+    } else if (rule.type === 'nonEmptyTurn') {
+      // A turn is non-empty if it carries prose OR an adjacent tool call. A thought alone does not
+      // count: Gemini's terminal thought-only turn is exactly the shape that fails.
+      const messages = timeline.filter(
+        (entry) => entry.kind === 'message' && entry.role === rule.role
+      )
+      const candidates = rule.onlyTerminal
+        ? timeline.length > 0 &&
+          timeline[timeline.length - 1].kind === 'message' &&
+          timeline[timeline.length - 1].role === rule.role
+          ? [timeline[timeline.length - 1]]
+          : []
+        : messages
+      for (const entry of candidates) {
+        // `Message.content` is a Tokenizable, never a bare string. A `typeof === 'string'` test here
+        // silently degraded to a null check no Message could fail — the schema already rejects an
+        // empty content at construction — so this rule caught nothing at all. Whitespace-only IS
+        // constructible, and is the shape that actually reaches a provider.
+        //
+        // A DYNAMIC Tokenizable holds a `(ctx) => string` that cannot be resolved without a
+        // context, which this evaluator does not have. It counts as prose: assuming it renders
+        // empty would reject turns that are fine at assembly time, and a false rejection is the
+        // worse error for a rule whose whole purpose is to avoid one.
+        const content = (entry.value as { content?: unknown }).content
+        const isTokenizable = isInstanceOf(content, 'Tokenizable', Tokenizable)
+        const hasProse =
+          isTokenizable && content.dynamic
+            ? true
+            : (isTokenizable ? String(content.valueOf()) : String(content ?? '')).trim().length > 0
+        const index = timeline.indexOf(entry)
+        const neighbourIsCall =
+          timeline[index + 1]?.kind === 'toolCall' || timeline[index - 1]?.kind === 'toolCall'
+        if (!hasProse && !neighbourIsCall) {
+          record(
+            result,
+            rule,
+            profile,
+            [entry],
+            `A ${rule.role} turn must carry content or an adjacent tool call; this one carries neither.`
+          )
+        }
+      }
+    } else if (rule.type === 'toolIdentity') {
+      // Needs the request's declared tools; skip silently when the caller supplied none.
+      const declared = context?.tools
+      if (declared !== undefined) {
+        const names = new Set(declared.map((tool) => tool.name))
+        for (const entry of entriesForKind(timeline, 'toolCall')) {
+          const name = (entry.value as { tool?: unknown }).tool
+          if (typeof name === 'string' && !names.has(name)) {
+            record(
+              result,
               rule,
               profile,
               [entry],
-              `Expected role-remap tag ${rule.expectedRoleTag} to equal ${rule.variant}.`
+              `Tool result names '${name}', which this request does not declare. ` +
+                `Providers that match results against declarations by NAME answer such a request ` +
+                `with an empty generation and no error.`
             )
-          )
+          }
+        }
+      }
+    } else if (rule.type === 'schemaIntegrity') {
+      const declared = context?.tools
+      if (declared !== undefined) {
+        for (const tool of declared) {
+          const schema = tool.inputSchema
+          if (schema === null || typeof schema !== 'object') continue
+          const { required, properties } = schema as {
+            required?: unknown
+            properties?: Record<string, unknown>
+          }
+          if (!Array.isArray(required)) continue
+          const known = new Set(Object.keys(properties ?? {}))
+          const orphans = required.filter((key) => typeof key === 'string' && !known.has(key))
+          if (orphans.length > 0) {
+            // No timeline entry to blame — the defect is in the DECLARATION, so the finding names
+            // the tool. `record` needs an entry, so fall back to the first tool call if present.
+            const anchor = entriesForKind(timeline, 'toolCall')[0] ?? timeline[0]
+            if (anchor !== undefined) {
+              record(
+                result,
+                rule,
+                profile,
+                [anchor],
+                `Tool '${tool.name}' requires ${orphans.join(', ')}, which its properties do not ` +
+                  `define — an unsatisfiable schema. Providers answer such a request with a normal ` +
+                  `200 that silently omits the field.`
+              )
+            }
+          }
         }
       }
     } else if (rule.type === 'staleContentAdvisory') {
@@ -354,13 +499,17 @@ export const unionOfRules = (profiles: OrderingProfile[]): OrderingProfile => ({
  * @param timeline - Timeline used to locate implicated primitives; it is never mutated.
  * @param violations - Blocking findings to classify; they are never mutated.
  * @param profiles - Optional profiles used only by explicitly enabled metadata fallback repair.
+ * @param authorized - Profiles whose rules authorize their own fallback, reachable without the
+ *   global opt-in. See RequiredMetadataRule.fallbackRepairAuthorized.
  * @returns Repairs for reorder/filler strategies and all remaining violations.
- * @remarks Metadata fallback is deliberately unreachable when profiles are omitted.
+ * @remarks Metadata fallback is deliberately unreachable for a rule that neither appears in
+ *   `profiles` nor authorizes itself.
  */
 export const repairViolations = (
   timeline: OrderingTimelineEntry[],
   violations: BlockingOrderingViolation[],
-  profiles?: OrderingProfile[]
+  profiles?: OrderingProfile[],
+  authorized: OrderingProfile[] = []
 ): {
   repaired: OrderingRepair[]
   unrepaired: BlockingOrderingViolation[]
@@ -390,8 +539,36 @@ export const repairViolations = (
         continue
       }
     }
-    if (violation.ruleType === 'requiredMetadata' && profiles !== undefined) {
-      const rule = profiles
+    if (violation.ruleType === 'adjacency' && violation.primitiveIds.length >= 2) {
+      // Issue #15 defect 1: adjacency had NO repair branch, so every violation fell through to
+      // `unrepaired` — and `mutate` was identical to `enforce` for the 27 recipes carrying one.
+      //
+      // The violation names [starter, disallowedSuccessor] in that order. Moving the successor to
+      // just BEFORE the starter clears the adjacency while preserving every primitive: the content
+      // still reaches the model, only its position changes. Dropping it would be simpler and lossy,
+      // which is the wrong trade for a rule this catalog now knows most vendors do not enforce.
+      const [starterId, successorId] = violation.primitiveIds
+      const starter = copy.find((entry) => idOf(entry) === starterId)
+      const successor = copy.find((entry) => idOf(entry) === successorId)
+      if (starter !== undefined && successor !== undefined && starter !== successor) {
+        copy.splice(copy.indexOf(successor), 1)
+        copy.splice(copy.indexOf(starter), 0, successor)
+        repaired.push({
+          violation,
+          strategy: 'reorder-adjacent',
+          detail: `Move ${successorId} immediately before ${starterId} so it no longer follows it.`,
+          targetId: successorId,
+          blockerId: starterId,
+        })
+        continue
+      }
+    }
+    // `profiles` is supplied only when the GLOBAL `allowMetadataFallbackRepair` is on; `authorized`
+    // carries the rules that opted in individually, and is always supplied. A rule reachable
+    // through either is repairable. See RequiredMetadataRule.fallbackRepairAuthorized.
+    const candidates = profiles ?? authorized
+    if (violation.ruleType === 'requiredMetadata') {
+      const rule = candidates
         .find((profile) => profile.name === violation.profileName)
         ?.rules.find((candidate) => candidate.id === violation.ruleId)
       if (rule?.type === 'requiredMetadata' && rule.fallbackPayloadValue !== undefined) {

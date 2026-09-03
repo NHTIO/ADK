@@ -1,11 +1,8 @@
 import { DateTime } from 'luxon'
 import { describe, expect, it, vi } from 'vitest'
 import { evaluateOrderingProfile } from '../../../../../src/batteries/validation/helpers'
+import { orderingGuardDispatchMiddleware } from '../../../../../src/batteries/validation/middleware'
 import { harmonyCommentaryChannel } from '../../../../../src/batteries/validation/profiles/harmony_commentary_channel'
-import {
-  orderingGuardDispatchMiddleware,
-  ORDERING_GUARD_RESULT_STASH_KEY,
-} from '../../../../../src/batteries/validation/middleware'
 import type { OrderingTimelineEntry } from '../../../../../src/batteries/validation/types'
 
 const entry = (id: string, at: number, payload?: unknown): OrderingTimelineEntry => ({
@@ -51,28 +48,40 @@ describe('harmony-commentary-channel profile', () => {
 
   it('checks every ToolCall and reports only the second missing channel', () => {
     const result = evaluateOrderingProfile(missingSecond, harmonyCommentaryChannel)
-    expect(result.blocking).toHaveLength(1)
-    expect(result.blocking[0].primitiveIds).toEqual(['second'])
-    expect(result.blocking[0].ruleId).toBe('harmony-commentary-channel')
+    // Advisory: the live audit measured gpt-oss ACCEPTING an untagged ToolCall, so the finding is
+    // reported without gating. Identity and target are still exact.
+    expect(result.blocking).toHaveLength(0)
+    expect(result.advisories).toHaveLength(1)
+    expect(result.advisories[0].primitiveIds).toEqual(['second'])
+    expect(result.advisories[0].ruleId).toBe('harmony-commentary-channel')
   })
 
-  it('does not use fallback repair when this profile has no fallback value', async () => {
+  it('does not gate dispatch, because the rule is advisory', async () => {
     const ctx = context([entry('call', 0, {})])
     const next = vi.fn(async () => undefined)
     await orderingGuardDispatchMiddleware({
       profiles: [harmonyCommentaryChannel],
       action: 'mutate',
-      allowMetadataFallbackRepair: true,
     })(ctx as never, next)
-    expect(ctx.mutateToolCall).not.toHaveBeenCalled()
-    const guardResult = ctx.stash.get<{
-      repaired: unknown[]
-      unrepaired: { ruleId: string }[]
-    }>(ORDERING_GUARD_RESULT_STASH_KEY)
-    expect(guardResult.unrepaired).toEqual([
-      expect.objectContaining({ ruleId: 'harmony-commentary-channel' }),
-    ])
-    expect(ctx.nack).toHaveBeenCalledOnce()
-    expect(next).not.toHaveBeenCalled()
+    expect(ctx.nack).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledOnce()
+  })
+
+  it('is now REPAIRABLE: the rule carries a fallback value', () => {
+    // Defect #4 from issue #15: this rule declared no `fallbackPayloadValue`, so mutate-mode
+    // repair skipped it at helpers.ts's `fallbackPayloadValue !== undefined` guard and every
+    // gpt-oss tool dispatch landed in `unrepaired` — unrepairable by construction. It now carries
+    // `'commentary'`, Harmony's own channel name for a function call.
+    //
+    // Asserted at the RULE level rather than by driving the middleware: `applyRepairs` needs real
+    // `ToolCall` instances (it round-trips them through ENCODE_METHOD), and this spec's fixtures
+    // are plain timeline entries. `metadata_fallback_repair.cross.spec.ts` covers the end-to-end
+    // repair with real primitives.
+    const rule = harmonyCommentaryChannel.rules[0] as {
+      fallbackPayloadValue?: unknown
+      requiredPayloadKey?: string
+    }
+    expect(rule.fallbackPayloadValue).toBe('commentary')
+    expect(rule.requiredPayloadKey).toBe('channel')
   })
 })

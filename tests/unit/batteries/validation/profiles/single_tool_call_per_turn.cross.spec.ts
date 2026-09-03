@@ -39,6 +39,17 @@ const call = (id: string, second: number): ToolCall =>
 const timeline = (messages: Message[], calls: ToolCall[]) =>
   buildOrderingTimeline(messages, [], calls)
 
+/**
+ * The shipped profile is ADVISORY by default (OrderRule.severity — a live audit found these rules
+ * block turn state their vendors accept). Only a BLOCKING finding reaches `repairViolations`, so
+ * the mutation tests drive this explicitly-blocking variant of the same rule; the advisory tests
+ * use the shipped profile unchanged.
+ */
+const singleToolCallPerTurnBlocking = {
+  ...singleToolCallPerTurn,
+  rules: singleToolCallPerTurn.rules.map((r) => ({ ...r, severity: 'blocking' as const })),
+}
+
 describe('single tool call per turn profile', () => {
   describe('happy path', () => {
     it('accepts one tool call in an assistant group', () => {
@@ -57,8 +68,8 @@ describe('single tool call per turn profile', () => {
         [call('c1', 2), call('c2', 3)]
       )
       const result = evaluateOrderingProfile(entries, singleToolCallPerTurn)
-      expect(result.blocking).toHaveLength(1)
-      expect(result.blocking[0]).toEqual(
+      expect(result.advisories).toHaveLength(1)
+      expect(result.advisories[0]).toEqual(
         expect.objectContaining({
           ruleId: 'single-tool-call-per-turn',
           ruleType: 'alternation',
@@ -74,7 +85,7 @@ describe('single tool call per turn profile', () => {
       )
       const result = repairViolations(
         entries,
-        evaluateOrderingProfile(entries, singleToolCallPerTurn).blocking
+        evaluateOrderingProfile(entries, singleToolCallPerTurnBlocking).blocking
       )
       expect(result.repaired).toEqual([
         expect.objectContaining({ strategy: 'insert-alternation-filler' }),
@@ -101,7 +112,7 @@ describe('single tool call per turn profile', () => {
       }
       const next = vi.fn(async () => undefined)
       await orderingGuardDispatchMiddleware({
-        profiles: [singleToolCallPerTurn],
+        profiles: [singleToolCallPerTurnBlocking],
         action: 'mutate',
         onRepair: 'silent',
       })(ctx as never, next)
@@ -111,7 +122,7 @@ describe('single tool call per turn profile', () => {
       ) as OrderingStashedTimelineEntry[]
       const postRepair = evaluateOrderingProfile(
         effective as unknown as ReturnType<typeof buildOrderingTimeline>,
-        singleToolCallPerTurn
+        singleToolCallPerTurnBlocking
       )
       expect(values.get(ORDERING_GUARD_RESULT_STASH_KEY)).toEqual(
         expect.objectContaining({
@@ -124,6 +135,10 @@ describe('single tool call per turn profile', () => {
           ruleType: 'alternation',
         }),
       ])
+      // Driven with the BLOCKING variant: the alternation filler repairs the role sequence but
+      // cannot reduce the tool-call COUNT, so the maxPerGroup finding survives the repair and
+      // gates the dispatch. That asymmetry is what this test pins. The SHIPPED profile is
+      // advisory and would proceed here — see OrderRule.severity.
       expect(ctx.nack).toHaveBeenCalledOnce()
       expect(next).not.toHaveBeenCalled()
     })

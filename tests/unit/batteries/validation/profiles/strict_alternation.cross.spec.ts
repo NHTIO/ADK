@@ -43,6 +43,17 @@ const context = (messages: Message[]) => {
   return ctx
 }
 
+/**
+ * The shipped profile is ADVISORY by default (OrderRule.severity — a live audit found these rules
+ * block turn state their vendors accept). Only a BLOCKING finding reaches `repairViolations`, so
+ * the mutation tests drive this explicitly-blocking variant of the same rule; the advisory tests
+ * use the shipped profile unchanged.
+ */
+const strictAlternationBlocking = {
+  ...strictAlternation,
+  rules: strictAlternation.rules.map((r) => ({ ...r, severity: 'blocking' as const })),
+}
+
 describe('strict alternation profile', () => {
   describe('happy path', () => {
     it('accepts alternating user and assistant turns', () => {
@@ -62,8 +73,8 @@ describe('strict alternation profile', () => {
     it('reports one same-role alternation violation', () => {
       const entries = timeline([message('u1', 'user', 1), message('u2', 'user', 2)])
       const result = evaluateOrderingProfile(entries, strictAlternation)
-      expect(result.blocking).toHaveLength(1)
-      expect(result.blocking[0]).toEqual(
+      expect(result.advisories).toHaveLength(1)
+      expect(result.advisories[0]).toEqual(
         expect.objectContaining({
           ruleId: 'strict-user-assistant-alternation',
           ruleType: 'alternation',
@@ -76,7 +87,7 @@ describe('strict alternation profile', () => {
       const entries = timeline([message('u1', 'user', 1), message('u2', 'user', 2)])
       const repair = repairViolations(
         entries,
-        evaluateOrderingProfile(entries, strictAlternation).blocking
+        evaluateOrderingProfile(entries, strictAlternationBlocking).blocking
       )
       expect(repair.repaired).toEqual([
         expect.objectContaining({ strategy: 'insert-alternation-filler' }),
@@ -84,7 +95,7 @@ describe('strict alternation profile', () => {
       const ctx = context([message('u1', 'user', 1), message('u2', 'user', 2)])
       const next = vi.fn(async () => undefined)
       await orderingGuardDispatchMiddleware({
-        profiles: [strictAlternation],
+        profiles: [strictAlternationBlocking],
         action: 'mutate',
         onRepair: 'silent',
       })(ctx as never, next)

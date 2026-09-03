@@ -49,6 +49,9 @@ describe('ordering helper regressions', () => {
         after: 'toolCall',
         scope: 'adjacent-same-role-group',
         onlyLatestGroup: true,
+        // Explicit: these tests exercise the BLOCKING path of the evaluator. The shipped profiles
+        // default to advisory (OrderRule.severity); that default is covered by the profile specs.
+        severity: 'blocking',
       })
     )
     expect(result.blocking).toHaveLength(1)
@@ -76,6 +79,8 @@ describe('ordering helper regressions', () => {
         id: 'message-after-call',
         first: 'toolCall',
         disallowBetween: ['message'],
+        // Explicit: this test exercises the evaluator's BLOCKING path.
+        severity: 'blocking',
       })
     )
     expect(result.blocking).toHaveLength(1)
@@ -98,13 +103,20 @@ describe('ordering helper regressions', () => {
   it.each([
     ['OpenAI baseline', openaiShapeBaseline],
     ['function response', functionResponseAdjacency],
-  ])('flags an immediately wedged Message for the %s profile', (_name, profileToCheck) => {
-    const result = evaluateOrderingProfile(
-      [entry('toolCall', 'call', 0, 0), entry('message', 'message', 1, 1, 'assistant')],
-      profileToCheck
-    )
-    expect(result.blocking).toHaveLength(1)
-  })
+  ])(
+    'reports an immediately wedged Message as an ADVISORY for the %s profile',
+    (_name, profileToCheck) => {
+      const result = evaluateOrderingProfile(
+        [entry('toolCall', 'call', 0, 0), entry('message', 'message', 1, 1, 'assistant')],
+        profileToCheck
+      )
+      // Both shipped adjacency profiles are advisory: a live audit measured vendors ACCEPTING a
+      // message immediately after a tool call — the ordinary shape of a completed tool turn — so the
+      // finding is reported without gating dispatch. See OrderRule.severity.
+      expect(result.blocking).toHaveLength(0)
+      expect(result.advisories).toHaveLength(1)
+    }
+  )
 
   it.each([
     ['OpenAI baseline', openaiShapeBaseline],
@@ -132,6 +144,7 @@ describe('ordering helper regressions', () => {
         before: 'thought',
         after: 'toolCall',
         scope: 'entire-turn',
+        severity: 'blocking',
       })
     ).blocking
     expect(violation).toHaveLength(1)
