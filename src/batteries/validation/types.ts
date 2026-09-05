@@ -323,6 +323,37 @@ export interface IdentifierFormatRule {
   severity?: 'blocking' | 'advisory'
 }
 
+/** Requires uniqueness of identifiers across the selected primitive timeline. */
+export interface IdentifierUniquenessRule {
+  /** Discriminator selecting the cross-entry uniqueness evaluator. */
+  type: 'identifierUniqueness'
+  /** Stable identifier used in findings. */
+  id: string
+  /** Primitive whose identifiers must be unique. */
+  kind: OrderingPrimitiveKind
+  /**
+   * Produces a replacement identifier when mutate mode repairs a collision.
+   *
+   * @remarks
+   * Every member of a collision group shares ONE id — that is what makes it a collision — so
+   * `previousId` alone cannot distinguish them. `memberIndex` (0-based, ordered by timeline `seq`)
+   * is what a deterministic strategy varies on: without it a pure strategy would return the same
+   * replacement for every member, and the materialiser would reject its own repair. The strategy
+   * must be pure and total in BOTH arguments, and may not return an id already held elsewhere in
+   * the timeline; the materialiser verifies that and fails the repair rather than trusting it.
+   */
+  renameStrategy?: (previousId: string, memberIndex: number) => string
+  /**
+   * See {@link OrderRule.severity}. Omitted means advisory, as on every other rule type. Opt into
+   * `blocking` — as the shipped `tool_call_id_uniqueness` profile does — when a collision makes the
+   * dispatch unsafe to assemble; an advisory finding is never repaired, so `renameStrategy` and the
+   * `renumber-colliding-ids` repair only take effect under `blocking`.
+   */
+  severity?: 'blocking' | 'advisory'
+  /** Whether this rule applies on the dispatch surface, turn surface, or both. Omitted means the rule applies on both surfaces. */
+  surface?: 'dispatch' | 'turn' | 'both'
+}
+
 /**
  * Requires a turn to carry something the provider can interpret.
  *
@@ -406,6 +437,7 @@ export type OrderingRule =
   | RoleRemapRule
   | StaleContentAdvisoryRule
   | IdentifierFormatRule
+  | IdentifierUniquenessRule
   | NonEmptyTurnRule
   | ToolIdentityRule
   | SchemaIntegrityRule
@@ -485,6 +517,7 @@ export interface OrderingAdvisoryViolation {
     | AdjacencyRule['type']
     | PreservationRule['type']
     | IdentifierFormatRule['type']
+    | IdentifierUniquenessRule['type']
     | NonEmptyTurnRule['type']
     | ToolIdentityRule['type']
     | SchemaIntegrityRule['type']
@@ -513,6 +546,7 @@ export interface OrderingRepair {
     | 'reorder'
     | 'insert-alternation-filler'
     | 'fill-required-metadata'
+    | 'renumber-colliding-ids'
     /**
      * Move the primitive that immediately follows an adjacency starter to just BEFORE it.
      *
@@ -533,6 +567,18 @@ export interface OrderingRepair {
   blockerId?: string
 }
 
+/** Plain-data description of a repair that could not be materialised. */
+export interface OrderingRepairFailure {
+  /** Rule that requested the failed repair. */
+  ruleId: string
+  /** Original ids in the collision group. */
+  primitiveIds: string[]
+  /** Ids deleted before a degraded persistence failure, if any. */
+  deletedIds: string[]
+  /** Error message, retained as data rather than an Error instance. */
+  message: string
+}
+
 /** Result retained by the guard after evaluating or repairing a dispatch. */
 export interface OrderingGuardResult {
   /** Repairs applied during this invocation. */
@@ -541,4 +587,6 @@ export interface OrderingGuardResult {
   unrepaired: BlockingOrderingViolation[]
   /** Advisory findings retained for observability and explicitly excluded from rejection. */
   advisories: OrderingAdvisoryViolation[]
+  /** Persistence failures encountered while materialising repairs. Plain data only for stash safety. */
+  repairFailures: OrderingRepairFailure[]
 }

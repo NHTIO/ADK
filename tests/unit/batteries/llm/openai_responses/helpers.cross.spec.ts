@@ -34,6 +34,7 @@ import {
   renderChatCompletionsSystemPrompt,
   renderThought,
   filterThoughts,
+  deCollideOpenAIResponsesToolCallIds,
 } from '@nhtio/adk/batteries/llm/openai_responses'
 import type {
   OpenAIResponsesInputItem,
@@ -166,6 +167,36 @@ const isMessageItem = (i: OpenAIResponsesInputItem): i is OpenAIResponsesMessage
   Array.isArray((i as OpenAIResponsesMessageItem).content) &&
   !('status' in i)
 
+describe('deCollideOpenAIResponsesToolCallIds', () => {
+  const contextFor = (ids: string[]) =>
+    ({ turnToolCalls: new Set(ids.map((id) => ({ id }))) }) as never
+
+  it('replaces a colliding bare id with a UUID', () => {
+    const result = deCollideOpenAIResponsesToolCallIds('call_0', contextFor(['call_0']))
+    expect(result).toMatch(/^[0-9a-f-]{36}$/)
+    expect(result).not.toBe('call_0')
+  })
+
+  it('replaces only the call half of a colliding fc_ composite id', () => {
+    const result = deCollideOpenAIResponsesToolCallIds(
+      'call_0|fc_abc123',
+      contextFor(['call_0|fc_abc123'])
+    )
+    expect(result).toMatch(/^[0-9a-f-]{36}\|fc_abc123$/)
+  })
+
+  it('discards the positional half of a colliding composite id', () => {
+    const result = deCollideOpenAIResponsesToolCallIds('call_0|idx-2', contextFor(['call_0|idx-2']))
+    expect(result).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it('passes through an id that does not collide', () => {
+    expect(deCollideOpenAIResponsesToolCallIds('call_0|fc_abc123', contextFor(['other']))).toBe(
+      'call_0|fc_abc123'
+    )
+  })
+})
+
 describe('buildOpenAIResponsesInput — instructions placement / systemPromptChannel', () => {
   it('default channel: leading system content lands in top-level `instructions`, not an input item', async () => {
     const out = await buildOpenAIResponsesInput(baseBuildArgs())
@@ -288,9 +319,27 @@ describe('buildOpenAIResponsesInput — tool-call sibling pairing', () => {
     expect(fc.id).toBeUndefined()
   })
 
-  it('uses a pre-rendered result from renderedToolCallResults over re-rendering', async () => {
+  it('keeps colliding ToolCalls paired with their own pre-rendered results', async () => {
+    const first = makeToolCall({ id: 'duplicate', results: new Tokenizable('first') })
+    const second = makeToolCall({ id: 'duplicate', results: new Tokenizable('second') })
+    const out = await buildOpenAIResponsesInput(
+      baseBuildArgs({
+        toolCalls: [first, second],
+        bucketOrder: ['timeline'],
+        renderedToolCallResults: new Map([
+          [first, 'FIRST'],
+          [second, 'SECOND'],
+        ]),
+      })
+    )
+    expect(out.input.filter((i) => i.type === 'function_call_output').map((i) => i.output)).toEqual(
+      ['FIRST', 'SECOND']
+    )
+  })
+
+  it('uses a pre-rendered result from renderedToolCallResults over re-rendering, keyed by instance', async () => {
     const tc = makeToolCall({ id: 'call-cached' })
-    const renderedToolCallResults = new Map<string, string>([['call-cached', 'CACHED-RESULT']])
+    const renderedToolCallResults = new Map<ToolCall, string>([[tc, 'CACHED-RESULT']])
     const out = await buildOpenAIResponsesInput(
       baseBuildArgs({ toolCalls: [tc], bucketOrder: ['timeline'], renderedToolCallResults })
     )

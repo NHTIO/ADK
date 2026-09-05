@@ -406,7 +406,7 @@ export const buildConverseRequest = async (
       {
         toolResult: {
           toolUseId: id,
-          content: input.renderedToolCallResults.get(tc.id) ?? [{ text: '' }],
+          content: input.renderedToolCallResults.get(tc) ?? [{ text: '' }],
           status: tc.isError ? 'error' : 'success',
         },
       },

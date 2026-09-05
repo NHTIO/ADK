@@ -1455,6 +1455,63 @@ describe('OpenAIChatCompletionsAdapter — non-streaming path', () => {
     await adapter.executor()(ctx, makeHelpers())
     expect(ctx.storeToolCall).toHaveBeenCalledTimes(1)
     const stored = ctx._stored.toolCalls[0]
+    // Exercise the adapter's real constructor -> executor option resolution: absent filter is identity.
+    expect(stored.id).toBe('call-1')
+    expect(stored.tool).toBe('echo')
+    const echoResults = stored.results as SpooledArtifact
+    expect(await echoResults.asString()).toContain('echoed: hi')
+    expect(ctx.ack).not.toHaveBeenCalled()
+  })
+
+  it('configured toolCallIdFilter is applied to the persisted ToolCall id', async () => {
+    // The absent-filter case above only proves identity; it cannot distinguish a
+    // configured filter from a deleted feature (both yield the unchanged provider id).
+    // This test exercises the real constructor -> executor option-resolution path with
+    // a filter configured and asserts the PERSISTED ToolCall.id is the filtered value.
+    const tool = new Tool({
+      name: 'echo',
+      description: 'echo tool',
+      inputSchema: validator.object({ text: validator.string().required() }),
+      handler: (args: unknown) => `echoed: ${(args as { text: string }).text}`,
+    })
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({
+        id: 'resp-tc-filtered',
+        object: 'chat.completion',
+        created: 1,
+        model: 'gpt-x',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: null,
+              tool_calls: [
+                {
+                  id: 'call-1',
+                  type: 'function',
+                  function: { name: 'echo', arguments: JSON.stringify({ text: 'hi' }) },
+                },
+              ],
+            },
+            finish_reason: 'tool_calls',
+          },
+        ],
+      })
+    )
+    const adapter = new OpenAIChatCompletionsAdapter({
+      model: 'm',
+      fetch: fetchFn as never,
+      stream: false,
+      toolCallIdFilter: (id: string) => `filtered-${id}`,
+    })
+    const tools = new ToolRegistry([tool])
+    const ctx = makeCtx({ tools })
+    await adapter.executor()(ctx, makeHelpers())
+    expect(ctx.storeToolCall).toHaveBeenCalledTimes(1)
+    const stored = ctx._stored.toolCalls[0]
+    // The persisted id must be the FILTERED value, not the provider's raw id.
+    expect(stored.id).toBe('filtered-call-1')
     expect(stored.tool).toBe('echo')
     const echoResults = stored.results as SpooledArtifact
     expect(await echoResults.asString()).toContain('echoed: hi')

@@ -425,17 +425,53 @@ describe('OllamaAdapter — tool calls (native object args + tool_name history)'
       )
     )
     const ctx = makeCtx({ tools: new ToolRegistry([tool]) })
+    const helpers = makeHelpers()
     await new OllamaAdapter({
       model: 'llama3.2',
       stream: false,
       fetch: fetchFn as never,
-    }).executor()(ctx, makeHelpers())
+    }).executor()(ctx, helpers)
     expect(ctx.storeToolCall).toHaveBeenCalledTimes(1)
     const stored = ctx._stored.toolCalls[0]
     expect(stored.tool).toBe('echo')
+    // D1: this is the adapter's real constructor/executor resolution path; absent filter preserves
+    // the id assigned at ingress (native Ollama has no wire id, so it is the generated UUID).
+    const reportedId = (helpers.reportToolCall as ReturnType<typeof vi.fn>).mock.calls[0]![0]
+    expect(stored.id).toBe(reportedId)
     expect(stored.args).toEqual({ text: 'hi' })
     expect(stored.isError).toBe(false)
     expect(ctx.ack).not.toHaveBeenCalled()
+  })
+
+  it('resolves toolCallIdFilter through stash overrides and uses it for persistence/reporting', async () => {
+    const tool = new Tool({
+      name: 'echo',
+      description: 'echo tool',
+      inputSchema: validator.object({ text: validator.string().required() }),
+      handler: () => 'ok',
+    })
+    const fetchFn = vi.fn(
+      cassetteFetch(
+        singleOllamaResponseCassette('c', {
+          toolCalls: [{ name: 'echo', arguments: { text: 'hi' } }],
+        })
+      )
+    )
+    const ctx = makeCtx({
+      tools: new ToolRegistry([tool]),
+      stash: { ollama: { toolCallIdFilter: () => 'filtered-id' } },
+    })
+    const helpers = makeHelpers()
+    await new OllamaAdapter({
+      model: 'llama3.2',
+      stream: false,
+      toolCallIdFilter: () => 'constructor-id',
+      fetch: fetchFn as never,
+    }).executor({ toolCallIdFilter: () => 'executor-id' })(ctx, helpers)
+    expect(ctx._stored.toolCalls[0]!.id).toBe('filtered-id')
+    expect((helpers.reportToolCall as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toBe(
+      'filtered-id'
+    )
   })
 
   it('streaming: whole tool_calls arrive in one chunk and execute', async () => {
@@ -459,6 +495,56 @@ describe('OllamaAdapter — tool calls (native object args + tool_name history)'
     )
     expect(ctx._stored.toolCalls).toHaveLength(1)
     expect(ctx._stored.toolCalls[0]!.args).toEqual({ text: 'streamed' })
+  })
+
+  it('pairs duplicate-id history calls with their own rendered results', async () => {
+    const tool = new Tool({
+      name: 'lookup',
+      description: 'lookup',
+      inputSchema: validator.object({ q: validator.string().required() }),
+      handler: () => 'ok',
+    })
+    const first = makeToolCall({
+      id: 'same-id',
+      tool: 'lookup',
+      args: { q: 'Paris' },
+      results: new Tokenizable('Paris result'),
+    })
+    const second = makeToolCall({
+      id: 'same-id',
+      tool: 'lookup',
+      args: { q: 'Tokyo' },
+      results: new Tokenizable('Tokyo result'),
+      createdAt: dt('2026-01-01T12:02:00Z'),
+    })
+    const fetchFn = vi.fn(cassetteFetch(singleOllamaResponseCassette('c', { content: 'done' })))
+    let renderCount = 0
+    const renderResult = vi.fn(async ({ toolCall }: { toolCall: ToolCall }) => {
+      renderCount += 1
+      return renderCount <= 2
+        ? `pre-${String(toolCall.args.q)}`
+        : `fallback-${String(toolCall.args.q)}`
+    })
+    await new OllamaAdapter({
+      model: 'llama3.2',
+      stream: false,
+      fetch: fetchFn as never,
+      helpers: { renderOllamaToolCallResult: renderResult } as never,
+    }).executor()(
+      makeCtx({ tools: new ToolRegistry([tool]), turnToolCalls: [first, second] }),
+      makeHelpers()
+    )
+    const messages = getRequestBody(fetchFn.mock.calls[0]).messages as Array<
+      Record<string, unknown>
+    >
+    const toolMessages = messages.filter((m) => m.role === 'tool').map((m) => String(m.content))
+    expect(toolMessages).toHaveLength(2)
+    // The override deliberately emits pre-<city>, so assert the renderer output rather than the
+    // Tokenizable result text it replaces. Both directions are checked to reject collapsed pairing.
+    expect(toolMessages[0]).toContain('pre-Paris')
+    expect(toolMessages[0]).not.toContain('pre-Tokyo')
+    expect(toolMessages[1]).toContain('pre-Tokyo')
+    expect(toolMessages[1]).not.toContain('pre-Paris')
   })
 
   it('prior tool-call history renders a tool-role message keyed by tool_name (not tool_call_id)', async () => {

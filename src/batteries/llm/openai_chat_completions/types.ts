@@ -33,6 +33,7 @@ import type {
   ChatHelpersCommon,
   RawGenerationObserverFn,
   PromptAssembledObserverFn,
+  ToolCallIdFilterFn,
 } from '../chat_common/types'
 
 // ─── Re-exported shared (wire-shape-agnostic) types ───────────────────────────
@@ -55,6 +56,7 @@ export type {
   ChatCompletionsRetryConfig,
 } from '../chat_common/types'
 export type { ToolCallParserName, ToolCallParserFn } from '../chat_common/tool_parsers'
+export type { ToolCallIdFilterFn } from '../chat_common/types'
 
 // ─── Reasoning field precedence ───────────────────────────────────────────────
 
@@ -414,7 +416,7 @@ export interface ChatCompletionsHelpers extends ChatHelpersCommon {
     thoughts: Iterable<Thought>
     toolCalls: Iterable<ToolCall>
     tools: ToolRegistry
-    renderedToolCallResults: Map<string, string | ChatCompletionsContentBlock[]>
+    renderedToolCallResults: Map<ToolCall, string | ChatCompletionsContentBlock[]>
     bucketOrder: ChatCompletionsBucketOrder
     selfIdentity: string
     thoughtSurfacing: 'all-self' | 'latest-self' | 'all'
@@ -747,6 +749,8 @@ export interface OpenAIChatCompletionsAdapterOptions {
    * calls.
    */
   localToolCallParser?: ToolCallParserName | ToolCallParserFn
+  /** Optional ingress hook for adapting provider tool-call ids; absent preserves the vendor id. */
+  toolCallIdFilter?: ToolCallIdFilterFn
   /**
    * OPTIONAL hook to SHAPE the artifact-query tools forged from prior-turn SpooledArtifact results, before
    * they merge into the visible tool set. Receives the merged forged registry + dispatch context; returns a

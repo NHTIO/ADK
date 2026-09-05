@@ -133,6 +133,13 @@ export type DispatchToolCallMutateFn = (ctx: DispatchContext, v: ToolCall) => vo
 /** Removes a tool call by ID (LLM execution context variant). */
 export type DispatchToolCallDeleteFn = (ctx: DispatchContext, id: string) => void | Promise<void>
 
+/** Atomically persists a replacement for a complete group of colliding tool calls. */
+export type ToolCallGroupReplaceFn = (
+  ctx: DispatchContext,
+  removedIds: readonly string[],
+  replacements: readonly ToolCall[]
+) => void | Promise<void>
+
 /**
  * Persists tool-generated media bytes into consumer storage and returns a {@link @nhtio/adk!MediaReader}
  * (LLM execution context variant). Unlike the `store*` mutation callbacks this returns a value and
@@ -245,6 +252,8 @@ export interface RawDispatchContext {
   mutateToolCall: DispatchToolCallMutateFn
   /** Removes a tool call by ID. */
   deleteToolCall: DispatchToolCallDeleteFn
+  /** Optionally replaces a complete tool-call id group in one transaction. */
+  replaceToolCallGroup?: ToolCallGroupReplaceFn
   /** Persists tool-generated media bytes; returns a `MediaReader`. */
   storeMediaBytes: DispatchMediaBytesStoreFn
   /** Persists extracted retrievable text bytes; returns a `SpoolReader`. */
@@ -298,6 +307,7 @@ const rawDispatchContextSchema = validator.object<RawDispatchContext>({
   storeToolCall: validator.function().required(),
   mutateToolCall: validator.function().required(),
   deleteToolCall: validator.function().required(),
+  replaceToolCallGroup: validator.function().arity(3).optional(),
   storeMediaBytes: validator.function().required(),
   storeRetrievableBytes: validator.function().required(),
   hooks: validator.object().optional(),
@@ -369,6 +379,7 @@ export class DispatchContext {
   #storeToolCall: DispatchToolCallStoreFn
   #mutateToolCall: DispatchToolCallMutateFn
   #deleteToolCall: DispatchToolCallDeleteFn
+  #replaceToolCallGroup: ToolCallGroupReplaceFn | undefined
   #storeMediaBytes: DispatchMediaBytesStoreFn
   #storeRetrievableBytes: DispatchRetrievableBytesStoreFn
   #waitFor: OpenGateFn | undefined
@@ -451,6 +462,7 @@ export class DispatchContext {
     this.#storeToolCall = resolved.storeToolCall
     this.#mutateToolCall = resolved.mutateToolCall
     this.#deleteToolCall = resolved.deleteToolCall
+    this.#replaceToolCallGroup = resolved.replaceToolCallGroup
     this.#storeMediaBytes = resolved.storeMediaBytes
     this.#storeRetrievableBytes = resolved.storeRetrievableBytes
     this.#waitFor = resolved.waitFor
@@ -715,6 +727,13 @@ export class DispatchContext {
       },
       deleteToolCall: {
         value: (id: string) => this.#doDeleteToolCall(id),
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
+      replaceToolCallGroup: {
+        value: (ids: readonly string[], replacements: readonly ToolCall[]) =>
+          this.#doReplaceToolCallGroup(ids, replacements),
         enumerable: true,
         configurable: false,
         writable: false,
@@ -988,6 +1007,56 @@ export class DispatchContext {
     void this.#hooks.runner('deletedToolCall').run(id)
   }
 
+  /**
+   * Replaces an entire colliding id group. Persistence commits before local state is changed so a
+   * failed write cannot leave the context half-renamed. The fallback deletes every member before
+   * storing any replacement: a consumer-side `DELETE WHERE id` must not remove a newly stored row.
+   */
+  async #doReplaceToolCallGroup(
+    ids: readonly string[],
+    replacements: readonly ToolCall[]
+  ): Promise<void> {
+    if (this.#replaceToolCallGroup) {
+      await this.#replaceToolCallGroup(this, ids, replacements)
+    } else {
+      const deletedIds: string[] = []
+      try {
+        for (const id of ids) {
+          await this.#deleteToolCall(this, id)
+          deletedIds.push(id)
+        }
+        for (const replacement of replacements) await this.#storeToolCall(this, replacement)
+      } catch (error) {
+        if (isError(error)) {
+          ;(error as Error & { deletedIds: string[] }).deletedIds = [...deletedIds]
+        }
+        throw error
+      }
+    }
+
+    const idSet = new Set(ids)
+    const next = new Set<ToolCall>()
+    let inserted = false
+    for (const tc of this.#turnToolCalls) {
+      if (idSet.has(tc.id)) {
+        if (!inserted) {
+          for (const replacement of replacements) next.add(replacement)
+          inserted = true
+        }
+      } else next.add(tc)
+    }
+    if (!inserted) for (const replacement of replacements) next.add(replacement)
+    this.#turnToolCalls = next
+    // Recompute rather than reuse mutate/delete accounting: collisions can double-count a checksum.
+    this.#toolCallChecksums = new Map()
+    for (const tc of this.#turnToolCalls) {
+      this.#toolCallChecksums.set(tc.checksum, (this.#toolCallChecksums.get(tc.checksum) ?? 0) + 1)
+    }
+    for (const id of ids) void this.#hooks.runner('deletedToolCall').run(id)
+    for (const replacement of replacements)
+      void this.#hooks.runner('storedToolCall').run(replacement)
+  }
+
   // ── Internal setters (used by DispatchRunner) ─────────────────────────
 
   /** @internal Set by {@link @nhtio/adk!DispatchRunner} after construction. */
@@ -1207,6 +1276,11 @@ export class DispatchContext {
   declare readonly mutateToolCall: (v: ToolCall) => Promise<void>
   /** Removes a tool call from the local Set and persistence layer by ID. */
   declare readonly deleteToolCall: (id: string) => Promise<void>
+  /** Replaces a complete colliding tool-call group and persists the replacement. */
+  declare readonly replaceToolCallGroup: (
+    ids: readonly string[],
+    replacements: readonly ToolCall[]
+  ) => Promise<void>
   /**
    * Persists tool-generated media bytes into consumer storage and returns a {@link @nhtio/adk!MediaReader}.
    *

@@ -39,6 +39,7 @@ export const bedrockConverseOptionsSchema = validator.object({
   thoughtSurfacing: validator.string().valid('all-self', 'latest-self', 'all').optional(),
   unsupportedMediaPolicy: validator.string().optional(),
   localToolCallParser: validator.any().optional(),
+  toolCallIdFilter: validator.function().optional(),
   onRawGeneration: validator.function().optional(),
   onPromptAssembled: validator.function().optional(),
   helpers: validator.object().unknown(true).optional(),

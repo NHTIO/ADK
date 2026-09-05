@@ -256,6 +256,56 @@ describe('streams', () => {
     await service.dispose()
   })
 
+  it('a delta whose DECODE fails errors the stream once, and a later end cannot close it', async () => {
+    // A decode failure errors the controller from inside `push` — every bit as terminal as a
+    // `stream:end`, but reached from a different call site. Latching terminal-ness at the CALL SITE
+    // rather than at the controller operation let the queued end run afterwards and call close() on
+    // an already-errored controller, which throws ERR_INVALID_STATE at the tail of the promise
+    // chain and surfaces as an unhandled rejection.
+    // Cross-runtime: Node reports an unhandled rejection on `process`, the browser fires an
+    // `unhandledrejection` event on `window`. The BEHAVIOUR under test is identical in both, so
+    // this spec stays `.cross.` and adapts the listener rather than going node-only.
+    const rejections: unknown[] = []
+    const isNode = typeof process !== 'undefined' && typeof process.on === 'function'
+    const onNodeRejection = (err: unknown): void => void rejections.push(err)
+    const onWebRejection = (rejection: PromiseRejectionEvent): void =>
+      void rejections.push(rejection.reason)
+    if (isNode) process.on('unhandledRejection', onNodeRejection)
+    else globalThis.addEventListener('unhandledrejection', onWebRejection)
+    try {
+      const spec = defineIsolatedService({
+        name: 'bad-decode-svc',
+        streams: {
+          // The guest encodes normally; the HOST's decode is what throws, so the failure lands in
+          // `push` with a well-formed `stream:end` already queued behind it.
+          poison: stream<[], number>({
+            codec: {
+              encode: (v: unknown) => JSON.stringify(v),
+              decode: () => {
+                throw new Error('decode exploded')
+              },
+            },
+          }),
+        },
+      })
+      const transport = createLinkedTransport(spec, () => ({
+        poison: async function* () {
+          yield 1
+        },
+      }))
+      const service = createIsolatedService(spec, transport, { disposeGraceMs: 10 })
+      const reader = service.api.poison().getReader()
+      await expect(reader.read()).rejects.toThrow('decode exploded')
+      // Let the queued `stream:end` run against the already-errored controller.
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(rejections).toEqual([])
+      await service.dispose()
+    } finally {
+      if (isNode) process.off('unhandledRejection', onNodeRejection)
+      else globalThis.removeEventListener('unhandledrejection', onWebRejection)
+    }
+  })
+
   it('cancelling the host ReadableStream stops an async-generator guest via iterator.return()', async () => {
     const spec = defineIsolatedService({
       name: 'cancellable-stream-svc',

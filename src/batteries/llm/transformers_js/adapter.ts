@@ -718,7 +718,7 @@ export class TransformersJsAdapter {
       //    Read the pre-forged `ctx.tools` directly — no local merge, no bindContext here.
 
       // 3. Pre-render persisted tool-call results into plain-text tool message bodies.
-      const renderedToolCallResults = new Map<string, string>()
+      const renderedToolCallResults = new Map<ToolCall, string>()
       for (const tc of ctx.turnToolCalls) {
         const tool = ctx.tools.get(tc.tool)
         const body = await h.renderTransformersJsToolResult({
@@ -735,7 +735,7 @@ export class TransformersJsAdapter {
               message: m,
             }),
         })
-        renderedToolCallResults.set(tc.id, body)
+        renderedToolCallResults.set(tc, body)
       }
 
       // 4. Optional context-window enforcement.

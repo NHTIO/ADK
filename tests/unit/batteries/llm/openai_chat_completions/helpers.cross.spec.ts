@@ -1348,6 +1348,34 @@ describe('buildChatCompletionsHistory', () => {
     expect(out.reasoningPayloads).toEqual([])
   })
 
+  it('keeps results paired by ToolCall instance when ids collide', async () => {
+    const first = makeToolCall({ id: 'duplicate', results: new Tokenizable('Paris result') })
+    const second = makeToolCall({ id: 'duplicate', results: new Tokenizable('Tokyo result') })
+    const rendered = new Map([
+      [first, 'Paris result'],
+      [second, 'Tokyo result'],
+    ])
+    const out = await buildChatCompletionsHistory({
+      systemPrompt: new Tokenizable('SYS'),
+      standingInstructions: [],
+      memories: [],
+      retrievables: [],
+      messages: [],
+      thoughts: [],
+      toolCalls: [first, second],
+      tools: new ToolRegistry([]),
+      renderedToolCallResults: rendered,
+      bucketOrder: ['timeline'],
+      selfIdentity: 'agent',
+      thoughtSurfacing: 'all-self',
+      replayCompatibility: ['plain-text'],
+      unsupportedMediaPolicy: 'throw',
+      ...baseInputDeps,
+    })
+    const toolMessages = out.messages.filter((message) => message.role === 'tool')
+    expect(toolMessages.map((message) => message.content)).toEqual(['Paris result', 'Tokyo result'])
+  })
+
   it('correlates assistant tool_calls[] with following tool-role messages via tool_call_id', async () => {
     const tool = makeTool({ name: 'my_tool' })
     const registry = new ToolRegistry([tool])

@@ -28,6 +28,7 @@ import type {
   ToolCallStoreFn,
   ToolCallMutateFn,
   ToolCallDeleteFn,
+  ToolCallGroupReplaceFn,
   MediaBytesStoreFn,
   RetrievableBytesStoreFn,
 } from './turn_runner_context'
@@ -99,6 +100,8 @@ export interface TurnRunnerConfig {
   mutateToolCallCallback: ToolCallMutateFn
   /** Removes a tool call from the persistence layer by ID. */
   deleteToolCallCallback: ToolCallDeleteFn
+  /** Optionally replaces a complete tool-call group atomically. */
+  replaceToolCallGroupCallback?: ToolCallGroupReplaceFn
   /** Persists tool-generated media bytes into consumer storage; returns a `MediaReader`. */
   storeMediaBytesCallback: MediaBytesStoreFn
   /** Persists extracted retrievable text bytes into consumer storage; returns a `SpoolReader`. */
@@ -161,6 +164,7 @@ export const turnRunnerConfigSchema = validator.object<TurnRunnerConfig>({
   storeToolCallCallback: validator.function().arity(2).required(),
   mutateToolCallCallback: validator.function().arity(2).required(),
   deleteToolCallCallback: validator.function().arity(2).required(),
+  replaceToolCallGroupCallback: validator.function().arity(3).optional(),
   storeMediaBytesCallback: validator.function().arity(3).required(),
   storeRetrievableBytesCallback: validator.function().arity(3).required(),
   tools: validator

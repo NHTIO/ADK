@@ -24,6 +24,7 @@ import {
   E_OPENAI_RESPONSES_REQUEST_TIMEOUT,
   E_INVALID_OPENAI_RESPONSES_OPTIONS,
   E_OPENAI_RESPONSES_CONTEXT_OVERFLOW,
+  deCollideOpenAIResponsesToolCallIds,
 } from '@nhtio/adk/batteries/llm/openai_responses'
 import type { Thought } from '@nhtio/adk/common'
 import type { DispatchContext } from '@nhtio/adk/types'
@@ -172,6 +173,105 @@ describe('OpenAIResponsesAdapter — happy paths (both stream modes)', () => {
     expect(helpers._stats[0]!.completionTokens).toBe(3)
   })
 
+  it('non-streaming tool-call response applies the ingress filter to a bare provider id', async () => {
+    const fetchFn = async () =>
+      new Response(
+        JSON.stringify({
+          status: 'completed',
+          output: [
+            { type: 'function_call', call_id: 'call-filter', name: 'my_tool', arguments: '{}' },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }
+      )
+    const adapter = new OpenAIResponsesAdapter({
+      model: 'm',
+      fetch: fetchFn as never,
+      stream: false,
+      toolCallIdFilter: (id: string) => `filtered-${id}`,
+    })
+    const ctx = makeCtx()
+    await adapter.executor()(ctx, makeHelpers())
+    expect(ctx._stored.toolCalls[0]!.id).toBe('filtered-call-filter')
+  })
+
+  it('a colliding composite ingress id is de-collided without losing its fc_ item id', async () => {
+    const tools = new ToolRegistry([
+      new Tool({
+        name: 'my_tool',
+        description: 'test tool',
+        inputSchema: validator.object({}).unknown(true),
+        handler: async () => 'ok',
+      }),
+    ])
+    const existing = new ToolCall({
+      id: 'call-collision|fc_item',
+      tool: 'my_tool',
+      args: {},
+      checksum: 'existing',
+      isComplete: true,
+      isError: false,
+      results: new Tokenizable('existing'),
+      createdAt: dt('2026-01-01T00:01:00Z'),
+      updatedAt: dt('2026-01-01T00:01:00Z'),
+      completedAt: dt('2026-01-01T00:01:00Z'),
+    })
+    const fetchFn = async () =>
+      new Response(
+        JSON.stringify({
+          status: 'completed',
+          output: [
+            {
+              type: 'function_call',
+              call_id: 'call-collision',
+              id: 'fc_item',
+              name: 'my_tool',
+              arguments: '{}',
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    const adapter = new OpenAIResponsesAdapter({
+      model: 'm',
+      fetch: fetchFn as never,
+      stream: false,
+      toolCallIdFilter: (id: string, context: DispatchContext) =>
+        deCollideOpenAIResponsesToolCallIds(id, context),
+    })
+    const ctx = makeCtx({ tools, toolCalls: [existing] })
+    await adapter.executor()(ctx, makeHelpers())
+
+    expect(ctx._stored.toolCalls).toHaveLength(1)
+    expect(ctx._stored.toolCalls[0]!.id).toMatch(/^[0-9a-f-]{36}\|fc_item$/)
+  })
+
+  it('streaming ingress filter preserves the fc item half of a composite id', async () => {
+    const cassette = singleResponsesStreamCassette('s-filter', {
+      steps: [
+        {
+          kind: 'toolCall',
+          callId: 'call-filter',
+          itemId: 'fc-item',
+          name: 'my_tool',
+          argumentsDone: JSON.stringify({ x: 1 }),
+        },
+      ],
+    })
+    const adapter = new OpenAIResponsesAdapter({
+      model: 'm',
+      fetch: cassetteFetch(cassette) as never,
+      stream: true,
+      toolCallIdFilter: (id: string) => id.replace('call-filter', 'filtered-call'),
+    })
+    const ctx = makeCtx()
+    await adapter.executor()(ctx, makeHelpers())
+    expect(ctx._stored.toolCalls[0]!.id).toBe('filtered-call|fc-item')
+  })
+
   it('non-streaming tool-call response: no ack, one ToolCall persisted', async () => {
     const cassette = singleResponsesResponseCassette('ns-toolcall', {
       toolCalls: [{ callId: 'call-1', name: 'my_tool', arguments: { x: 1 } }],
@@ -188,6 +288,8 @@ describe('OpenAIResponsesAdapter — happy paths (both stream modes)', () => {
     expect(ctx._stored.toolCalls).toHaveLength(1)
     expect(ctx._stored.toolCalls[0]!.tool).toBe('my_tool')
     expect(ctx._stored.toolCalls[0]!.args).toEqual({ x: 1 })
+    // No filter is configured: the adapter's real merge/validation/executor path preserves ingress ids.
+    expect(ctx._stored.toolCalls[0]!.id).toMatch(/^call-1\|fc-/)
   })
 })
 

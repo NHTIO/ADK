@@ -20,6 +20,7 @@
  */
 
 export { WebLLMChatCompletionsAdapter } from './adapter'
+export { deCollideToolCallIds } from '../chat_common'
 
 export {
   descriptionToChatCompletionsJsonSchema,
@@ -87,6 +88,7 @@ export type {
   WebLLMInitProgressReport,
   WebLLMChatCompletionsAdapterOptions,
   WebLLMChatCompletionsRequestBody,
+  ToolCallIdFilterFn,
   DescriptionLike,
   ChatCompletionsHelpers,
   BatteryLifecyclePhase,

@@ -24,6 +24,7 @@
  */
 
 export { BedrockConverseAdapter } from './adapter'
+export { deCollideToolCallIds } from '../chat_common'
 
 export {
   // Converse-specific
@@ -122,6 +123,7 @@ export type {
   ChatHelpersCommon,
   RawGenerationObserverFn,
   PromptAssembledObserverFn,
+  ToolCallIdFilterFn,
   ToolCallParserName,
   ToolCallParserFn,
 } from './types'

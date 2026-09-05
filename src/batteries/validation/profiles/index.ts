@@ -9,6 +9,7 @@ import { toolCallIdFormat } from './tool_call_id_format'
 import { strictAlternation } from './strict_alternation'
 import { E_UNKNOWN_ORDERING_PROFILE } from '../exceptions'
 import { openaiShapeBaseline } from './openai_shape_baseline'
+import { toolCallIdUniqueness } from './tool_call_id_uniqueness'
 import { staleThinkingAdvisory } from './stale_thinking_advisory'
 import { thinkingBeforeToolUse } from './thinking_before_tool_use'
 import { singleToolCallPerTurn } from './single_tool_call_per_turn'
@@ -29,6 +30,7 @@ export {
   payloadFieldPreservation,
   nonEmptyTurn,
   toolCallIdFormat,
+  toolCallIdUniqueness,
   roleRemapSplitToolRoles,
   roleRemapInlineToolCall,
 }
@@ -61,6 +63,7 @@ export const ORDERING_PROFILES: Readonly<Record<string, RegisteredOrderingProfil
   schema_integrity: schemaIntegrity,
   non_empty_turn: nonEmptyTurn as unknown as OrderingProfileFactory,
   tool_call_id_format: toolCallIdFormat as unknown as OrderingProfileFactory,
+  tool_call_id_uniqueness: toolCallIdUniqueness,
 }
 
 /** Resolves a non-parameterized behavior by its registry name. */

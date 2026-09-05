@@ -127,7 +127,8 @@ export interface ClaudeCodeCliHelpers extends ChatHelpersCommon {
     thoughts: Iterable<Thought>
     toolCalls: Iterable<ToolCall>
     tools: ToolRegistry
-    renderedToolCallResults: Map<string, string>
+    /** Pre-rendered results keyed by the live ToolCall instances used during assembly. */
+    renderedToolCallResults: Map<ToolCall, string>
     bucketOrder: ChatCompletionsBucketOrder
     selfIdentity: string
     thoughtSurfacing: 'all-self' | 'latest-self' | 'all'

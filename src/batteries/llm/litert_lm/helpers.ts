@@ -439,7 +439,7 @@ export const buildLiteRtConversationInput = async (input: {
   thoughts: Iterable<Thought>
   toolCalls: Iterable<ToolCall>
   tools: ToolRegistry
-  renderedToolCallResults: Map<string, LiteRtMessageContentItem>
+  renderedToolCallResults: Map<ToolCall, LiteRtMessageContentItem>
   /**
    * The live dispatch context, threaded so DYNAMIC (evaluatable) {@link Tokenizable} content resolves
    * against it at assembly via `.render(renderCtx)`. Optional — a static Tokenizable ignores it, and
@@ -617,7 +617,7 @@ export const buildLiteRtConversationInput = async (input: {
         ],
       })
       // The tool result, as a tool-role message carrying the pre-rendered tool_response item.
-      const rendered = input.renderedToolCallResults.get(tc.id)
+      const rendered = input.renderedToolCallResults.get(tc)
       if (rendered !== undefined) {
         messages.push({ role: 'tool', content: [rendered] })
       }

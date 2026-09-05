@@ -192,11 +192,12 @@ export class GeminiGenerateContentAdapter {
 
       // ── pre-render tool results ─────────────────────────────────────────
       // Gemini wants an OBJECT in functionResponse.response, so results are rendered ahead of
-      // assembly and keyed by call id, mirroring the other batteries' two-phase shape.
-      const renderedToolCallResults = new Map<string, Record<string, unknown>>()
+      // assembly and keyed by the live ToolCall instance. Keying by id lets a duplicate id
+      // overwrite an earlier result before assembly.
+      const renderedToolCallResults = new Map<ToolCall, Record<string, unknown>>()
       for (const tc of ctx.turnToolCalls) {
         renderedToolCallResults.set(
-          tc.id,
+          tc,
           await resolved.renderGeminiToolResult({
             toolCall: tc,
             results: tc.results as never,

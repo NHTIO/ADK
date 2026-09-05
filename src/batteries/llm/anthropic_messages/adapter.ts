@@ -483,7 +483,8 @@ export class AnthropicMessagesAdapter {
       // pre-forged `ctx.tools` directly — no local merge, no bindContext here.
 
       // ── Step 4: pre-render tool-call results ──────────────────────────────
-      const renderedToolCallResults = new Map<string, AnthropicToolResultBlockParam>()
+      // Key by primitive identity: duplicate provider ids must not cross-wire results.
+      const renderedToolCallResults = new Map<ToolCall, AnthropicToolResultBlockParam>()
       for (const tc of ctx.turnToolCalls) {
         const rendered = await resolvedHelpers.renderAnthropicToolCallResult({
           toolCall: tc,
@@ -501,7 +502,7 @@ export class AnthropicMessagesAdapter {
           unsupportedMediaPolicy: merged.unsupportedMediaPolicy ?? 'throw',
           warn: localWarn,
         })
-        renderedToolCallResults.set(tc.id, rendered)
+        renderedToolCallResults.set(tc, rendered)
       }
 
       // ── Step 5: context window enforcement ────────────────────────────────
@@ -890,6 +891,8 @@ export class AnthropicMessagesAdapter {
 
       // ── Inner helper: persist + execute one assembled tool call ───────────
       const executeAndPersistToolCall = async (call: AssembledAnthropicToolCall): Promise<void> => {
+        // Resolve the vendor id once at ingress so reporting, persistence, and spooling agree.
+        const callId = merged.toolCallIdFilter?.(call.id, ctx) ?? call.id
         const tool = ctx.tools.get(call.name)
         let args: Record<string, unknown> = {}
         let parseError: InstanceType<typeof E_ANTHROPIC_MESSAGES_INVALID_TOOL_CALL_ARGS> | undefined
@@ -920,15 +923,15 @@ export class AnthropicMessagesAdapter {
         if (parseError !== undefined) {
           const toolName = normalizeToolName(call.name)
           const results = new Tokenizable(parseError.message)
-          helpers.reportToolCall(call.id, { tool: toolName, args })
-          helpers.reportToolCall(call.id, {
+          helpers.reportToolCall(callId, { tool: toolName, args })
+          helpers.reportToolCall(callId, {
             results,
             isError: true,
             isComplete: true,
           })
           await ctx.storeToolCall(
             new ToolCall({
-              id: call.id,
+              id: callId,
               tool: toolName,
               args,
               checksum: computeChecksum(toolName, args),
@@ -953,15 +956,15 @@ export class AnthropicMessagesAdapter {
               ? `Tool not found: ${toolName}. Available tools: ${available.join(', ')}.`
               : `Tool not found: ${toolName}. No tools are available this turn.`
           const results = new Tokenizable(errText)
-          helpers.reportToolCall(call.id, { tool: toolName, args })
-          helpers.reportToolCall(call.id, {
+          helpers.reportToolCall(callId, { tool: toolName, args })
+          helpers.reportToolCall(callId, {
             results,
             isError: true,
             isComplete: true,
           })
           await ctx.storeToolCall(
             new ToolCall({
-              id: call.id,
+              id: callId,
               tool: toolName,
               args,
               checksum: computeChecksum(toolName, args),
@@ -975,7 +978,7 @@ export class AnthropicMessagesAdapter {
           )
           return
         }
-        helpers.reportToolCall(call.id, { tool: tool.name, args })
+        helpers.reportToolCall(callId, { tool: tool.name, args })
         const isArtifactTool = ArtifactTool.isArtifactTool(tool)
         let results: Tokenizable | SpooledArtifact | SpooledArtifact[] | Media | Media[] =
           new Tokenizable('')
@@ -999,11 +1002,11 @@ export class AnthropicMessagesAdapter {
           } else if (looksLikeSpooledArtifact(raw)) {
             results = raw as SpooledArtifact
           } else if (typeof raw === 'string' || isInstanceOf(raw, 'Uint8Array', Uint8Array)) {
-            const reader = await spoolStore.write(call.id, raw as string | Uint8Array)
+            const reader = await spoolStore.write(callId, raw as string | Uint8Array)
             const ArtifactCtor = (tool as Tool).artifactConstructor?.() ?? SpooledArtifact
             results = new ArtifactCtor(reader)
           } else {
-            const reader = await spoolStore.write(call.id, String(raw))
+            const reader = await spoolStore.write(callId, String(raw))
             const ArtifactCtor = (tool as Tool).artifactConstructor?.() ?? SpooledArtifact
             results = new ArtifactCtor(reader)
           }
@@ -1020,7 +1023,7 @@ export class AnthropicMessagesAdapter {
           }
           results = new Tokenizable(detailMsg)
         }
-        helpers.reportToolCall(call.id, {
+        helpers.reportToolCall(callId, {
           results,
           isError: toolHadError,
           isComplete: true,
@@ -1028,7 +1031,7 @@ export class AnthropicMessagesAdapter {
         const completedAt2 = nowIso()
         await ctx.storeToolCall(
           new ToolCall({
-            id: call.id,
+            id: callId,
             tool: tool.name,
             args,
             checksum: computeChecksum(tool.name, args),

@@ -109,6 +109,10 @@ const buildHistory = async (input: {
   bucketOrder?: Array<'standingInstructions' | 'memories' | 'retrievables' | 'timeline'>
   tools?: ToolRegistry
   warn?: (msg: string) => void
+  renderedToolCallResults?: Map<
+    ToolCall,
+    { type: 'tool_result'; tool_use_id: string; content: string }
+  >
   renderRetrievableHandleBody?: (input: {
     callId: string
     artifact: unknown
@@ -126,7 +130,7 @@ const buildHistory = async (input: {
     thoughts: new Set(input.thoughts ?? []),
     toolCalls: new Set(input.toolCalls ?? []),
     tools: input.tools ?? new ToolRegistry([makeTool('search_docs'), makeTool('lookup_user')]),
-    renderedToolCallResults: new Map(),
+    renderedToolCallResults: input.renderedToolCallResults ?? new Map(),
     bucketOrder: input.bucketOrder ?? [
       'standingInstructions',
       'memories',
@@ -426,6 +430,32 @@ describe('Anthropic helpers — prompt caching + history assembly', () => {
     const mergedBlocks = mergedUserTurn?.content as unknown as Array<Record<string, unknown>>
     expect(mergedBlocks[0]?.type).toBe('tool_result')
     expect(mergedBlocks[1]?.type).toBe('text')
+  })
+
+  it('keys pre-rendered tool results by ToolCall identity when ids collide', async () => {
+    const first = makeToolCall({
+      id: 'same',
+      results: 'first',
+      createdAt: dt('2026-01-01T00:00:01Z'),
+    })
+    const second = makeToolCall({
+      id: 'same',
+      results: 'second',
+      createdAt: dt('2026-01-01T00:00:02Z'),
+    })
+    const built = await buildHistory({
+      toolCalls: [first, second],
+      renderedToolCallResults: new Map([
+        [first, { type: 'tool_result', tool_use_id: 'same', content: 'FIRST-WIRE' }],
+        [second, { type: 'tool_result', tool_use_id: 'same', content: 'SECOND-WIRE' }],
+      ]),
+    })
+    const content = built.messages.flatMap((m) =>
+      Array.isArray(m.content) ? m.content : []
+    ) as unknown as Array<Record<string, unknown>>
+    expect(
+      content.filter((block) => block.type === 'tool_result').map((block) => block.content)
+    ).toEqual(['FIRST-WIRE', 'SECOND-WIRE'])
   })
 
   it('sets is_error only on failed tool results', async () => {

@@ -46,6 +46,7 @@ import {
   defaultBuildAnthropicMessagesHistory,
   anthropicToolsFromTools,
 } from './helpers'
+import type { ToolCall } from '@nhtio/adk/common'
 import type { DispatchExecutorLogChannel } from '@nhtio/adk'
 import type {
   AnthropicMessageCountTokensParams,
@@ -268,7 +269,7 @@ const assembleCountTokensPayload = async (
   }
 
   const renderedToolCallResults = new Map<
-    string,
+    ToolCall,
     Awaited<ReturnType<AnthropicMessagesHelpers['renderAnthropicToolCallResult']>>
   >()
   for (const tc of context.turnToolCalls) {
@@ -282,7 +283,7 @@ const assembleCountTokensPayload = async (
       unsupportedMediaPolicy: resolved.unsupportedMediaPolicy ?? 'throw',
       warn: localWarn,
     })
-    renderedToolCallResults.set(tc.id, rendered)
+    renderedToolCallResults.set(tc, rendered)
   }
 
   const built = await resolvedHelpers.buildAnthropicMessagesHistory({

@@ -148,6 +148,7 @@ const ADK_CONTROL_KEYS: ReadonlySet<string> = new Set([
   // Observability hooks — never sent to the provider.
   'onRawGeneration',
   'onPromptAssembled',
+  'toolCallIdFilter',
 ])
 
 // ─── Option merging ───────────────────────────────────────────────────────────
@@ -382,7 +383,7 @@ export class OpenAIChatCompletionsAdapter {
       // directly — no local merge, no bindContext here.
 
       // ── Step 4: pre-render tool-call results ──────────────────────────────
-      const renderedToolCallResults = new Map<string, string | ChatCompletionsContentBlock[]>()
+      const renderedToolCallResults = new Map<ToolCall, string | ChatCompletionsContentBlock[]>()
       for (const tc of ctx.turnToolCalls) {
         const rendered = await resolvedHelpers.renderChatCompletionsToolCallResult({
           toolCall: tc,
@@ -398,7 +399,7 @@ export class OpenAIChatCompletionsAdapter {
           unsupportedMediaPolicy: merged.unsupportedMediaPolicy ?? 'throw',
           warn: localWarn,
         })
-        renderedToolCallResults.set(tc.id, rendered)
+        renderedToolCallResults.set(tc, rendered)
       }
 
       // ── Step 5: context window enforcement ────────────────────────────────
@@ -819,6 +820,8 @@ export class OpenAIChatCompletionsAdapter {
 
       // ── Inner helper: persist + execute one assembled tool call ───────────
       const executeAndPersistToolCall = async (call: AssembledToolCall): Promise<void> => {
+        // Resolve the vendor id once at ingress so reporting, persistence, and spooling agree.
+        const callId = merged.toolCallIdFilter?.(call.id, ctx) ?? call.id
         const tool = ctx.tools.get(call.name)
         // Parse args defensively. The model may emit non-JSON or a non-object
         // JSON value (string, number, array, null); both are recoverable error
@@ -857,8 +860,8 @@ export class OpenAIChatCompletionsAdapter {
         if (parseError !== undefined) {
           const toolName = normalizeToolName(call.name)
           const results = new Tokenizable(parseError.message)
-          helpers.reportToolCall(call.id, { tool: toolName, args })
-          helpers.reportToolCall(call.id, {
+          helpers.reportToolCall(callId, { tool: toolName, args })
+          helpers.reportToolCall(callId, {
             results,
             isError: true,
             isComplete: true,
@@ -866,7 +869,7 @@ export class OpenAIChatCompletionsAdapter {
           const checksum = computeChecksum(toolName, args)
           await ctx.storeToolCall(
             new ToolCall({
-              id: call.id,
+              id: callId,
               tool: toolName,
               args,
               checksum,
@@ -894,8 +897,8 @@ export class OpenAIChatCompletionsAdapter {
               ? `Tool not found: ${toolName}. Available tools: ${available.join(', ')}.`
               : `Tool not found: ${toolName}. No tools are available this turn.`
           const results = new Tokenizable(errText)
-          helpers.reportToolCall(call.id, { tool: toolName, args })
-          helpers.reportToolCall(call.id, {
+          helpers.reportToolCall(callId, { tool: toolName, args })
+          helpers.reportToolCall(callId, {
             results,
             isError: true,
             isComplete: true,
@@ -903,7 +906,7 @@ export class OpenAIChatCompletionsAdapter {
           const checksum = computeChecksum(toolName, args)
           await ctx.storeToolCall(
             new ToolCall({
-              id: call.id,
+              id: callId,
               tool: toolName,
               args,
               checksum,
@@ -917,7 +920,7 @@ export class OpenAIChatCompletionsAdapter {
           )
           return
         }
-        helpers.reportToolCall(call.id, { tool: tool.name, args })
+        helpers.reportToolCall(callId, { tool: tool.name, args })
         const isArtifactTool = ArtifactTool.isArtifactTool(tool)
         let results: Tokenizable | SpooledArtifact | SpooledArtifact[] | Media | Media[] =
           new Tokenizable('')
@@ -944,12 +947,12 @@ export class OpenAIChatCompletionsAdapter {
           } else if (looksLikeSpooledArtifact(raw)) {
             results = raw as SpooledArtifact
           } else if (typeof raw === 'string' || isInstanceOf(raw, 'Uint8Array', Uint8Array)) {
-            const reader = await spoolStore.write(call.id, raw as string | Uint8Array)
+            const reader = await spoolStore.write(callId, raw as string | Uint8Array)
             const ArtifactCtor = (tool as Tool).artifactConstructor?.() ?? SpooledArtifact
             results = new ArtifactCtor(reader)
           } else {
             // Defensive fallback — wrap stringified value so the model gets *something*.
-            const reader = await spoolStore.write(call.id, String(raw))
+            const reader = await spoolStore.write(callId, String(raw))
             const ArtifactCtor = (tool as Tool).artifactConstructor?.() ?? SpooledArtifact
             results = new ArtifactCtor(reader)
           }
@@ -970,7 +973,7 @@ export class OpenAIChatCompletionsAdapter {
           }
           results = new Tokenizable(detailMsg)
         }
-        helpers.reportToolCall(call.id, {
+        helpers.reportToolCall(callId, {
           results,
           isError: toolHadError,
           isComplete: true,
@@ -979,7 +982,7 @@ export class OpenAIChatCompletionsAdapter {
         const completedAt2 = nowIso()
         await ctx.storeToolCall(
           new ToolCall({
-            id: call.id,
+            id: callId,
             tool: tool.name,
             args,
             checksum,

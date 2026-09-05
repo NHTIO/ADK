@@ -284,7 +284,8 @@ export class OllamaAdapter {
       // directly — no local merge, no bindContext here.
 
       // ── Step 4: pre-render tool-call results ──────────────────────────────
-      const renderedToolCallResults = new Map<string, string>()
+      // Key by primitive identity: duplicate ids must not cross-wire pre-rendered results.
+      const renderedToolCallResults = new Map<ToolCall, string>()
       for (const tc of ctx.turnToolCalls) {
         const rendered = await resolvedHelpers.renderOllamaToolCallResult({
           toolCall: tc,
@@ -300,7 +301,7 @@ export class OllamaAdapter {
           unsupportedMediaPolicy: merged.unsupportedMediaPolicy ?? 'throw',
           warn: localWarn,
         })
-        renderedToolCallResults.set(tc.id, rendered)
+        renderedToolCallResults.set(tc, rendered)
       }
 
       // ── Step 5: context window enforcement ────────────────────────────────
@@ -588,6 +589,8 @@ export class OllamaAdapter {
 
       // ── Inner helper: persist + execute one assembled tool call ───────────
       const executeAndPersistToolCall = async (call: AssembledOllamaToolCall): Promise<void> => {
+        // Resolve the provider id once at ingress so reporting, persistence, and spooling agree.
+        const callId = merged.toolCallIdFilter?.(call.id, ctx) ?? call.id
         const tool = ctx.tools.get(call.name)
         // Native /api/chat delivers `arguments` already parsed as an object. Validate it IS an
         // object (defensive against a non-conformant server/proxy emitting an array/null/primitive)
@@ -611,11 +614,11 @@ export class OllamaAdapter {
         if (parseError !== undefined) {
           const toolName = normalizeToolName(call.name)
           const results = new Tokenizable(parseError.message)
-          helpers.reportToolCall(call.id, { tool: toolName, args })
-          helpers.reportToolCall(call.id, { results, isError: true, isComplete: true })
+          helpers.reportToolCall(callId, { tool: toolName, args })
+          helpers.reportToolCall(callId, { results, isError: true, isComplete: true })
           await ctx.storeToolCall(
             new ToolCall({
-              id: call.id,
+              id: callId,
               tool: toolName,
               args,
               checksum: computeChecksum(toolName, args),
@@ -640,11 +643,11 @@ export class OllamaAdapter {
               ? `Tool not found: ${toolName}. Available tools: ${available.join(', ')}.`
               : `Tool not found: ${toolName}. No tools are available this turn.`
           const results = new Tokenizable(errText)
-          helpers.reportToolCall(call.id, { tool: toolName, args })
-          helpers.reportToolCall(call.id, { results, isError: true, isComplete: true })
+          helpers.reportToolCall(callId, { tool: toolName, args })
+          helpers.reportToolCall(callId, { results, isError: true, isComplete: true })
           await ctx.storeToolCall(
             new ToolCall({
-              id: call.id,
+              id: callId,
               tool: toolName,
               args,
               checksum: computeChecksum(toolName, args),
@@ -658,7 +661,7 @@ export class OllamaAdapter {
           )
           return
         }
-        helpers.reportToolCall(call.id, { tool: tool.name, args })
+        helpers.reportToolCall(callId, { tool: tool.name, args })
         const isArtifactTool = ArtifactTool.isArtifactTool(tool)
         let results: Tokenizable | SpooledArtifact | SpooledArtifact[] | Media | Media[] =
           new Tokenizable('')
@@ -682,11 +685,11 @@ export class OllamaAdapter {
           } else if (looksLikeSpooledArtifact(raw)) {
             results = raw as SpooledArtifact
           } else if (typeof raw === 'string' || isInstanceOf(raw, 'Uint8Array', Uint8Array)) {
-            const reader = await spoolStore.write(call.id, raw as string | Uint8Array)
+            const reader = await spoolStore.write(callId, raw as string | Uint8Array)
             const ArtifactCtor = (tool as Tool).artifactConstructor?.() ?? SpooledArtifact
             results = new ArtifactCtor(reader)
           } else {
-            const reader = await spoolStore.write(call.id, String(raw))
+            const reader = await spoolStore.write(callId, String(raw))
             const ArtifactCtor = (tool as Tool).artifactConstructor?.() ?? SpooledArtifact
             results = new ArtifactCtor(reader)
           }
@@ -703,11 +706,11 @@ export class OllamaAdapter {
           }
           results = new Tokenizable(detailMsg)
         }
-        helpers.reportToolCall(call.id, { results, isError: toolHadError, isComplete: true })
+        helpers.reportToolCall(callId, { results, isError: toolHadError, isComplete: true })
         const completedAt2 = nowIso()
         await ctx.storeToolCall(
           new ToolCall({
-            id: call.id,
+            id: callId,
             tool: tool.name,
             args,
             checksum: computeChecksum(tool.name, args),

@@ -336,6 +336,7 @@ export class TurnRunner {
         storeToolCall: this.#config.storeToolCallCallback,
         mutateToolCall: this.#config.mutateToolCallCallback,
         deleteToolCall: this.#config.deleteToolCallCallback,
+        replaceToolCallGroup: this.#config.replaceToolCallGroupCallback,
         storeMediaBytes: this.#config.storeMediaBytesCallback,
         storeRetrievableBytes: this.#config.storeRetrievableBytesCallback,
         emitMessage: (content) => this.#functionalEmitter.emit('message', content),

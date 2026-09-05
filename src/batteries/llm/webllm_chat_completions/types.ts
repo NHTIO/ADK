@@ -44,6 +44,7 @@ export type {
   ChatCompletionsHelpers,
   UnsupportedMediaPolicy,
   ChatCompletionsContentBlock,
+  ToolCallIdFilterFn,
 } from '../openai_chat_completions/types'
 
 /**

@@ -16,7 +16,9 @@
  * native message/chunk objects) live in each battery's own `types.ts`, not here.
  */
 
+import { v6 as uuidv6 } from 'uuid'
 import type { ParsedToolCall } from './tool_parsers'
+import type { DispatchContext } from '@nhtio/adk/types'
 import type {
   Tokenizable,
   Memory,
@@ -439,6 +441,37 @@ export interface PromptAssembledObservation {
  * is handed back AS-IS — see {@link PromptAssembledObservation} for the no-redaction contract.
  */
 export type PromptAssembledObserverFn = (observation: PromptAssembledObservation) => void
+
+// ─── Tool-call id ingress ─────────────────────────────────────────────────────
+
+/**
+ * Shapes a provider-supplied tool-call id at adapter ingress, before the call is stored or used for
+ * spool/result correlation. This hook exists to prevent the concrete failure seen with grok-4.3 on
+ * Bedrock Mantle, which repeats `call_0` across tool-calling turns. Default absent = identity, so
+ * adapters retain today's behaviour unless a consumer opts in.
+ *
+ * @remarks
+ * `#doStoreToolCall` adds to `turnToolCalls` synchronously before its await, and adoption is a
+ * sequential loop, so each call sees every prior call — including same-response siblings. A correctly
+ * numbered parallel batch (`call_0`..`call_3`) is therefore safe because those ids are already
+ * DISTINCT, not because the siblings are unstored. A genuine same-response duplicate IS de-collided,
+ * which is intentional.
+ */
+export type ToolCallIdFilterFn = (id: string, ctx: DispatchContext) => string
+
+/**
+ * De-collides a provider-supplied tool-call id against calls already adopted in this dispatch. It
+ * prevents the concrete `call_0`-repeated-across-turns failure seen with grok-4.3 on Bedrock Mantle.
+ * Default absent = identity; this implementation returns the original id when no collision exists.
+ *
+ * @remarks
+ * `#doStoreToolCall` adds to `turnToolCalls` synchronously before its await, and adoption is a
+ * sequential loop, so each call sees every prior call — including same-response siblings. A correctly
+ * numbered parallel batch (`call_0`..`call_3`) passes through because those ids are already DISTINCT,
+ * not because the siblings are unstored. A genuine same-response duplicate is de-collided, as intended.
+ */
+export const deCollideToolCallIds: ToolCallIdFilterFn = (id, ctx) =>
+  [...ctx.turnToolCalls].some((tc) => tc.id === id) ? uuidv6() : id
 
 // ─── Retry config ─────────────────────────────────────────────────────────────
 

@@ -248,6 +248,7 @@ export const anthropicMessagesOptionsSchema = validator
     onRawGeneration: validator.function().optional(),
     onPromptAssembled: validator.function().optional(),
     localToolCallParser: localToolCallParserSchema,
+    toolCallIdFilter: validator.function().optional(),
   })
   .unknown(false)
 

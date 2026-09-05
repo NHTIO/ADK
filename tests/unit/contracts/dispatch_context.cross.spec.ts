@@ -297,6 +297,188 @@ describe('DispatchContext mutate* replaces the stale primitive by id', () => {
     expect(ctx.toolCallCount('checksum-b')).toBe(1)
   })
 
+  it('replaces every member of a colliding group and fires delta hooks', async () => {
+    const deleted: string[] = []
+    const stored: ToolCall[] = []
+    const ctx = makeDispatchContext({
+      deleteToolCall: async (_ctx, id) => {
+        deleted.push(id)
+      },
+      storeToolCall: async (_ctx, call) => {
+        stored.push(call)
+      },
+    })
+    const makeCall = (id: string, checksum: string) =>
+      new ToolCall({
+        id,
+        tool: 'sample',
+        args: { checksum },
+        checksum,
+        isComplete: true,
+        isError: false,
+        results: new Tokenizable('done'),
+        createdAt: now,
+        updatedAt: now,
+        completedAt: now,
+      })
+    const first = makeCall('call-0', 'checksum-0')
+    const second = makeCall('call-0', 'checksum-1')
+    await ctx.storeToolCall(first)
+    ;(ctx as unknown as { turnToolCalls: Set<ToolCall> }).turnToolCalls.add(second)
+    const replacementA = makeCall('new-0', 'new-checksum-0')
+    const replacementB = makeCall('new-1', 'new-checksum-1')
+
+    await ctx.replaceToolCallGroup(['call-0'], [replacementA, replacementB])
+
+    expect([...ctx.turnToolCalls]).toEqual([replacementA, replacementB])
+    expect(ctx.toolCallCount('checksum-0')).toBe(0)
+    expect(ctx.toolCallCount('checksum-1')).toBe(0)
+    expect(ctx.toolCallCount('new-checksum-0')).toBe(1)
+    expect(ctx.toolCallCount('new-checksum-1')).toBe(1)
+    expect(deleted).toEqual(['call-0'])
+    expect(stored.slice(1)).toEqual([replacementA, replacementB])
+  })
+
+  it('uses the transactional group callback without duplicate per-record writes', async () => {
+    const transactional = vi.fn(
+      async (_ctx: unknown, _ids: readonly string[], _replacements: readonly ToolCall[]) => {}
+    )
+    const deleted = vi.fn(async () => {})
+    const stored = vi.fn(async () => {})
+    const ctx = makeDispatchContext({
+      replaceToolCallGroup: transactional,
+      deleteToolCall: deleted,
+      storeToolCall: stored,
+    })
+    const original = new ToolCall({
+      id: 'call-0',
+      tool: 'sample',
+      args: {},
+      checksum: 'checksum-0',
+      isComplete: true,
+      isError: false,
+      results: new Tokenizable('done'),
+      createdAt: now,
+      updatedAt: now,
+      completedAt: now,
+    })
+    await ctx.storeToolCall(original)
+    const replacement = new ToolCall({
+      id: 'new-0',
+      tool: 'sample',
+      args: {},
+      checksum: 'checksum-1',
+      isComplete: true,
+      isError: false,
+      results: new Tokenizable('done'),
+      createdAt: now,
+      updatedAt: now,
+      completedAt: now,
+    })
+    await ctx.replaceToolCallGroup(['call-0'], [replacement])
+    expect(transactional).toHaveBeenCalledWith(ctx, ['call-0'], [replacement])
+    expect(deleted).not.toHaveBeenCalled()
+    expect(stored).toHaveBeenCalledTimes(1) // only the setup store
+  })
+
+  it('leaves local state untouched when group persistence fails', async () => {
+    const original = new ToolCall({
+      id: 'call-0',
+      tool: 'sample',
+      args: {},
+      checksum: 'checksum-0',
+      isComplete: true,
+      isError: false,
+      results: new Tokenizable('done'),
+      createdAt: now,
+      updatedAt: now,
+      completedAt: now,
+    })
+    const ctx = makeDispatchContext({
+      toolCalls: [original],
+      replaceToolCallGroup: async (_ctx, _ids, _replacements) => {
+        throw new Error('write failed')
+      },
+    })
+    await expect(
+      ctx.replaceToolCallGroup(
+        ['call-0'],
+        [
+          new ToolCall({
+            id: 'new-0',
+            tool: 'sample',
+            args: {},
+            checksum: 'checksum-1',
+            isComplete: true,
+            isError: false,
+            results: new Tokenizable('done'),
+            createdAt: now,
+            updatedAt: now,
+            completedAt: now,
+          }),
+        ]
+      )
+    ).rejects.toThrow('write failed')
+    expect([...ctx.turnToolCalls]).toEqual([original])
+    expect(ctx.toolCallCount('checksum-0')).toBe(1)
+  })
+
+  it('reports ids deleted before degraded persistence fails', async () => {
+    const first = new ToolCall({
+      id: 'call-0',
+      tool: 'sample',
+      args: {},
+      checksum: 'a',
+      isComplete: true,
+      isError: false,
+      results: new Tokenizable('done'),
+      createdAt: now,
+      updatedAt: now,
+      completedAt: now,
+    })
+    const second = new ToolCall({ ...first, id: 'call-1', checksum: 'b' })
+    const failure = new Error('delete failed')
+    const ctx = makeDispatchContext({
+      toolCalls: [first, second],
+      deleteToolCall: async (_ctx, id) => {
+        if (id === second.id) throw failure
+      },
+    })
+
+    await expect(ctx.replaceToolCallGroup(['call-0', 'call-1'], [])).rejects.toBe(failure)
+    expect((failure as Error & { deletedIds?: string[] }).deletedIds).toEqual(['call-0'])
+  })
+
+  it('degraded persistence deletes all ids before storing replacements', async () => {
+    const order: string[] = []
+    const ctx = makeDispatchContext({
+      deleteToolCall: async (_ctx, id) => {
+        order.push(`delete:${id}`)
+      },
+      storeToolCall: async (_ctx, call) => {
+        order.push(`store:${call.id}`)
+      },
+    })
+    const first = new ToolCall({
+      id: 'call-0',
+      tool: 'sample',
+      args: {},
+      checksum: 'a',
+      isComplete: true,
+      isError: false,
+      results: new Tokenizable('done'),
+      createdAt: now,
+      updatedAt: now,
+      completedAt: now,
+    })
+    const second = new ToolCall({ ...first, id: 'call-0' })
+    ;(ctx as unknown as { turnToolCalls: Set<ToolCall> }).turnToolCalls.add(first)
+    ;(ctx as unknown as { turnToolCalls: Set<ToolCall> }).turnToolCalls.add(second)
+    const replacement = new ToolCall({ ...first, id: 'new-0', checksum: 'b' })
+    await ctx.replaceToolCallGroup(['call-0', 'call-0'], [replacement])
+    expect(order).toEqual(['delete:call-0', 'delete:call-0', 'store:new-0'])
+  })
+
   it('mutateRetrievable replaces the prior instance sharing the same id', async () => {
     const ctx = makeDispatchContext()
     const original = new Retrievable({

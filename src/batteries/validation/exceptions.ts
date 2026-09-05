@@ -32,6 +32,39 @@ export interface OrderingViolationException extends BaseException {
   violations: BlockingOrderingViolation[]
 }
 
+/** A repair failure, retaining enough progress to reconcile a partially-mutated store. */
+export interface OrderingRepairException extends BaseException {
+  /** The original ids in the collision group being repaired. */
+  groupIds: string[]
+  /** Group members deleted before a degraded replacement failed. */
+  deletedIds: string[]
+  /** The persistence or context error that caused the repair to fail. */
+  cause?: unknown
+}
+
+/** Thrown internally when materialising an ordering repair cannot complete. */
+export const E_ORDERING_REPAIR_FAILED = createException<[string]>(
+  'E_ORDERING_REPAIR_FAILED',
+  'Ordering repair failed: %s',
+  'E_ORDERING_REPAIR_FAILED',
+  422,
+  false
+)
+
+/** Constructs a structured repair failure without losing the underlying store error. */
+export const createOrderingRepairError = (
+  message: string,
+  cause: unknown,
+  groupIds: string[],
+  deletedIds: string[]
+): OrderingRepairException => {
+  const error = new E_ORDERING_REPAIR_FAILED([message]) as OrderingRepairException
+  error.cause = cause
+  error.groupIds = [...groupIds]
+  error.deletedIds = [...deletedIds]
+  return error
+}
+
 /**
  * Thrown when a dispatch contains blocking ordering violations.
  *

@@ -35,6 +35,7 @@ import type {
   ChatHelpersCommon,
   RawGenerationObserverFn,
   PromptAssembledObserverFn,
+  ToolCallIdFilterFn,
 } from '../chat_common/types'
 import type {
   CacheControlEphemeral,
@@ -285,7 +286,8 @@ export interface AnthropicMessagesHelpers extends ChatHelpersCommon {
     thoughts: Iterable<Thought>
     toolCalls: Iterable<ToolCall>
     tools: ToolRegistry
-    renderedToolCallResults: Map<string, AnthropicToolResultBlockParam>
+    /** Pre-rendered results keyed by the live ToolCall instances used during assembly. */
+    renderedToolCallResults: Map<ToolCall, AnthropicToolResultBlockParam>
     bucketOrder: ChatCompletionsBucketOrder
     selfIdentity: string
     thoughtSurfacing: 'all-self' | 'latest-self' | 'all'
@@ -490,6 +492,8 @@ export interface AnthropicMessagesAdapterOptions {
   onPromptAssembled?: PromptAssembledObserverFn
   /** Optional fallback parser for non-structural local tool-call text. */
   localToolCallParser?: ToolCallParserName | ToolCallParserFn
+  /** Optional ingress hook for adapting provider tool-call ids; absent preserves the vendor id. */
+  toolCallIdFilter?: ToolCallIdFilterFn
 }
 
 /**

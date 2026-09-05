@@ -543,7 +543,8 @@ export const buildOllamaHistory = async (input: {
   thoughts: Iterable<Thought>
   toolCalls: Iterable<ToolCall>
   tools: ToolRegistry
-  renderedToolCallResults: Map<string, string>
+  /** Pre-rendered results keyed by the same live ToolCall instances iterated below. */
+  renderedToolCallResults: Map<ToolCall, string>
   bucketOrder: ChatCompletionsBucketOrder
   selfIdentity: string
   thoughtSurfacing: 'all-self' | 'latest-self' | 'all'
@@ -673,7 +674,8 @@ export const buildOllamaHistory = async (input: {
           tool_calls: [{ function: { name: tc.tool, arguments: args } }],
         })
 
-        let rendered = input.renderedToolCallResults.get(tc.id)
+        // Instance identity prevents duplicate ids from pairing a call with another call's result.
+        let rendered = input.renderedToolCallResults.get(tc)
         if (rendered === undefined) {
           const tool = input.tools.get?.(tc.tool)
           rendered = await input.renderOllamaToolCallResult({

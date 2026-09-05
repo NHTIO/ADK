@@ -106,6 +106,17 @@ const identifierFormatRuleSchema = validator
   })
   .unknown(false)
 
+const identifierUniquenessRuleSchema = validator
+  .object({
+    type: validator.string().valid('identifierUniqueness').required(),
+    id: validator.string().required(),
+    kind: primitiveKindSchema.required(),
+    renameStrategy: validator.function().optional(),
+    severity: validator.string().valid('blocking', 'advisory').optional(),
+    surface: validator.string().valid('dispatch', 'turn', 'both').optional(),
+  })
+  .unknown(false)
+
 const nonEmptyTurnRuleSchema = validator
   .object({
     type: validator.string().valid('nonEmptyTurn').required(),
@@ -151,6 +162,7 @@ const orderingRuleSchema = validator.alternatives(
   roleRemapRuleSchema,
   staleContentAdvisoryRuleSchema,
   identifierFormatRuleSchema,
+  identifierUniquenessRuleSchema,
   nonEmptyTurnRuleSchema,
   toolIdentityRuleSchema,
   schemaIntegrityRuleSchema

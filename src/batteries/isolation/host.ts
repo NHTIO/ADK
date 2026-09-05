@@ -296,9 +296,36 @@ export const createIsolatedService = <S extends IsolatedServiceSpec>(
     let firstDeltaMs: number | undefined
     const startedAt = Date.now()
     let cancelFn: (() => void) | undefined
-
+    // Deltas decode asynchronously, but `stream:end`/`stream:error` arrive synchronously behind
+    // them — so a naive `controller.close()` runs while the final delta is still awaiting its
+    // decode, and that enqueue is lost to an already-closed controller. Chain every sink callback
+    // onto one promise so the terminal signal cannot overtake a delta that preceded it on the wire.
+    let pumped: Promise<void> = Promise.resolve()
+    // A terminal transition is final: a decode error, a cancellation, or a second terminal wire
+    // event can all queue behind one, and touching the controller afterwards throws
+    // ERR_INVALID_STATE — which, at the tail of the chain, surfaces as an unhandled rejection.
+    let terminated = false
+    const sequence = (step: () => Promise<void> | void): void => {
+      pumped = pumped.then(async () => {
+        if (!terminated) await step()
+      }, undefined)
+    }
     return new ReadableStream<unknown>({
       start: (controller) => {
+        // Terminal-ness belongs to the controller OPERATION, not to the call site that queued it:
+        // a delta whose decode fails errors the controller from inside `push`, which is every bit
+        // as terminal as a `stream:end`. Latching at the call site missed that path and let a
+        // queued end close an already-errored controller.
+        const closeStream = (): void => {
+          if (terminated) return
+          terminated = true
+          controller.close()
+        }
+        const errorStream = (err: unknown): void => {
+          if (terminated) return
+          terminated = true
+          controller.error(err)
+        }
         void (async () => {
           try {
             await connectPromise
@@ -319,35 +346,39 @@ export const createIsolatedService = <S extends IsolatedServiceSpec>(
             emitReport('stream:start', { streamName })
             const id = ep.startStream(streamName, wireArgs, {
               push: (delta) => {
-                void (async () => {
-                  deltaCount += 1
-                  if (firstDeltaMs === undefined) firstDeltaMs = Date.now() - startedAt
+                deltaCount += 1
+                if (firstDeltaMs === undefined) firstDeltaMs = Date.now() - startedAt
+                sequence(async () => {
                   try {
                     const decoded = await decodeArgument(delta, mode, `${streamName} delta`)
                     controller.enqueue(decoded)
                   } catch (err) {
-                    controller.error(err)
+                    errorStream(err)
                   }
-                })()
+                })
               },
               end: () => {
-                inFlightStreamCancels.delete(cancelFn!)
-                emitReport('stream:end', { streamName, deltaCount, firstDeltaMs })
-                controller.close()
+                sequence(() => {
+                  inFlightStreamCancels.delete(cancelFn!)
+                  emitReport('stream:end', { streamName, deltaCount, firstDeltaMs })
+                  closeStream()
+                })
               },
               error: (wireError) => {
-                void (async () => {
+                sequence(async () => {
                   inFlightStreamCancels.delete(cancelFn!)
                   const err = await fromWireError(wireError)
                   emitReport('stream:error', { streamName, streamError: err })
-                  controller.error(err)
-                })()
+                  errorStream(err)
+                })
               },
             })
             cancelFn = () => ep.cancelStream(id)
             inFlightStreamCancels.add(cancelFn)
           } catch (err) {
-            controller.error(err)
+            // Setup failure (encode, connect, ready timeout) is terminal too, and can land after a
+            // sink callback has already queued — so it goes through the same latch.
+            errorStream(err)
           }
         })()
       },

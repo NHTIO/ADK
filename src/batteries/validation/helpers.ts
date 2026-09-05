@@ -361,6 +361,27 @@ export const evaluateOrderingProfile = (
           )
         }
       }
+    } else if (rule.type === 'identifierUniqueness') {
+      // Group the complete timeline rather than partitioning by turn: the defect is specifically
+      // a cross-turn collision, and splitting the timeline would hide the pair we need to report.
+      const entriesById = new Map<string, OrderingTimelineEntry[]>()
+      for (const entry of entriesForKind(timeline, rule.kind)) {
+        const id = idOf(entry)
+        const group = entriesById.get(id)
+        if (group === undefined) entriesById.set(id, [entry])
+        else group.push(entry)
+      }
+      for (const [id, group] of entriesById) {
+        if (group.length > 1) {
+          record(
+            result,
+            rule,
+            profile,
+            group,
+            `Identifier ${id} is shared by ${group.length} ${rule.kind} entries.`
+          )
+        }
+      }
     } else if (rule.type === 'nonEmptyTurn') {
       // A turn is non-empty if it carries prose OR an adjacent tool call. A thought alone does not
       // count: Gemini's terminal thought-only turn is exactly the shape that fails.
@@ -579,6 +600,16 @@ export const repairViolations = (
         })
         continue
       }
+    }
+    if (violation.ruleType === 'identifierUniqueness' && violation.primitiveIds.length > 1) {
+      // The finding names the complete collision group. Keep this as ONE repair: replacing
+      // members independently lets an id-keyed DELETE remove an unmentioned sibling.
+      repaired.push({
+        violation,
+        strategy: 'renumber-colliding-ids',
+        detail: `Assign a fresh identifier to every member of collision group ${violation.primitiveIds.join(', ')}.`,
+      })
+      continue
     }
     if (violation.ruleType === 'alternation' && violation.primitiveIds.length >= 2) {
       repaired.push({

@@ -295,7 +295,7 @@ export const buildTransformersJsMessages = async (input: {
   thoughts: Iterable<Thought>
   toolCalls: Iterable<ToolCall>
   tools: ToolRegistry
-  renderedToolCallResults: Map<string, string>
+  renderedToolCallResults: Map<ToolCall, string>
   bucketOrder: TransformersJsBucketOrder
   selfIdentity: string
   thoughtSurfacing: 'all-self' | 'latest-self' | 'all'
@@ -438,7 +438,7 @@ export const buildTransformersJsMessages = async (input: {
       messages.push({ role: 'assistant', content: envelope } as TransformersJsMessage)
     } else {
       const tc = item.value
-      const rendered = input.renderedToolCallResults.get(tc.id)
+      const rendered = input.renderedToolCallResults.get(tc)
       messages.push({ role: 'tool', content: rendered ?? '' } as TransformersJsMessage)
     }
   }

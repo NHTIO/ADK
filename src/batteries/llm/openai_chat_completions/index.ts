@@ -97,7 +97,10 @@ export type {
 
 // Shared wire-observability contract (the TO/FROM taps) — surfaced on the barrel so consumers can type
 // their observers.
+export { deCollideToolCallIds } from '../chat_common'
+
 export type {
+  ToolCallIdFilterFn,
   RawGenerationObservation,
   RawGenerationObserverFn,
   PromptAssembledObservation,

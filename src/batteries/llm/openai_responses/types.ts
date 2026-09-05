@@ -37,6 +37,7 @@ import type {
   ChatHelpersCommon,
   RawGenerationObserverFn,
   PromptAssembledObserverFn,
+  ToolCallIdFilterFn,
 } from '../chat_common/types'
 
 // ─── Re-exported shared (wire-shape-agnostic) types ───────────────────────────
@@ -54,6 +55,7 @@ export type {
   UnsupportedMediaPolicy,
   ChatCompletionsRetryConfig,
   ChatHelpersCommon,
+  ToolCallIdFilterFn,
 } from '../chat_common/types'
 export type { ToolCallParserName, ToolCallParserFn } from '../chat_common/tool_parsers'
 
@@ -765,7 +767,7 @@ export interface OpenAIResponsesHelpers extends ChatHelpersCommon {
     toolCalls: Iterable<ToolCall>
     tools: ToolRegistry
     strict?: boolean
-    renderedToolCallResults: Map<string, string | OpenAIResponsesInputContentBlock[]>
+    renderedToolCallResults: Map<ToolCall, string | OpenAIResponsesInputContentBlock[]>
     bucketOrder: ChatCompletionsBucketOrder
     selfIdentity: string
     thoughtSurfacing: 'all-self' | 'latest-self' | 'all'
@@ -868,6 +870,8 @@ export interface OpenAIResponsesAdapterOptions {
   onRawGeneration?: RawGenerationObserverFn
   /** Observe the fully-assembled request before dispatch. */
   onPromptAssembled?: PromptAssembledObserverFn
+  /** Optional ingress hook for adapting provider tool-call ids; absent preserves the vendor id. */
+  toolCallIdFilter?: ToolCallIdFilterFn
   /** Optional fallback parser for tool calls the provider did not return structurally. */
   localToolCallParser?: ToolCallParserName | ToolCallParserFn
   /** Optional hook to shape forged artifact-query tools before they merge into the visible tool set. */

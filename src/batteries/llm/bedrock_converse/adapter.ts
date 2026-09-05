@@ -190,12 +190,12 @@ export class BedrockConverseAdapter {
 
       // Converse wants toolResult.content[] blocks, so results render ahead of assembly.
       const renderedToolCallResults = new Map<
-        string,
+        ToolCall,
         Array<{ text?: string; json?: Record<string, unknown> }>
       >()
       for (const tc of ctx.turnToolCalls) {
         renderedToolCallResults.set(
-          tc.id,
+          tc,
           await resolved.renderConverseToolResult({
             toolCall: tc,
             results: tc.results as never,
@@ -376,6 +376,9 @@ export class BedrockConverseAdapter {
 
       for (const call of calls) {
         if (ctx.abortSignal.aborted) return
+        // Resolve once at ingress; Converse sanitises only when rendering, so this preserves the
+        // filtered id consistently for reporting, persistence, and any spool key.
+        const callId = merged.toolCallIdFilter?.(call.id, ctx) ?? call.id
         const toolName = normalizeToolName(call.name)
         const tool = ctx.tools.get(toolName) as Tool | ArtifactTool | undefined
         const completedAt = nowIso()
@@ -384,11 +387,11 @@ export class BedrockConverseAdapter {
           const results = new Tokenizable(
             new E_CONVERSE_INVALID_TOOL_INPUT([JSON.stringify(call.args)]).message
           )
-          helpers.reportToolCall(call.id, { tool: toolName, args: {} })
-          helpers.reportToolCall(call.id, { results, isError: true, isComplete: true })
+          helpers.reportToolCall(callId, { tool: toolName, args: {} })
+          helpers.reportToolCall(callId, { results, isError: true, isComplete: true })
           await ctx.storeToolCall(
             new ToolCall({
-              id: call.id,
+              id: callId,
               tool: toolName,
               args: {},
               checksum: computeChecksum(toolName, {}),
@@ -413,11 +416,11 @@ export class BedrockConverseAdapter {
               ? `Tool not found: ${toolName}. Available tools: ${available.join(', ')}.`
               : `Tool not found: ${toolName}. No tools are available this turn.`
           )
-          helpers.reportToolCall(call.id, { tool: toolName, args: call.args })
-          helpers.reportToolCall(call.id, { results, isError: true, isComplete: true })
+          helpers.reportToolCall(callId, { tool: toolName, args: call.args })
+          helpers.reportToolCall(callId, { results, isError: true, isComplete: true })
           await ctx.storeToolCall(
             new ToolCall({
-              id: call.id,
+              id: callId,
               tool: toolName,
               args: call.args,
               checksum: computeChecksum(toolName, call.args),
@@ -432,7 +435,7 @@ export class BedrockConverseAdapter {
           continue
         }
 
-        helpers.reportToolCall(call.id, { tool: tool.name, args: call.args })
+        helpers.reportToolCall(callId, { tool: tool.name, args: call.args })
         let results: Tokenizable | SpooledArtifact | SpooledArtifact[] | Media | Media[] =
           new Tokenizable('')
         let isToolError = false
@@ -446,10 +449,10 @@ export class BedrockConverseAdapter {
           results = new Tokenizable(isError(err) ? err.message : String(err))
         }
         const finishedAt = nowIso()
-        helpers.reportToolCall(call.id, { results, isError: isToolError, isComplete: true })
+        helpers.reportToolCall(callId, { results, isError: isToolError, isComplete: true })
         await ctx.storeToolCall(
           new ToolCall({
-            id: call.id,
+            id: callId,
             tool: tool.name,
             args: call.args,
             checksum: computeChecksum(tool.name, call.args),

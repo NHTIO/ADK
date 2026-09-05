@@ -48,6 +48,7 @@ import type {
   ChatHelpersCommon,
   RawGenerationObserverFn,
   PromptAssembledObserverFn,
+  ToolCallIdFilterFn,
 } from '../chat_common/types'
 
 // ─── Re-exported shared (wire-shape-agnostic) types ───────────────────────────
@@ -67,6 +68,7 @@ export type {
   ChatHelpersCommon,
   RawGenerationObserverFn,
   PromptAssembledObserverFn,
+  ToolCallIdFilterFn,
 } from '../chat_common/types'
 export type { ToolCallParserName, ToolCallParserFn } from '../chat_common/tool_parsers'
 
@@ -264,8 +266,8 @@ export interface ConverseRequestBuildInput {
   toolCalls: Iterable<ToolCall>
   /** Tools offered this turn. */
   tools: ToolRegistry
-  /** Pre-rendered result blocks, keyed by ToolCall id. */
-  renderedToolCallResults: Map<string, Array<{ text?: string; json?: Record<string, unknown> }>>
+  /** Pre-rendered result blocks, keyed by ToolCall instance to keep colliding ids distinct. */
+  renderedToolCallResults: Map<ToolCall, Array<{ text?: string; json?: Record<string, unknown> }>>
   /** Order of context buckets in the system blocks. */
   bucketOrder?: ChatCompletionsBucketOrder
   /** Identity attributed to this agent's own thoughts. */
@@ -349,6 +351,8 @@ export interface BedrockConverseAdapterOptions {
   unsupportedMediaPolicy?: UnsupportedMediaPolicy
   /** Recover tool calls the provider returned as prose. */
   localToolCallParser?: ToolCallParserName | ToolCallParserFn
+  /** Optional ingress hook for adapting provider tool-call ids; absent preserves the vendor id. */
+  toolCallIdFilter?: ToolCallIdFilterFn
   /** Observe the raw generation. Purely observational. */
   onRawGeneration?: RawGenerationObserverFn
   /** Observe the assembled request immediately before dispatch. An ADK-control key. */

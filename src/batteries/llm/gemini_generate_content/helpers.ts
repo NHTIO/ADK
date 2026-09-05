@@ -367,7 +367,7 @@ export const buildGeminiRequest = async (
     }
     contents.push({ role: 'model', parts: [callPart] })
 
-    const rendered = input.renderedToolCallResults.get(tc.id) ?? { result: '' }
+    const rendered = input.renderedToolCallResults.get(tc) ?? { result: '' }
     contents.push({
       role: 'user',
       parts: [{ functionResponse: { name: declaredName, response: rendered } }],

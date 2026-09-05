@@ -229,6 +229,7 @@ export const webLLMChatCompletionsOptionsSchema = validator
     enableThinking: validator.boolean().default(false),
     onRawGeneration: validator.function().optional(),
     onPromptAssembled: validator.function().optional(),
+    toolCallIdFilter: validator.function().optional(),
     localToolCallParser: localToolCallParserSchema,
     forgeToolsFilter: validator.function().optional(),
   })

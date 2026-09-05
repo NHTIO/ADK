@@ -644,7 +644,8 @@ export const buildAnthropicMessagesHistory = async (
         input: tc.args,
       }
       append({ role: 'assistant', content: [use] })
-      let result = input.renderedToolCallResults.get(tc.id)
+      // Instance identity prevents duplicate ids from pairing a call with another call's result.
+      let result = input.renderedToolCallResults.get(tc)
       if (!result) {
         const tool = input.tools.get(tc.tool)
         result = await input.renderAnthropicToolCallResult({

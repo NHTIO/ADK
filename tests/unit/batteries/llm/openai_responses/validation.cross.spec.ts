@@ -341,6 +341,10 @@ describe('OpenAI Responses option validation', () => {
 
   // ── strict ─────────────────────────────────────────────────────────────────────
   describe('strict', () => {
+    it('accepts toolCallIdFilter', () => {
+      expectAccept({ ...baseValid, toolCallIdFilter: () => 'filtered' })
+    })
+
     it('accepts true/false', () => {
       expectAccept({ ...baseValid, strict: true })
       expectAccept({ ...baseValid, strict: false })

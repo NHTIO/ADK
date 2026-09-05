@@ -4,6 +4,7 @@
  * Tool results are stored on ToolCall itself in this ADK, not as correlated Message payloads.
  * This catches a malformed Message wedged immediately after a ToolCall.
  */
+import { toolCallIdUniqueness } from './tool_call_id_uniqueness'
 import type { OrderingProfile } from '../types'
 
 export const openaiShapeBaseline: OrderingProfile = {
@@ -17,5 +18,6 @@ export const openaiShapeBaseline: OrderingProfile = {
       first: 'toolCall',
       disallowBetween: ['message'],
     },
+    ...toolCallIdUniqueness.rules,
   ],
 }

@@ -403,7 +403,8 @@ export class ClaudeCodeCliAdapter {
       }
 
       // ── Step 5: pre-render inbound tool-call results (for history) ────────
-      const renderedToolCallResults = new Map<string, string>()
+      // Key by primitive identity, not id: repeated vendor/request ids must not cross-wire results.
+      const renderedToolCallResults = new Map<ToolCall, string>()
       for (const tc of ctx.turnToolCalls) {
         const rendered = await resolvedHelpers.renderClaudeCodeCliToolCallResult({
           toolCall: tc,
@@ -419,7 +420,7 @@ export class ClaudeCodeCliAdapter {
           unsupportedMediaPolicy: merged.unsupportedMediaPolicy ?? 'throw',
           warn: localWarn,
         })
-        renderedToolCallResults.set(tc.id, rendered)
+        renderedToolCallResults.set(tc, rendered)
       }
 
       // ── Step 6: build the -p prompt ────────────────────────────────────────

@@ -116,6 +116,54 @@ describe('LiteRT-LM renderToolsAsPromptText', () => {
 })
 
 describe('LiteRT-LM tool delivery — buildLiteRtConversationInput', () => {
+  it('pairs each colliding-id ToolCall with its own pre-rendered result', async () => {
+    const first = new ToolCall({
+      id: 'call_0',
+      tool: 'get_weather',
+      args: { city: 'Paris' },
+      checksum: 'first',
+      isComplete: true,
+      isError: false,
+      results: new Tokenizable('Paris: 12C'),
+      createdAt: dt('2026-01-01T12:01:00Z'),
+      updatedAt: dt('2026-01-01T12:01:00Z'),
+      completedAt: dt('2026-01-01T12:01:00Z'),
+    })
+    const second = new ToolCall({
+      id: 'call_0',
+      tool: 'get_weather',
+      args: { city: 'Tokyo' },
+      checksum: 'second',
+      isComplete: true,
+      isError: false,
+      results: new Tokenizable('Tokyo: 25C'),
+      createdAt: dt('2026-01-01T12:02:00Z'),
+      updatedAt: dt('2026-01-01T12:02:00Z'),
+      completedAt: dt('2026-01-01T12:02:00Z'),
+    })
+    const out = await buildLiteRtConversationInput(
+      baseInput({
+        toolCalls: new Set([first, second]),
+        renderedToolCallResults: new Map([
+          [
+            first,
+            { type: 'tool_response', tool_response: { response: { content: 'Paris: 12C' } } },
+          ],
+          [
+            second,
+            { type: 'tool_response', tool_response: { response: { content: 'Tokyo: 25C' } } },
+          ],
+        ]),
+      }) as never
+    )
+    const toolResults = out.messages
+      .filter((message) => message.role === 'tool')
+      .map((message) => JSON.stringify(message.content))
+    expect(toolResults).toHaveLength(2)
+    expect(toolResults[0]).toContain('Paris: 12C')
+    expect(toolResults[1]).toContain('Tokyo: 25C')
+  })
+
   it("DEFAULT ('prompt'): tool defs land in the system prompt, preface.tools is UNSET", async () => {
     const out = await buildLiteRtConversationInput(baseInput({}) as never)
     // The Gemma-4 template throws on native tools → they must NOT be passed via preface.tools.

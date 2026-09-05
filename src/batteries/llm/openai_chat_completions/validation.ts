@@ -329,6 +329,7 @@ export const openAIChatCompletionsOptionsSchema = validator
     onRawGeneration: validator.function().optional(),
     onPromptAssembled: validator.function().optional(),
     localToolCallParser: localToolCallParserSchema,
+    toolCallIdFilter: validator.function().optional(),
     forgeToolsFilter: validator.function().optional(),
   })
   .unknown(false)

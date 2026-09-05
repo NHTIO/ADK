@@ -218,6 +218,13 @@ export type ToolCallMutateFn = (ctx: TurnContext, v: ToolCall) => void | Promise
 /** Removes a tool call from the persistence layer by ID. */
 export type ToolCallDeleteFn = (ctx: TurnContext, id: string) => void | Promise<void>
 
+/** Optionally persists a complete tool-call group replacement atomically. */
+export type ToolCallGroupReplaceFn = (
+  ctx: TurnContext,
+  removedIds: readonly string[],
+  replacements: readonly ToolCall[]
+) => void | Promise<void>
+
 /**
  * Persists tool-generated media bytes into consumer storage and returns a {@link @nhtio/adk!MediaReader}.
  * A byte-persistence conduit, not a mutation — returns a value and touches no turn state.
@@ -300,6 +307,8 @@ interface TurnRunnerInjected {
   mutateToolCall: ToolCallMutateFn
   /** Removes a tool call from the persistence layer by ID. */
   deleteToolCall: ToolCallDeleteFn
+  /** Optionally persists a complete tool-call group replacement atomically. */
+  replaceToolCallGroup?: ToolCallGroupReplaceFn
   /** Persists tool-generated media bytes; returns a `MediaReader`. */
   storeMediaBytes: MediaBytesStoreFn
   /** Persists extracted retrievable text bytes; returns a `SpoolReader`. */
@@ -650,6 +659,53 @@ export class TurnContext {
         configurable: false,
         writable: false,
       },
+      replaceToolCallGroup: {
+        value: async (ids: readonly string[], replacements: readonly ToolCall[]) => {
+          if (injected.replaceToolCallGroup) {
+            await injected.replaceToolCallGroup(this, ids, replacements)
+          } else {
+            // Degrade to the ordinary persistence conduits when no transaction is available. Carry
+            // the deletion progress out on the error: without it a failed repair tells a consumer
+            // only THAT it failed, leaving a partially mutated store with nothing to reconcile
+            // against. Mirrors DispatchContext's degraded path.
+            const deletedIds: string[] = []
+            try {
+              for (const id of ids) {
+                await injected.deleteToolCall(this, id)
+                deletedIds.push(id)
+              }
+              for (const replacement of replacements)
+                await injected.storeToolCall(this, replacement)
+            } catch (error) {
+              if (isError(error))
+                (error as Error & { deletedIds: string[] }).deletedIds = [...deletedIds]
+              throw error
+            }
+          }
+          // Persistence committed — now bring the in-memory collection in line, on BOTH paths.
+          // `#doStoreToolCall`/`#doMutateToolCall` maintain this Set; a group replacement that
+          // skipped it would leave the turn holding the colliding calls it just renamed away, and
+          // the next dispatch seeded from this turn would re-process them and diverge from what
+          // was persisted. Replacements land at the position of the first removed member so
+          // insertion order is preserved.
+          const removing = new Set(ids)
+          const next = new Set<ToolCall>()
+          let inserted = false
+          for (const tc of this.#turnToolCalls) {
+            if (removing.has(tc.id)) {
+              if (!inserted) {
+                for (const replacement of replacements) next.add(replacement)
+                inserted = true
+              }
+            } else next.add(tc)
+          }
+          if (!inserted) for (const replacement of replacements) next.add(replacement)
+          this.#turnToolCalls = next
+        },
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      },
       storeMediaBytes: {
         value: (id: string, bytes: ConduitBytes) => injected.storeMediaBytes(this, id, bytes),
         enumerable: true,
@@ -787,6 +843,11 @@ export class TurnContext {
   declare readonly mutateToolCall: (v: ToolCall) => void | Promise<void>
   /** Removes a tool call from the persistence layer by ID. */
   declare readonly deleteToolCall: (id: string) => void | Promise<void>
+  /** Replaces a complete colliding tool-call group when storage supports it. */
+  declare readonly replaceToolCallGroup: (
+    ids: readonly string[],
+    replacements: readonly ToolCall[]
+  ) => Promise<void>
   /**
    * Persists tool-generated media bytes into consumer storage and returns a {@link @nhtio/adk!MediaReader}.
    * Low-level conduit — returns a value, touches no turn state; build a {@link @nhtio/adk!Media} from the

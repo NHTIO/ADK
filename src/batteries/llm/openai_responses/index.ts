@@ -22,6 +22,7 @@
  */
 
 export { OpenAIResponsesAdapter } from './adapter'
+export { deCollideToolCallIds } from '../chat_common'
 
 export {
   descriptionToChatCompletionsJsonSchema,
@@ -79,6 +80,7 @@ export {
   createResponsesOutputSlotMachine,
   defaultCreateResponsesOutputSlotMachine,
   normalizeOpenAIResponsesItemId,
+  deCollideOpenAIResponsesToolCallIds,
 } from './helpers'
 
 export type {
@@ -95,6 +97,7 @@ export type {
   UnsupportedMediaPolicy,
   ChatCompletionsRetryConfig,
   ChatHelpersCommon,
+  ToolCallIdFilterFn,
   ToolCallParserName,
   ToolCallParserFn,
   OpenAIResponsesInputContentBlock,

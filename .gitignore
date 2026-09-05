@@ -39,3 +39,5 @@ docs/.vitepress/config.mts.timestamp-*
 # Evaluation OUTPUT under research/ — judge verdicts, run dumps. The harness SCRIPTS in this
 # directory are deliberately tracked as reproducibility artifacts; only their results are ignored.
 /research/*.json
+# Fleet delegation specs — orchestration scaffolding, not shipped source.
+.fleet/

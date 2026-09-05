@@ -531,6 +531,9 @@ describe('AnthropicMessagesAdapter — non-streaming + streaming execution', () 
     expect(ctx._stored.toolCalls).toHaveLength(1)
     expect(ctx._stored.toolCalls[0]!.args).toEqual({ query: 'x' })
     expect(ctx._stored.toolCalls[0]!.isError).toBe(false)
+    // Exercises the adapter's real constructor → executor option resolution: absent filter preserves
+    // the provider id byte-for-byte (D1), rather than testing a local identity helper.
+    expect(ctx._stored.toolCalls[0]!.id).toBe('tool_1')
     expect(ctx._stored.toolCalls[0]!.results.toString()).not.toContain(
       'E_ANTHROPIC_MESSAGES_INVALID_TOOL_CALL_ARGS'
     )
@@ -1247,5 +1250,87 @@ describe('AnthropicMessagesAdapter — request body footguns are warned, not rep
     }).executor()(ctx, makeHelpers())
 
     expect(ctx.nack).toHaveBeenCalledWith(expect.any(E_ANTHROPIC_MESSAGES_HTTP_ERROR))
+  })
+})
+
+describe('AnthropicMessagesAdapter — toolCallIdFilter ingress', () => {
+  const runToolTurn = async (opts: {
+    ctx: MockCtx
+    adapterOptions?: Record<string, unknown>
+    executorOverrides?: Record<string, unknown>
+  }): Promise<void> => {
+    const { ctx, adapterOptions = {}, executorOverrides } = opts
+    const adapter = new AnthropicMessagesAdapter({
+      apiKey: 'sk-ant-test-key',
+      model: 'claude-opus-5',
+      maxTokens: 64,
+      stream: false,
+      fetch: cassetteFetch(
+        singleAnthropicResponseCassette('tool-call-id-filter', {
+          content: 'before tool',
+          toolUses: [{ id: 'tool_1', name: 'search_docs', input: { query: 'x' } }],
+          stopReason: 'tool_use',
+        })
+      ) as never,
+      ...adapterOptions,
+    })
+    await adapter.executor(executorOverrides as never)(ctx, makeHelpers())
+  }
+
+  it('D1: with NO toolCallIdFilter configured, the provider id reaches the persisted ToolCall unchanged', async () => {
+    // Exercises the adapter's REAL constructor → executor option-resolution path (absent filter is
+    // identity), not a helper defined in this spec. Mirrors openai_chat_completions/adapter.cross.spec.ts.
+    const ctx = makeCtx({
+      turnMessages: [makeMessage({ content: 'ping' })],
+      tools: new ToolRegistry([
+        tool(
+          'search_docs',
+          vi.fn(async () => 'ok')
+        ),
+      ]),
+    })
+    await runToolTurn({ ctx })
+    expect(ctx._stored.toolCalls).toHaveLength(1)
+    expect(ctx._stored.toolCalls[0]!.id).toBe('tool_1')
+  })
+
+  it('applies a configured toolCallIdFilter to the persisted ToolCall.id', async () => {
+    const ctx = makeCtx({
+      turnMessages: [makeMessage({ content: 'ping' })],
+      tools: new ToolRegistry([
+        tool(
+          'search_docs',
+          vi.fn(async () => 'ok')
+        ),
+      ]),
+    })
+    await runToolTurn({
+      ctx,
+      adapterOptions: { toolCallIdFilter: () => 'filtered-id' },
+    })
+    expect(ctx._stored.toolCalls).toHaveLength(1)
+    // The persisted id must be the FILTERED value, not the provider's 'tool_1'.
+    expect(ctx._stored.toolCalls[0]!.id).toBe('filtered-id')
+  })
+
+  it('resolves toolCallIdFilter through the three-layer merge: constructor < executor < ctx.stash[STASH_KEY]', async () => {
+    const ctx = makeCtx({
+      turnMessages: [makeMessage({ content: 'ping' })],
+      tools: new ToolRegistry([
+        tool(
+          'search_docs',
+          vi.fn(async () => 'ok')
+        ),
+      ]),
+      stash: { [AnthropicMessagesAdapter.STASH_KEY]: { toolCallIdFilter: () => 'stash-id' } },
+    })
+    await runToolTurn({
+      ctx,
+      adapterOptions: { toolCallIdFilter: () => 'constructor-id' },
+      executorOverrides: { toolCallIdFilter: () => 'executor-id' },
+    })
+    expect(ctx._stored.toolCalls).toHaveLength(1)
+    // ctx.stash[STASH_KEY] has the highest precedence.
+    expect(ctx._stored.toolCalls[0]!.id).toBe('stash-id')
   })
 })

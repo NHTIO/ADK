@@ -580,7 +580,7 @@ export class LiteRtLmAdapter {
       //    Read the pre-forged `ctx.tools` directly — no local merge, no bindContext here.
 
       // 3. Pre-render persisted tool-call results into LiteRT tool_response content items.
-      const renderedToolCallResults = new Map<string, LiteRtMessageContentItem>()
+      const renderedToolCallResults = new Map<ToolCall, LiteRtMessageContentItem>()
       for (const tc of ctx.turnToolCalls) {
         const tool = ctx.tools.get(tc.tool)
         const item = await h.renderLiteRtToolResult({
@@ -593,7 +593,7 @@ export class LiteRtLmAdapter {
           renderArtifactHandleBody: h.renderArtifactHandleBody,
           warn: (m) => helpers.log.warn({ kind: 'litert-render-warning', message: m }),
         })
-        renderedToolCallResults.set(tc.id, item)
+        renderedToolCallResults.set(tc, item)
       }
 
       // 4. Optional context-window enforcement.

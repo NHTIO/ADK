@@ -216,6 +216,143 @@ describe('WebLLMChatCompletionsAdapter — engine invocation', () => {
     expect(stored?.content?.toString()).toBe('hello from webllm')
   })
 
+  it('keeps colliding ToolCall results paired by instance in the real adapter assembly', async () => {
+    const first = new ToolCall({
+      id: 'duplicate',
+      tool: 'lookup',
+      args: { city: 'Paris' },
+      results: new Tokenizable('Paris result'),
+      checksum: 'checksum-paris',
+      isComplete: true,
+      isError: false,
+      completedAt: dt('2026-01-01T12:00:00Z'),
+      createdAt: dt('2026-01-01T12:00:00Z'),
+      updatedAt: dt('2026-01-01T12:00:00Z'),
+    })
+    const second = new ToolCall({
+      id: 'duplicate',
+      tool: 'lookup',
+      args: { city: 'Tokyo' },
+      results: new Tokenizable('Tokyo result'),
+      checksum: 'checksum-tokyo',
+      isComplete: true,
+      isError: false,
+      completedAt: dt('2026-01-01T12:01:00Z'),
+      createdAt: dt('2026-01-01T12:01:00Z'),
+      updatedAt: dt('2026-01-01T12:01:00Z'),
+    })
+    const engine = makeEngine({ content: 'ok' })
+    const renderer = vi.fn(async ({ toolCall }: { toolCall: ToolCall }) =>
+      toolCall.results.toString()
+    )
+    const adapter = new WebLLMChatCompletionsAdapter({
+      model: 'm',
+      stream: false,
+      engine,
+      helpers: { renderChatCompletionsToolCallResult: renderer },
+    })
+    await adapter.executor()(makeCtx({ turnToolCalls: [first, second] }), makeHelpers())
+    // The cache must be hit by instance at assembly; an id-keyed cache misses the first instance and
+    // invokes the renderer again, so this assertion detects the old corruption rather than its fallback.
+    expect(renderer).toHaveBeenCalledTimes(2)
+    const toolMessages = (
+      engine.requests[0]?.messages as Array<{ role?: string; content?: unknown }>
+    ).filter((message) => message.role === 'tool')
+    expect(toolMessages.map((message) => message.content)).toEqual([
+      expect.stringContaining('Paris result'),
+      expect.stringContaining('Tokyo result'),
+    ])
+  })
+
+  it('preserves the provider id when no toolCallIdFilter is configured', async () => {
+    const engine = {
+      requests: [] as Array<Record<string, unknown>>,
+      chat: {
+        completions: {
+          create: vi.fn(async (request: Record<string, unknown>) => {
+            engine.requests.push(request)
+            return {
+              id: 'cmpl-tools',
+              choices: [
+                {
+                  message: {
+                    role: 'assistant',
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: 'provider-call-7',
+                        type: 'function',
+                        function: { name: 'lookup', arguments: '{}' },
+                      },
+                    ],
+                  },
+                },
+              ],
+            }
+          }),
+        },
+      },
+    }
+    const tool = new Tool({
+      name: 'lookup',
+      description: 'lookup',
+      inputSchema: validator.object().unknown(true),
+      handler: () => 'found',
+    })
+    const ctx = makeCtx({ tools: new ToolRegistry([tool]) })
+    const adapter = new WebLLMChatCompletionsAdapter({ model: 'm', stream: false, engine })
+    await adapter.executor()(ctx, makeHelpers())
+    expect(ctx._stored.toolCalls).toHaveLength(1)
+    expect(ctx._stored.toolCalls[0]?.id).toBe('provider-call-7')
+  })
+
+  it('applies toolCallIdFilter through the real adapter option-resolution path', async () => {
+    const engine = {
+      requests: [] as Array<Record<string, unknown>>,
+      chat: {
+        completions: {
+          create: vi.fn(async (request: Record<string, unknown>) => {
+            engine.requests.push(request)
+            return {
+              id: 'cmpl-tools',
+              choices: [
+                {
+                  message: {
+                    role: 'assistant',
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: 'provider-call-7',
+                        type: 'function',
+                        function: { name: 'lookup', arguments: '{}' },
+                      },
+                    ],
+                  },
+                },
+              ],
+            }
+          }),
+        },
+      },
+    }
+    const tool = new Tool({
+      name: 'lookup',
+      description: 'lookup',
+      inputSchema: validator.object().unknown(true),
+      handler: () => 'found',
+    })
+    const ctx = makeCtx({ tools: new ToolRegistry([tool]) })
+    const adapter = new WebLLMChatCompletionsAdapter({
+      model: 'm',
+      stream: false,
+      engine,
+      toolCallIdFilter: (id: string) => `filtered-${id}`,
+    })
+    await adapter.executor()(ctx, makeHelpers())
+    expect(ctx._stored.toolCalls).toHaveLength(1)
+    expect(ctx._stored.toolCalls[0]?.id).toBe('filtered-provider-call-7')
+  })
+
   it('supports lazy createEngine and reuses the created engine', async () => {
     const engine = makeEngine({ content: 'created' })
     const createEngine = vi.fn(async () => engine)

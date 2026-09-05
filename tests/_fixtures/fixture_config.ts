@@ -49,6 +49,9 @@ export interface FixtureConfigOverrides {
   deleteRetrievableCallback?: TurnRunnerConfig['deleteRetrievableCallback']
   refreshStandingInstructionsCallback?: TurnRunnerConfig['refreshStandingInstructionsCallback']
   storeMediaBytesCallback?: TurnRunnerConfig['storeMediaBytesCallback']
+  storeToolCallCallback?: TurnRunnerConfig['storeToolCallCallback']
+  deleteToolCallCallback?: TurnRunnerConfig['deleteToolCallCallback']
+  replaceToolCallGroupCallback?: TurnRunnerConfig['replaceToolCallGroupCallback']
 }
 
 /**
@@ -117,9 +120,17 @@ export const makeFixtureConfig = (overrides: FixtureConfigOverrides): TurnRunner
     storeThoughtCallback: async (_ctx, _v) => {},
     mutateThoughtCallback: async (_ctx, _v) => {},
     deleteThoughtCallback: async (_ctx, _id) => {},
-    storeToolCallCallback: async (_ctx, _v) => {},
+    storeToolCallCallback: overrides.storeToolCallCallback
+      ? async (_ctx, _v) => overrides.storeToolCallCallback!(_ctx, _v)
+      : async (_ctx, _v) => {},
     mutateToolCallCallback: async (_ctx, _v) => {},
-    deleteToolCallCallback: async (_ctx, _id) => {},
+    deleteToolCallCallback: overrides.deleteToolCallCallback
+      ? async (_ctx, _id) => overrides.deleteToolCallCallback!(_ctx, _id)
+      : async (_ctx, _id) => {},
+    replaceToolCallGroupCallback: overrides.replaceToolCallGroupCallback
+      ? async (_ctx, _ids, _replacements) =>
+          overrides.replaceToolCallGroupCallback!(_ctx, _ids, _replacements)
+      : undefined,
     storeMediaBytesCallback: overrides.storeMediaBytesCallback
       ? async (_ctx, id, bytes) => overrides.storeMediaBytesCallback!(_ctx, id, bytes)
       : async (_ctx, _id, bytes) => inMemoryMediaReader(await toBytes(bytes)),

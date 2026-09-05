@@ -138,12 +138,14 @@ export type {
   AnthropicMessagesErrorStatusInput,
   AnthropicMessagesErrorStatusResolver,
 } from './types'
+export type { ToolCallIdFilterFn } from '../chat_common/types'
 export type {
   AnthropicMessagesCountTokensRequestInput,
   AnthropicMessagesCountTokensDeps,
 } from './count_tokens'
 
 export { anthropicMessagesOptionsSchema, validateOptions } from './validation'
+export { deCollideToolCallIds } from '../chat_common'
 
 export { translateAnthropicError, CONTEXT_OVERFLOW_PHRASE } from './error_translation'
 export type { AnthropicErrorClassification } from './error_translation'

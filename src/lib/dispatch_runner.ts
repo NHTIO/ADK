@@ -411,6 +411,8 @@ export class DispatchRunner {
         storeToolCall: (_c, v) => source.storeToolCall(v),
         mutateToolCall: (_c, v) => source.mutateToolCall(v),
         deleteToolCall: (_c, id) => source.deleteToolCall(id),
+        replaceToolCallGroup: (_c, ids, replacements) =>
+          source.replaceToolCallGroup(ids, replacements),
         storeMediaBytes: (_c, id, bytes) => source.storeMediaBytes(id, bytes),
         storeRetrievableBytes: (_c, id, bytes) => source.storeRetrievableBytes(id, bytes),
         waitFor: source.waitFor,

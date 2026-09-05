@@ -26,6 +26,11 @@ const tc = (id: string, s: number, payload?: Record<string, unknown>) =>
   } as never)
 
 const emptyReg = { visible: () => [], all: () => [], get: () => undefined } as never
+const toolCall = tc('c1', 2)
+const firstCall = tc('c1', 2)
+const secondCall = tc('c2', 3)
+const signedCall = tc('c1', 2, { thoughtSignature: 'REAL-SIG' })
+const unsignedCall = tc('c1', 2)
 
 describe('gemini request assembly', () => {
   it('renders a ToolCall as model.functionCall + user.functionResponse', async () => {
@@ -36,9 +41,9 @@ describe('gemini request assembly', () => {
       retrievables: [],
       messages: [msg('m1', 'user', 1, 'Review the hunks.')],
       thoughts: [],
-      toolCalls: [tc('c1', 2)],
+      toolCalls: [toolCall],
       tools: emptyReg,
-      renderedToolCallResults: new Map([['c1', { result: '@@ -12,7 +12,9 @@' }]]),
+      renderedToolCallResults: new Map([[toolCall, { result: '@@ -12,7 +12,9 @@' }]]),
       bucketOrder: undefined as never,
       selfIdentity: 'assistant',
       thoughtSurfacing: 'all-self',
@@ -73,10 +78,10 @@ describe('gemini request assembly', () => {
     }
     const two = await buildGeminiRequest({
       ...base,
-      toolCalls: [tc('c1', 2), tc('c2', 3)],
+      toolCalls: [firstCall, secondCall],
       renderedToolCallResults: new Map([
-        ['c1', { result: 'a' }],
-        ['c2', { result: 'b' }],
+        [firstCall, { result: 'a' }],
+        [secondCall, { result: 'b' }],
       ]),
       thoughtSignatureSentinel: 'skip_thought_signature_validator',
     })
@@ -88,8 +93,8 @@ describe('gemini request assembly', () => {
 
     const real = await buildGeminiRequest({
       ...base,
-      toolCalls: [tc('c1', 2, { thoughtSignature: 'REAL-SIG' })],
-      renderedToolCallResults: new Map([['c1', { result: 'a' }]]),
+      toolCalls: [signedCall],
+      renderedToolCallResults: new Map([[signedCall, { result: 'a' }]]),
       thoughtSignatureSentinel: 'skip_thought_signature_validator',
     })
     expect(
@@ -98,13 +103,41 @@ describe('gemini request assembly', () => {
 
     const off = await buildGeminiRequest({
       ...base,
-      toolCalls: [tc('c1', 2)],
-      renderedToolCallResults: new Map([['c1', { result: 'a' }]]),
+      toolCalls: [unsignedCall],
+      renderedToolCallResults: new Map([[unsignedCall, { result: 'a' }]]),
       thoughtSignatureSentinel: false,
     })
     expect(
       off.contents.flatMap((c) => c.parts).find((p) => p.functionCall)?.thoughtSignature
     ).toBeUndefined()
+  })
+
+  it('keeps each duplicate-id call paired with its own result', async () => {
+    const first = tc('same-id', 2)
+    const second = tc('same-id', 3)
+    const req = await buildGeminiRequest({
+      systemPrompt: new Tokenizable('sys'),
+      standingInstructions: [],
+      memories: [],
+      retrievables: [],
+      messages: [],
+      thoughts: [],
+      toolCalls: [first, second],
+      tools: emptyReg,
+      renderedToolCallResults: new Map([
+        [first, { result: 'first result' }],
+        [second, { result: 'second result' }],
+      ]),
+      selfIdentity: 'assistant',
+      thoughtSurfacing: 'all-self',
+      replayCompatibility: [],
+      thoughtSignatureSentinel: false,
+      helpers: { toolsToGeminiTools } as never,
+    })
+    const responses = req.contents
+      .filter((content) => content.role === 'user')
+      .map((content) => content.parts[0].functionResponse?.response.result)
+    expect(responses).toEqual(['first result', 'second result'])
   })
 
   it('separates reasoning from visible text on extraction', () => {

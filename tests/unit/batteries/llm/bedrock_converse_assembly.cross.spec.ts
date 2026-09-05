@@ -4,7 +4,9 @@
  */
 import { DateTime } from 'luxon'
 import { describe, expect, it } from 'vitest'
-import { Message, ToolCall, Tokenizable } from '@nhtio/adk/common'
+import { validator } from '@nhtio/validation'
+import { Message, Tool, ToolCall, Tokenizable, ToolRegistry } from '@nhtio/adk/common'
+import { BedrockConverseAdapter } from '../../../../src/batteries/llm/bedrock_converse/adapter'
 import {
   buildConverseRequest,
   enforceConverseAlternation,
@@ -17,7 +19,7 @@ import type { ConverseMessage } from '../../../../src/batteries/llm/bedrock_conv
 const at = (s: number) => DateTime.fromMillis(s * 1000)
 const msg = (id: string, role: 'user' | 'assistant', s: number, c: string) =>
   new Message({ id, role, content: c, createdAt: at(s), updatedAt: at(s) })
-const tc = (id: string, s: number) =>
+const tc = (id: string, s: number, result = '42 lines') =>
   new ToolCall({
     id,
     tool: 'read_file',
@@ -25,7 +27,7 @@ const tc = (id: string, s: number) =>
     checksum: id,
     isComplete: true,
     isError: false,
-    results: new Tokenizable('42 lines'),
+    results: new Tokenizable(result),
     createdAt: at(s),
     updatedAt: at(s),
     completedAt: at(s),
@@ -47,12 +49,127 @@ const base = {
 }
 
 describe('bedrock converse assembly', () => {
+  it('applies toolCallIdFilter through the real adapter option-resolution path', async () => {
+    const stored: ToolCall[] = []
+    const tool = new Tool({
+      name: 'echo',
+      description: 'echo',
+      inputSchema: validator.object({ value: validator.string().required() }),
+      handler: () => 'ok',
+    })
+    const ctx = {
+      systemPrompt: new Tokenizable('system'),
+      standingInstructions: new Set(),
+      turnMemories: new Set(),
+      turnRetrievables: new Set(),
+      turnMessages: new Set(),
+      turnThoughts: new Set(),
+      turnToolCalls: new Set(),
+      tools: new ToolRegistry([tool]),
+      stash: { get: () => ({}) },
+      abortSignal: new AbortController().signal,
+      storeMessage: async () => undefined,
+      storeThought: async () => undefined,
+      storeToolCall: async (call: ToolCall) => void stored.push(call),
+      ack: () => undefined,
+      nack: () => undefined,
+    } as never
+    const adapter = new BedrockConverseAdapter({
+      model: 'm',
+      toolCallIdFilter: (id: string) => `filtered-${id}`,
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            output: {
+              message: {
+                content: [
+                  { toolUse: { toolUseId: 'provider/id:7', name: 'echo', input: { value: 'x' } } },
+                ],
+              },
+            },
+            stopReason: 'tool_use',
+          }),
+          { status: 200 }
+        ),
+    })
+    await adapter.executor()(ctx, {
+      reportMessage: () => undefined,
+      reportThought: () => undefined,
+      reportToolCall: () => undefined,
+      log: {
+        trace: () => undefined,
+        debug: () => undefined,
+        info: () => undefined,
+        warn: () => undefined,
+        error: () => undefined,
+      },
+    } as never)
+    expect(stored[0]?.id).toBe('filtered-provider/id:7')
+  })
+
+  it('preserves a provider id unchanged when no filter is configured', async () => {
+    const stored: ToolCall[] = []
+    const tool = new Tool({
+      name: 'echo',
+      description: 'echo',
+      inputSchema: validator.object({ value: validator.string().required() }),
+      handler: () => 'ok',
+    })
+    const ctx = {
+      systemPrompt: new Tokenizable('system'),
+      standingInstructions: new Set(),
+      turnMemories: new Set(),
+      turnRetrievables: new Set(),
+      turnMessages: new Set(),
+      turnThoughts: new Set(),
+      turnToolCalls: new Set(),
+      tools: new ToolRegistry([tool]),
+      stash: { get: () => ({}) },
+      abortSignal: new AbortController().signal,
+      storeMessage: async () => undefined,
+      storeThought: async () => undefined,
+      storeToolCall: async (call: ToolCall) => void stored.push(call),
+      ack: () => undefined,
+      nack: () => undefined,
+    } as never
+    const adapter = new BedrockConverseAdapter({
+      model: 'm',
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            output: {
+              message: {
+                content: [
+                  { toolUse: { toolUseId: 'provider/id:7', name: 'echo', input: { value: 'x' } } },
+                ],
+              },
+            },
+            stopReason: 'tool_use',
+          }),
+          { status: 200 }
+        ),
+    })
+    await adapter.executor()(ctx, {
+      reportMessage: () => undefined,
+      reportThought: () => undefined,
+      reportToolCall: () => undefined,
+      log: {
+        trace: () => undefined,
+        debug: () => undefined,
+        info: () => undefined,
+        warn: () => undefined,
+        error: () => undefined,
+      },
+    } as never)
+    expect(stored[0]?.id).toBe('provider/id:7')
+  })
   it('renders a ToolCall as assistant.toolUse + user.toolResult, with system out-of-band', async () => {
+    const call = tc('c1', 2)
     const req = await buildConverseRequest({
       ...base,
       messages: [msg('m1', 'user', 1, 'Review the hunks.')],
-      toolCalls: [tc('c1', 2)],
-      renderedToolCallResults: new Map([['c1', [{ text: '42 lines' }]]]),
+      toolCalls: [call],
+      renderedToolCallResults: new Map([[call, [{ text: '42 lines' }]]]),
     })
     expect(req.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user'])
     expect(req.messages[1].content[0].toolUse?.name).toBe('read_file')
@@ -61,6 +178,24 @@ describe('bedrock converse assembly', () => {
     // System text is top-level, never a turn.
     expect(req.system?.[0].text).toContain('You are a reviewer.')
     expect(JSON.stringify(req.messages)).not.toContain('You are a reviewer.')
+  })
+
+  it('keeps colliding ToolCalls paired with their own results', async () => {
+    const first = tc('duplicate', 2, 'Paris')
+    const second = tc('duplicate', 3, 'Tokyo')
+    const req = await buildConverseRequest({
+      ...base,
+      messages: [],
+      toolCalls: [first, second],
+      renderedToolCallResults: new Map([
+        [first, [{ text: 'Paris result' }]],
+        [second, [{ text: 'Tokyo result' }]],
+      ]),
+    })
+    const results = req.messages
+      .map((m) => m.content[0]?.toolResult?.content[0]?.text)
+      .filter((text): text is string => text !== undefined)
+    expect(results).toEqual(['Paris result', 'Tokyo result'])
   })
 
   it('backfills a tool declaration for history replay, because an EMPTY tools[] is also rejected', async () => {
@@ -73,7 +208,7 @@ describe('bedrock converse assembly', () => {
       ...base,
       messages: [msg('m1', 'user', 1, 'go')],
       toolCalls: [tc('c1', 2)],
-      renderedToolCallResults: new Map([['c1', [{ text: 'ok' }]]]),
+      renderedToolCallResults: new Map([[tc('c1', 2), [{ text: 'ok' }]]]),
     })
     expect(req.toolConfig).toBeDefined()
     expect(req.toolConfig?.tools).toHaveLength(1)

@@ -7,7 +7,14 @@
 
 import { DateTime } from 'luxon'
 import { describe, expect, it, vi } from 'vitest'
-import { Media, Message, Tokenizable, ToolRegistry, inMemoryMediaReader } from '@nhtio/adk/common'
+import {
+  Media,
+  Message,
+  Tokenizable,
+  ToolCall,
+  ToolRegistry,
+  inMemoryMediaReader,
+} from '@nhtio/adk/common'
 import {
   buildTransformersJsMessages,
   mediaToTransformersInput,
@@ -36,7 +43,7 @@ const baseDeps = {
   thoughts: [],
   toolCalls: [],
   tools: new ToolRegistry(),
-  renderedToolCallResults: new Map<string, string>(),
+  renderedToolCallResults: new Map<ToolCall, string>(),
   bucketOrder: ['timeline'] as const,
   selfIdentity: 'agent',
   thoughtSurfacing: 'all-self' as const,
@@ -81,6 +88,50 @@ const makeImageMessage = (overrides: { stash?: boolean } = {}): Message => {
     updatedAt: now,
   })
 }
+
+describe('transformers_js — results are keyed by ToolCall instance', () => {
+  it('renders each colliding-id call with its own pre-rendered result', async () => {
+    const createdAt = DateTime.fromISO('2026-01-01T12:00:00Z')
+    const first = new ToolCall({
+      id: 'call_0',
+      tool: 'lookup',
+      args: { city: 'Paris' },
+      checksum: 'first',
+      isComplete: true,
+      isError: false,
+      results: new Tokenizable('Paris: 18C'),
+      createdAt,
+      updatedAt: createdAt,
+      completedAt: createdAt,
+    })
+    const second = new ToolCall({
+      id: 'call_0',
+      tool: 'lookup',
+      args: { city: 'Tokyo' },
+      checksum: 'second',
+      isComplete: true,
+      isError: false,
+      results: new Tokenizable('Tokyo: 25C'),
+      createdAt: createdAt.plus({ seconds: 1 }),
+      updatedAt: createdAt.plus({ seconds: 1 }),
+      completedAt: createdAt.plus({ seconds: 1 }),
+    })
+
+    const out = await buildTransformersJsMessages({
+      ...baseDeps,
+      messages: [],
+      toolCalls: [first, second],
+      renderedToolCallResults: new Map([
+        [first, 'Paris: 18C'],
+        [second, 'Tokyo: 25C'],
+      ]),
+    })
+
+    expect(
+      out.messages.filter((message) => message.role === 'tool').map((message) => message.content)
+    ).toEqual(['Paris: 18C', 'Tokyo: 25C'])
+  })
+})
 
 describe('transformers_js — decode-failure containment', () => {
   it("a throwing decodeMedia under 'synthetic-description' degrades to a text block (no throw escapes)", async () => {

@@ -244,6 +244,7 @@ export const openAIResponsesOptionsSchema = validator
     stream_options: streamOptionsSchema.optional(),
     onRawGeneration: validator.function().optional(),
     onPromptAssembled: validator.function().optional(),
+    toolCallIdFilter: validator.function().optional(),
     localToolCallParser: localToolCallParserSchema,
     forgeToolsFilter: validator.function().optional(),
   })

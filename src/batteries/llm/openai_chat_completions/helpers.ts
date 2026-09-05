@@ -687,7 +687,7 @@ export const buildChatCompletionsHistory = async (input: {
   thoughts: Iterable<Thought>
   toolCalls: Iterable<ToolCall>
   tools: ToolRegistry
-  renderedToolCallResults: Map<string, string | ChatCompletionsContentBlock[]>
+  renderedToolCallResults: Map<ToolCall, string | ChatCompletionsContentBlock[]>
   bucketOrder: ChatCompletionsBucketOrder
   selfIdentity: string
   thoughtSurfacing: 'all-self' | 'latest-self' | 'all'
@@ -851,7 +851,7 @@ export const buildChatCompletionsHistory = async (input: {
         }
         out.push(assistantMsg)
 
-        let rendered = input.renderedToolCallResults.get(tc.id)
+        let rendered = input.renderedToolCallResults.get(tc)
         if (rendered === undefined) {
           const tool = input.tools.get?.(tc.tool)
           rendered = await input.renderChatCompletionsToolCallResult({

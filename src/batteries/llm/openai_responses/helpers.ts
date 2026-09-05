@@ -20,6 +20,7 @@
  * machine) are defined here.
  */
 
+import { v6 as uuidv6 } from 'uuid'
 import { Media } from '@nhtio/adk/common'
 import { E_OPENAI_RESPONSES_UNSUPPORTED_MEDIA_MODALITY } from './exceptions'
 import {
@@ -39,7 +40,9 @@ import {
   defaultRenderTrustedContent,
   defaultRenderUntrustedContent,
 } from '../chat_common/helpers'
+import type { DispatchContext } from '@nhtio/adk/types'
 import type { ChatHelpersCommon } from '../chat_common/types'
+
 import type {
   Tool,
   ArtifactTool,
@@ -70,6 +73,15 @@ import type {
   JsonSchema,
   ReasoningReplayMode,
 } from './types'
+
+/** De-collides a Responses id while preserving a valid `fc_` item discriminator. */
+export const deCollideOpenAIResponsesToolCallIds = (id: string, ctx: DispatchContext): string => {
+  if (![...ctx.turnToolCalls].some((tc) => tc.id === id)) return id
+  const separator = id.indexOf('|')
+  if (separator < 0) return uuidv6()
+  const itemId = id.slice(separator + 1)
+  return itemId.startsWith('fc_') ? `${uuidv6()}|${itemId}` : uuidv6()
+}
 
 // ─── Re-exported wire-shape-agnostic helpers (shared submodule) ───────────────
 // These are defined once in `../chat_common/helpers` and shared with the other Chat-family
@@ -867,7 +879,7 @@ export const buildOpenAIResponsesInput = async (
         }
         items.push(functionCallItem)
 
-        let rendered = input.renderedToolCallResults.get(tc.id)
+        let rendered = input.renderedToolCallResults.get(tc)
         if (rendered === undefined) {
           const tool = input.tools.get(tc.tool)
           rendered = await input.renderOpenAIResponsesToolCallResult({

@@ -40,6 +40,7 @@ import type {
   ChatHelpersCommon,
   RawGenerationObserverFn,
   PromptAssembledObserverFn,
+  ToolCallIdFilterFn,
 } from '../chat_common/types'
 
 // ─── Re-exported shared (wire-shape-agnostic) types ───────────────────────────
@@ -60,6 +61,7 @@ export type {
   ChatHelpersCommon,
 } from '../chat_common/types'
 export type { ToolCallParserName, ToolCallParserFn } from '../chat_common/tool_parsers'
+export type { ToolCallIdFilterFn } from '../chat_common/types'
 
 // ─── think control ────────────────────────────────────────────────────────────
 
@@ -298,7 +300,8 @@ export interface OllamaHelpers extends ChatHelpersCommon {
     thoughts: Iterable<Thought>
     toolCalls: Iterable<ToolCall>
     tools: ToolRegistry
-    renderedToolCallResults: Map<string, string>
+    /** Pre-rendered results keyed by the live ToolCall instances used during assembly. */
+    renderedToolCallResults: Map<ToolCall, string>
     bucketOrder: ChatCompletionsBucketOrder
     selfIdentity: string
     thoughtSurfacing: 'all-self' | 'latest-self' | 'all'
@@ -424,6 +427,8 @@ export interface OllamaAdapterOptions {
    * which parse from text unconditionally because those runtimes never return structured calls.
    */
   localToolCallParser?: ToolCallParserName | ToolCallParserFn
+  /** Optional ingress hook for adapting provider tool-call ids; absent preserves the incoming id. */
+  toolCallIdFilter?: ToolCallIdFilterFn
   /**
    * OPTIONAL hook to SHAPE the artifact-query tools forged from prior-turn SpooledArtifact results, before
    * they merge into the visible tool set.

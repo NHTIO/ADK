@@ -24,6 +24,7 @@
  */
 
 export { OllamaAdapter } from './adapter'
+export { deCollideToolCallIds } from '../chat_common'
 
 export {
   descriptionToChatCompletionsJsonSchema,
@@ -79,6 +80,7 @@ export type {
   UnsupportedMediaPolicy,
   ChatCompletionsRetryConfig,
   ChatHelpersCommon,
+  ToolCallIdFilterFn,
   OllamaThink,
   OllamaFormat,
   OllamaRuntimeOptions,

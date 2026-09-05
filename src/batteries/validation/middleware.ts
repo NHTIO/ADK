@@ -1,10 +1,11 @@
+import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
 import { getOrderingProfile } from './profiles'
-import { isInstanceOf } from '@nhtio/adk/guards'
-import { createOrderingViolationError } from './exceptions'
+import { isInstanceOf, isError } from '@nhtio/adk/guards'
 import { Message, Thought, ToolCall } from '@nhtio/adk/common'
 import { FAMILY_RECIPES, resolveFamilyRecipe } from './profiles/families'
 import { ENCODE_METHOD, DECODE_METHOD } from '../../lib/utils/encoder_symbols'
+import { createOrderingRepairError, createOrderingViolationError } from './exceptions'
 import {
   buildOrderingTimeline,
   evaluateOrderingProfile,
@@ -83,6 +84,7 @@ type GuardContext = Pick<
   | 'mutateToolCall'
   | 'mutateThought'
 > &
+  Partial<Pick<DispatchContext, 'replaceToolCallGroup' | 'storeToolCall' | 'deleteToolCall'>> &
   // Optional: `toolIdentity` and `schemaIntegrity` read the request's declared tools, and
   // `deleteMessage` reaps this guard's own spent fillers. Optional so every existing caller — and
   // every test double — keeps working without them.
@@ -212,9 +214,11 @@ const logRepair = (repair: OrderingRepair): void => {
 const enforceViolation = (
   ctx: GuardContext,
   options: OrderingGuardOptions,
-  violations: BlockingOrderingViolation[]
+  violations: BlockingOrderingViolation[],
+  cause?: unknown
 ): void => {
   const error = createOrderingViolationError(violations.length, violations[0].detail, violations)
+  if (cause !== undefined) (error as Error & { cause?: unknown }).cause = cause
   if (options.onViolation === 'throw') throw error
   if (ctx.nack) ctx.nack(error)
   else ctx.abort(error)
@@ -228,127 +232,211 @@ const applyRepairs = async (
 ): Promise<{
   timeline: OrderingTimelineEntry[]
   placement: Map<string, string>
+  completed: OrderingRepair[]
+  failures: { repair: OrderingRepair; error: Error; deletedIds: string[] }[]
 }> => {
   const synthetic: OrderingTimelineEntry[] = []
   const syntheticPlacement = new Map<string, string>()
   const effective = timeline.map((entry) => ({ ...entry }))
+  const completed: OrderingRepair[] = []
+  const failures: { repair: OrderingRepair; error: Error; deletedIds: string[] }[] = []
   for (const repair of repairs) {
-    if (repair.strategy === 'fill-required-metadata') {
-      const rule = profiles
-        .find((p) => p.name === repair.violation.profileName)
-        ?.rules.find((r) => r.id === repair.violation.ruleId)
-      const entry = effective.find((e) => idOf(e) === repair.violation.primitiveIds[0])
-      if (rule?.type !== 'requiredMetadata' || rule.fallbackPayloadValue === undefined || !entry)
-        continue
-      if (entry.kind === 'message') {
-        // Message has no payload field; this repair cannot materialize on messages.
+    try {
+      if (repair.strategy === 'fill-required-metadata') {
+        const rule = profiles
+          .find((p) => p.name === repair.violation.profileName)
+          ?.rules.find((r) => r.id === repair.violation.ruleId)
+        const entry = effective.find((e) => idOf(e) === repair.violation.primitiveIds[0])
+        if (rule?.type !== 'requiredMetadata' || rule.fallbackPayloadValue === undefined || !entry)
+          continue
+        if (entry.kind === 'message') {
+          // Message has no payload field; this repair cannot materialize on messages.
+          continue
+        }
+        const snapshot = {
+          ...((entry.value as ToolCall | Thought)[ENCODE_METHOD]() as Record<string, unknown>),
+        }
+        const payload =
+          snapshot.payload && typeof snapshot.payload === 'object'
+            ? { ...(snapshot.payload as Record<string, unknown>) }
+            : {}
+        setDotPath(payload, rule.requiredPayloadKey, rule.fallbackPayloadValue)
+        snapshot.payload = payload
+        if (
+          snapshot.replayCompatibility === undefined &&
+          rule.fallbackReplayCompatibility !== undefined
+        )
+          snapshot.replayCompatibility = rule.fallbackReplayCompatibility
+        const replacement =
+          entry.kind === 'toolCall'
+            ? ToolCall[DECODE_METHOD](snapshot as never)
+            : Thought[DECODE_METHOD](snapshot as never)
+        if (entry.kind === 'toolCall') await ctx.mutateToolCall(replacement as ToolCall)
+        else await ctx.mutateThought(replacement as Thought)
+        effective[effective.indexOf(entry)] = { ...entry, value: replacement }
+        completed.push(repair)
         continue
       }
-      const snapshot = {
-        ...((entry.value as ToolCall | Thought)[ENCODE_METHOD]() as Record<string, unknown>),
+      if (repair.strategy === 'renumber-colliding-ids') {
+        // A collision violation intentionally repeats the shared id for every member. Resolve the
+        // group by scanning timeline entries once, rather than calling find once per id: find would
+        // return the first colliding entry for every occurrence and silently drop its siblings.
+        const group = timeline
+          .filter((entry) => repair.violation.primitiveIds.includes(idOf(entry)))
+          .sort((a, b) => a.seq - b.seq)
+        if (
+          group.length !== repair.violation.primitiveIds.length ||
+          group.some((e) => e.kind !== 'toolCall')
+        )
+          continue
+        const rule = profiles
+          .flatMap((profile) => profile.rules)
+          .find((candidate) => candidate.id === repair.violation.ruleId)
+        const rename = rule?.type === 'identifierUniqueness' ? rule.renameStrategy : undefined
+        // The member index is what a deterministic strategy varies on: every member of the group
+        // shares one id, so `previousId` alone cannot tell them apart.
+        const replacementIds = group.map((entry, index) => rename?.(idOf(entry), index) ?? uuidv6())
+        // Uniqueness has to hold against the WHOLE timeline, not just within the group: a strategy
+        // that returns an id belonging to an unrelated call would re-point that call's results.
+        const occupiedIds = new Set(
+          effective
+            .filter((entry) => !repair.violation.primitiveIds.includes(idOf(entry)))
+            .map(idOf)
+        )
+        if (
+          replacementIds.some((id) => typeof id !== 'string') ||
+          new Set(replacementIds).size !== replacementIds.length ||
+          replacementIds.some((id) => occupiedIds.has(id))
+        )
+          throw new Error('Identifier rename strategy returned colliding ids')
+        const replacements = group.map((entry, index) => {
+          const raw = {
+            ...(entry.value[ENCODE_METHOD]() as Record<string, unknown>),
+            id: replacementIds[index],
+          }
+          return ToolCall[DECODE_METHOD](raw as never)
+        })
+        const ids = group.map((entry) => idOf(entry))
+        if (!ctx.replaceToolCallGroup || !ctx.storeToolCall || !ctx.deleteToolCall) {
+          const error = createOrderingRepairError(
+            'Tool-call group replacement is unavailable on this context',
+            new Error('Tool-call group replacement is unavailable on this context'),
+            ids,
+            []
+          )
+          failures.push({ repair, error, deletedIds: [] })
+          continue
+        }
+        await ctx.replaceToolCallGroup(ids, replacements)
+        for (const [i, element] of group.entries()) {
+          const index = effective.findIndex((entry) => entry.seq === element.seq)
+          if (index >= 0) effective[index] = { ...effective[index], value: replacements[i] }
+        }
+        completed.push(repair)
+        continue
       }
-      const payload =
-        snapshot.payload && typeof snapshot.payload === 'object'
-          ? { ...(snapshot.payload as Record<string, unknown>) }
-          : {}
-      setDotPath(payload, rule.requiredPayloadKey, rule.fallbackPayloadValue)
-      snapshot.payload = payload
-      if (
-        snapshot.replayCompatibility === undefined &&
-        rule.fallbackReplayCompatibility !== undefined
+      // `reorder-adjacent` (adjacency) and `reorder` (order) differ in how helpers.ts CHOOSES the
+      // pair, not in how the move is applied: both name a target to place before a blocker, and both
+      // populate the same typed fields. One materialiser serves both.
+      if (repair.strategy === 'reorder' || repair.strategy === 'reorder-adjacent') {
+        // Typed fields, not a prose-parsing regex against `detail` — `detail` is a human-readable
+        // description that can legitimately be reworded in helpers.ts without this consumer noticing,
+        // and a silently-broken parse here would let a violation continue to report as "repaired"
+        // while never actually reaching the live turn state.
+        const targetId = repair.targetId
+        const blockerId = repair.blockerId
+        const targetEntry = targetId ? effective.find((e) => idOf(e) === targetId) : undefined
+        const blockerEntry = blockerId ? effective.find((e) => idOf(e) === blockerId) : undefined
+        if (!targetEntry || !blockerEntry) continue
+        // Timestamps, not array position, are what every LLM adapter's own history assembly sorts
+        // by — moving `targetEntry` in this in-memory copy alone never reaches the wire. Nudge its
+        // createdAt to sort at or before `blockerEntry`'s so the real turn state (not just this
+        // guard's own bookkeeping) reflects the repaired order on the next timeline build.
+        //
+        // Never goes negative: some parts of this codebase (e.g. the context/compact summarizer) use
+        // epoch-zero as a documented "sort before every real turn" sentinel — shifting a repaired
+        // primitive to a NEGATIVE timestamp would sort it before that sentinel, inverting its
+        // meaning, and a negative value can also throw inside `new Date(at).toISOString()`. When the
+        // blocker is already at epoch zero, `at` ties rather than strictly precedes — this alone does
+        // NOT guarantee the fix, so it is deliberately NOT reported as repaired here; the mandatory
+        // post-repair re-evaluation (in runGuard, below) is what actually decides whether a tie
+        // still resolves the violation (a tie can still resolve it, since the timeline's own tie-break
+        // on identical timestamps is the target's position within its Set, and #replaceById-style
+        // repairs preserve that position rather than moving the primitive to the end) — this comment
+        // exists so a future reader doesn't mistake the clamp itself for the correctness guarantee.
+        const at = Math.max(0, blockerEntry.at - 1)
+        const snapshot = {
+          ...(targetEntry.value[ENCODE_METHOD]() as Record<string, unknown>),
+          createdAt: new Date(at).toISOString(),
+        }
+        const replacement =
+          targetEntry.kind === 'toolCall'
+            ? ToolCall[DECODE_METHOD](snapshot as never)
+            : targetEntry.kind === 'thought'
+              ? Thought[DECODE_METHOD](snapshot as never)
+              : Message[DECODE_METHOD](snapshot as never)
+        if (targetEntry.kind === 'toolCall') await ctx.mutateToolCall(replacement as ToolCall)
+        else if (targetEntry.kind === 'thought') await ctx.mutateThought(replacement as Thought)
+        else await ctx.mutateMessage(replacement as Message)
+        const index = effective.indexOf(targetEntry)
+        effective[index] = { ...targetEntry, at, value: replacement }
+        completed.push(repair)
+        continue
+      }
+      const [firstId, secondId] = repair.violation.primitiveIds
+      const first = timeline.find((entry) => idOf(entry) === firstId)
+      const second = timeline.find((entry) => idOf(entry) === secondId)
+      if (!first || !second) continue
+      const role = first.role === 'user' ? 'assistant' : 'user'
+      const at = (first.at + second.at) / 2
+      // A CONTENT-FREE id. It used to embed both neighbour ids, which is precisely why they nested:
+      // a filler placed between two fillers inherited both of their already-compound ids. A counter
+      // keeps it bounded and readable, and uniqueness now comes from position rather than lineage.
+      const id = `${FILLER_PREFIX}${fillerSequence++}`
+      const date = new Date(at)
+      const message = new Message({
+        id,
+        role,
+        // Neutral prose, NOT the id. The content used to be the id itself, so a
+        // `__ordering-guard-filler-…` string was sent to the model as a genuine conversational turn —
+        // a synthetic token sequence no vendor has ever seen, inserted to satisfy a role-alternation
+        // check. This says the minimum a turn can say while still being a turn.
+        content: FILLER_CONTENT,
+        createdAt: date,
+        updatedAt: date,
+      })
+      await ctx.storeMessage(message)
+      synthetic.push({
+        kind: 'message',
+        at,
+        seq: first.seq + 0.5,
+        role,
+        value: message,
+      })
+      syntheticPlacement.set(id, firstId)
+      completed.push(repair)
+    } catch (cause) {
+      const original = isError(cause) ? cause : new Error(String(cause))
+      // The context-owned degraded group operation may expose completed deletes on its error. The
+      // dispatch-context contract currently has no typed progress channel, so accept the established
+      // non-invasive error metadata until that contract is extended by its owner.
+      const deletedIds = Array.isArray((original as Error & { deletedIds?: unknown }).deletedIds)
+        ? [...(original as Error & { deletedIds: string[] }).deletedIds]
+        : []
+      const error = createOrderingRepairError(
+        original.message,
+        original,
+        [...repair.violation.primitiveIds],
+        deletedIds
       )
-        snapshot.replayCompatibility = rule.fallbackReplayCompatibility
-      const replacement =
-        entry.kind === 'toolCall'
-          ? ToolCall[DECODE_METHOD](snapshot as never)
-          : Thought[DECODE_METHOD](snapshot as never)
-      if (entry.kind === 'toolCall') await ctx.mutateToolCall(replacement as ToolCall)
-      else await ctx.mutateThought(replacement as Thought)
-      effective[effective.indexOf(entry)] = { ...entry, value: replacement }
-      continue
+      failures.push({ repair, error, deletedIds })
     }
-    // `reorder-adjacent` (adjacency) and `reorder` (order) differ in how helpers.ts CHOOSES the
-    // pair, not in how the move is applied: both name a target to place before a blocker, and both
-    // populate the same typed fields. One materialiser serves both.
-    if (repair.strategy === 'reorder' || repair.strategy === 'reorder-adjacent') {
-      // Typed fields, not a prose-parsing regex against `detail` — `detail` is a human-readable
-      // description that can legitimately be reworded in helpers.ts without this consumer noticing,
-      // and a silently-broken parse here would let a violation continue to report as "repaired"
-      // while never actually reaching the live turn state.
-      const targetId = repair.targetId
-      const blockerId = repair.blockerId
-      const targetEntry = targetId ? effective.find((e) => idOf(e) === targetId) : undefined
-      const blockerEntry = blockerId ? effective.find((e) => idOf(e) === blockerId) : undefined
-      if (!targetEntry || !blockerEntry) continue
-      // Timestamps, not array position, are what every LLM adapter's own history assembly sorts
-      // by — moving `targetEntry` in this in-memory copy alone never reaches the wire. Nudge its
-      // createdAt to sort at or before `blockerEntry`'s so the real turn state (not just this
-      // guard's own bookkeeping) reflects the repaired order on the next timeline build.
-      //
-      // Never goes negative: some parts of this codebase (e.g. the context/compact summarizer) use
-      // epoch-zero as a documented "sort before every real turn" sentinel — shifting a repaired
-      // primitive to a NEGATIVE timestamp would sort it before that sentinel, inverting its
-      // meaning, and a negative value can also throw inside `new Date(at).toISOString()`. When the
-      // blocker is already at epoch zero, `at` ties rather than strictly precedes — this alone does
-      // NOT guarantee the fix, so it is deliberately NOT reported as repaired here; the mandatory
-      // post-repair re-evaluation (in runGuard, below) is what actually decides whether a tie
-      // still resolves the violation (a tie can still resolve it, since the timeline's own tie-break
-      // on identical timestamps is the target's position within its Set, and #replaceById-style
-      // repairs preserve that position rather than moving the primitive to the end) — this comment
-      // exists so a future reader doesn't mistake the clamp itself for the correctness guarantee.
-      const at = Math.max(0, blockerEntry.at - 1)
-      const snapshot = {
-        ...(targetEntry.value[ENCODE_METHOD]() as Record<string, unknown>),
-        createdAt: new Date(at).toISOString(),
-      }
-      const replacement =
-        targetEntry.kind === 'toolCall'
-          ? ToolCall[DECODE_METHOD](snapshot as never)
-          : targetEntry.kind === 'thought'
-            ? Thought[DECODE_METHOD](snapshot as never)
-            : Message[DECODE_METHOD](snapshot as never)
-      if (targetEntry.kind === 'toolCall') await ctx.mutateToolCall(replacement as ToolCall)
-      else if (targetEntry.kind === 'thought') await ctx.mutateThought(replacement as Thought)
-      else await ctx.mutateMessage(replacement as Message)
-      const index = effective.indexOf(targetEntry)
-      effective[index] = { ...targetEntry, at, value: replacement }
-      continue
-    }
-    const [firstId, secondId] = repair.violation.primitiveIds
-    const first = timeline.find((entry) => idOf(entry) === firstId)
-    const second = timeline.find((entry) => idOf(entry) === secondId)
-    if (!first || !second) continue
-    const role = first.role === 'user' ? 'assistant' : 'user'
-    const at = (first.at + second.at) / 2
-    // A CONTENT-FREE id. It used to embed both neighbour ids, which is precisely why they nested:
-    // a filler placed between two fillers inherited both of their already-compound ids. A counter
-    // keeps it bounded and readable, and uniqueness now comes from position rather than lineage.
-    const id = `${FILLER_PREFIX}${fillerSequence++}`
-    const date = new Date(at)
-    const message = new Message({
-      id,
-      role,
-      // Neutral prose, NOT the id. The content used to be the id itself, so a
-      // `__ordering-guard-filler-…` string was sent to the model as a genuine conversational turn —
-      // a synthetic token sequence no vendor has ever seen, inserted to satisfy a role-alternation
-      // check. This says the minimum a turn can say while still being a turn.
-      content: FILLER_CONTENT,
-      createdAt: date,
-      updatedAt: date,
-    })
-    await ctx.storeMessage(message)
-    synthetic.push({
-      kind: 'message',
-      at,
-      seq: first.seq + 0.5,
-      role,
-      value: message,
-    })
-    syntheticPlacement.set(id, firstId)
   }
   return {
     timeline: [...effective, ...synthetic],
     placement: syntheticPlacement,
+    completed,
+    failures,
   }
 }
 
@@ -358,6 +446,7 @@ const runGuard = async (
 ): Promise<{
   blocked: BlockingOrderingViolation[]
   result: OrderingGuardResult
+  repairCause?: unknown
 }> => {
   const profiles = resolveProfiles(options)
   // Reap the previous dispatch's fillers before doing anything else.
@@ -402,7 +491,15 @@ const runGuard = async (
       }
     })
   const evaluationContext = declaredTools === undefined ? undefined : { tools: declaredTools }
-  const evaluations = profiles.map((profile) =>
+  const surface: 'dispatch' | 'turn' = ctx.nack !== undefined ? 'dispatch' : 'turn'
+  const applicableProfiles = profiles.map((profile) => ({
+    ...profile,
+    rules: profile.rules.filter((rule) => {
+      const ruleSurface = (rule as { surface?: 'dispatch' | 'turn' | 'both' }).surface
+      return ruleSurface === undefined || ruleSurface === 'both' || ruleSurface === surface
+    }),
+  }))
+  const evaluations = applicableProfiles.map((profile) =>
     evaluateOrderingProfile(timeline, profile, evaluationContext)
   )
   const blocked = evaluations.flatMap((evaluation) => evaluation.blocking)
@@ -410,7 +507,7 @@ const runGuard = async (
     .flatMap((evaluation) => evaluation.advisories)
     .filter((violation) => !options.disableAdvisoryRuleIds?.includes(violation.ruleId))
   const prior = ctx.stash.get<Snapshot | undefined>(options.snapshotStashKey ?? SNAPSHOT)
-  const preservation = preservationViolations(timeline, prior, profiles)
+  const preservation = preservationViolations(timeline, prior, applicableProfiles)
   const allBlocked = [...blocked, ...preservation.blocking]
   // Preservation advisories join the evaluator's own, and are subject to the same opt-out.
   const allAdvisories = [
@@ -424,7 +521,12 @@ const runGuard = async (
   if (options.action !== 'mutate')
     return {
       blocked: allBlocked,
-      result: { repaired: [], unrepaired: allBlocked, advisories: allAdvisories },
+      result: {
+        repaired: [],
+        unrepaired: allBlocked,
+        advisories: allAdvisories,
+        repairFailures: [],
+      },
     }
   const repaired = repairViolations(
     timeline,
@@ -433,7 +535,7 @@ const runGuard = async (
     // Rules that authorize their own fallback are repairable WITHOUT the global flag. Narrowed to
     // just those rules, so enabling one vendor's documented sentinel never widens the surface to
     // sibling rules in the same profile.
-    profiles
+    applicableProfiles
       .map((profile) => ({
         ...profile,
         rules: profile.rules.filter(
@@ -442,10 +544,10 @@ const runGuard = async (
       }))
       .filter((profile) => profile.rules.length > 0)
   )
-  const applied = await applyRepairs(ctx, repaired.repaired, timeline, profiles)
+  const applied = await applyRepairs(ctx, repaired.repaired, timeline, applicableProfiles)
   const effectiveTimeline = [...repaired.timeline]
   for (const entry of applied.timeline) {
-    const index = effectiveTimeline.findIndex((candidate) => idOf(candidate) === idOf(entry))
+    const index = effectiveTimeline.findIndex((candidate) => candidate.seq === entry.seq)
     if (index >= 0) effectiveTimeline[index] = entry
   }
   const synthetic = {
@@ -509,7 +611,7 @@ const runGuard = async (
     }
   })
   ctx.stash.set(EFFECTIVE_TIMELINE, stashableTimeline)
-  const postRepairBlocking = profiles.flatMap(
+  const postRepairBlocking = applicableProfiles.flatMap(
     (profile) => evaluateOrderingProfile(effectiveTimeline, profile, evaluationContext).blocking
   )
   const unrepaired = [...repaired.unrepaired]
@@ -523,10 +625,28 @@ const runGuard = async (
       unrepaired.push(violation)
     }
   }
-  const result = { repaired: repaired.repaired, unrepaired, advisories }
+  const repairFailures = applied.failures.map(({ repair, error, deletedIds }) => ({
+    ruleId: repair.violation.ruleId,
+    primitiveIds: [...repair.violation.primitiveIds],
+    deletedIds: [...deletedIds],
+    message: error.message,
+  }))
+  for (const failure of applied.failures) {
+    const key = `${failure.repair.violation.ruleId}:${failure.repair.violation.primitiveIds.join(',')}`
+    if (!known.has(key)) {
+      known.add(key)
+      unrepaired.push(failure.repair.violation)
+    }
+  }
+  const result: OrderingGuardResult = {
+    repaired: applied.completed,
+    unrepaired,
+    advisories: allAdvisories,
+    repairFailures,
+  }
   ctx.stash.set(RESULT, result)
-  if (options.onRepair !== 'silent') repaired.repaired.forEach(logRepair)
-  return { blocked: unrepaired, result }
+  if (options.onRepair !== 'silent') applied.completed.forEach(logRepair)
+  return { blocked: unrepaired, result, repairCause: applied.failures[0]?.error }
 }
 
 const makeMiddleware = (
@@ -534,10 +654,10 @@ const makeMiddleware = (
 ): DispatchPipelineMiddlewareFn | TurnPipelineMiddlewareFn => {
   const checked = validateOptions(options)
   return (async (ctx: DispatchContext | TurnContext, next: NextFn) => {
-    const { blocked, result } = await runGuard(ctx as GuardContext, checked)
+    const { blocked, result, repairCause } = await runGuard(ctx as GuardContext, checked)
     if (checked.action === 'enforce') ctx.stash.set(RESULT, result)
     if (blocked.length > 0) {
-      enforceViolation(ctx as GuardContext, checked, blocked)
+      enforceViolation(ctx as GuardContext, checked, blocked, repairCause)
       return
     }
     await next()

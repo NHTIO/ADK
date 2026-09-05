@@ -111,6 +111,7 @@ const buildPrompt = async (input: {
   replayCompatibility?: string[]
   renderCtx?: unknown
   warn?: (msg: string) => void
+  renderedToolCallResults?: Map<ToolCall, string>
 }): Promise<{
   prompt: string
   reasoningPayloads: Array<{ id: string; replayCompatibility: string; payload: unknown }>
@@ -124,7 +125,7 @@ const buildPrompt = async (input: {
     thoughts: new Set(input.thoughts ?? []),
     toolCalls: new Set(input.toolCalls ?? []),
     tools: input.tools ?? new ToolRegistry([makeTool('search_docs')]),
-    renderedToolCallResults: new Map(),
+    renderedToolCallResults: input.renderedToolCallResults ?? new Map(),
     bucketOrder: input.bucketOrder ?? [
       'standingInstructions',
       'memories',
@@ -154,6 +155,24 @@ const buildPrompt = async (input: {
   })
 
 describe('claude_code_cli helpers — buildClaudeCodeCliPrompt', () => {
+  it('pairs pre-rendered results by ToolCall instance when ids collide', async () => {
+    const first = makeToolCall({ id: 'call_0', results: 'original-first' })
+    const second = makeToolCall({
+      id: 'call_0',
+      results: 'original-second',
+      createdAt: dt('2026-01-01T00:00:01Z'),
+    })
+    const result = await buildPrompt({
+      toolCalls: [first, second],
+      renderedToolCallResults: new Map([
+        [first, 'PRE-RENDERED-FIRST'],
+        [second, 'PRE-RENDERED-SECOND'],
+      ]),
+    })
+    expect(result.prompt).toContain('PRE-RENDERED-FIRST')
+    expect(result.prompt).toContain('PRE-RENDERED-SECOND')
+  })
+
   it('returns a single joined string, not an array', async () => {
     const result = await buildPrompt({})
     expect(typeof result.prompt).toBe('string')

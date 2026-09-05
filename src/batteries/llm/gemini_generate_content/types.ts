@@ -309,8 +309,8 @@ export interface GeminiRequestBuildInput {
   toolCalls: Iterable<ToolCall>
   /** Tools offered this turn, rendered into `functionDeclarations`. */
   tools: ToolRegistry
-  /** Pre-rendered tool results, keyed by ToolCall id. Gemini requires objects, not strings. */
-  renderedToolCallResults: Map<string, Record<string, unknown>>
+  /** Pre-rendered tool results, keyed by the live ToolCall instance. Gemini requires objects, not strings. */
+  renderedToolCallResults: Map<ToolCall, Record<string, unknown>>
   /** Optional; `buildGeminiRequest` falls back to {@link DEFAULT_GEMINI_BUCKET_ORDER}. */
   bucketOrder?: ChatCompletionsBucketOrder
   /** Identity attributed to this agent's own thoughts. */

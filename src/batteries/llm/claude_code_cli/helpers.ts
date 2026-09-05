@@ -453,7 +453,8 @@ export const buildClaudeCodeCliPrompt = async (input: {
   thoughts: Iterable<Thought>
   toolCalls: Iterable<ToolCall>
   tools: ToolRegistry
-  renderedToolCallResults: Map<string, string>
+  /** Pre-rendered results keyed by the same live ToolCall instances iterated below. */
+  renderedToolCallResults: Map<ToolCall, string>
   bucketOrder: ChatCompletionsBucketOrder
   selfIdentity: string
   thoughtSurfacing: 'all-self' | 'latest-self' | 'all'
@@ -577,7 +578,10 @@ export const buildClaudeCodeCliPrompt = async (input: {
         )}">\n${JSON.stringify(tc.args)}\n</tool_call>`
         sections.push(callHeader)
 
-        let rendered = input.renderedToolCallResults.get(tc.id)
+        // Instance identity is intentional: ids may collide across turns, while this is the same
+        // live primitive used by the producer. An id-keyed cache pairs an earlier call with the
+        // later call's result after a collision.
+        let rendered = input.renderedToolCallResults.get(tc)
         if (rendered === undefined) {
           const tool = input.tools.get?.(tc.tool)
           rendered = await input.renderClaudeCodeCliToolCallResult({
