@@ -15,6 +15,16 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-09-06
+
+### Changed
+
+- **BREAKING (orchestration, one release-day of exposure): `runPlanStoreConformance` is no longer re-exported from the battery barrel.** It is reachable only at `@nhtio/adk/batteries/orchestration/conformance`, which is the subpath the documentation and the changelog already used. With `vitest` installed the barrel export DID resolve, so a test file that imported it from `@nhtio/adk/batteries/orchestration` must change its specifier. It is called out as breaking rather than filed quietly under a fix because that is what it is — the mitigating facts are that the export existed only in `1.20260905.1`, and that any consumer without `vitest` could not import the battery at all (see below).
+
+### Fixed
+
+- **Importing the orchestration battery required `vitest` to be installed.** The barrel re-exported `runPlanStoreConformance`, which pulled `conformance.ts` — and its `import { describe, expect, it } from 'vitest'` — into the module graph of every consumer. `vitest` is an **optional** peer dependency, so a package manager does not install it, and any consumer without a test runner got a hard `ERR_MODULE_NOT_FOUND` on `@nhtio/adk/batteries/orchestration` itself. The suite is now subpath-only (`@nhtio/adk/batteries/orchestration/conformance`), matching `batteries/vector`, whose conformance suite is likewise vitest-based and likewise excluded from its barrel. Nothing in this repository referenced it through the barrel — the spec, both documentation pages and the changelog already used the subpath. Found by installing the published `1.20260905.1` tarball as a real consumer; the in-repo test suite aliases `@nhtio/adk` to `./src` and is structurally incapable of catching this class.
+
 ## 2026-09-05
 
 ### Added

@@ -46,9 +46,20 @@
  *
  * The barrel stays environment-neutral: there is no `node:*` anywhere in its module graph. The
  * Lua cell (`./cells/lua`) imports `node:worker_threads` and is therefore NOT re-exported here —
- * it is reachable only via its own deep subpath. The structured and jexl cells, the types, the
- * exceptions, the store contract and the in-memory store, the conformance suite, and the
- * raw/render/outline functions are all re-exported.
+ * it is reachable only via its own deep subpath.
+ *
+ * The conformance suite (`./conformance`) is excluded for the same reason in a different
+ * dimension: it imports `vitest`, which is an OPTIONAL peer dependency. A barrel re-export makes
+ * that import part of every consumer's module graph, so `import '@nhtio/adk/batteries/orchestration'`
+ * fails with `ERR_MODULE_NOT_FOUND` for anyone who has not installed a test runner — which is
+ * every production consumer. It is reachable only via its own deep subpath, from a test
+ * environment where `vitest` is present. This matches `batteries/vector`, whose conformance suite
+ * is likewise vitest-based and likewise subpath-only. (`batteries/sandbox` DOES re-export its
+ * suite from its barrel, and that is fine: it asserts through a local `assert` helper and imports
+ * no test framework at all. The rule is about the `vitest` import, not about conformance suites.)
+ *
+ * The structured and jexl cells, the types, the exceptions, the store contract and the in-memory
+ * store, and the raw/render/outline functions are all re-exported.
  *
  * ### How the deep subpaths are named
  *
@@ -89,7 +100,6 @@ import type {
 // ── re-exports: the public deep-import surface ─────────────────────────────
 
 export { InMemoryPlanStore } from './in_memory'
-export { runPlanStoreConformance } from './conformance'
 export { createStructuredCell } from './cells/structured'
 export type { JexlCellOptions, JexlTransform } from './cells/jexl'
 export { createJexlCell } from './cells/jexl'
