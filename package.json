@@ -92,8 +92,10 @@
     "exceljs": "^4.4.0",
     "execa": "^9.6.1",
     "fastest-levenshtein": "^1.0.0",
+    "fengari": "^0.1.5",
     "flydrive": "^2.0.0",
     "hnswlib-node": "^3.0.0",
+    "jexl": "^2.3.0",
     "jimp": "^1.6.1",
     "jszip": "^3.10.1",
     "mammoth": "^1.12.0",
@@ -117,6 +119,7 @@
     "tesseract.js": "^7.0.0",
     "typesense": "^3.0.6",
     "vitest": "^4.1.5",
+    "wasmoon": "^1.16.0",
     "weaviate-client": "^3.13.1"
   },
   "peerDependenciesMeta": {
@@ -216,10 +219,16 @@
     "fastest-levenshtein": {
       "optional": true
     },
+    "fengari": {
+      "optional": true
+    },
     "flydrive": {
       "optional": true
     },
     "hnswlib-node": {
+      "optional": true
+    },
+    "jexl": {
       "optional": true
     },
     "jimp": {
@@ -289,6 +298,9 @@
       "optional": true
     },
     "vitest": {
+      "optional": true
+    },
+    "wasmoon": {
       "optional": true
     },
     "weaviate-client": {

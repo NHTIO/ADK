@@ -44,6 +44,31 @@ describe('@nhtio/adk published package smoke check', () => {
     expect(await artifact.asString()).toBe('alpha\nbeta\ngamma\n')
   })
 
+  it('loads the orchestration battery from its deep subpath', async () => {
+    // Deep-import-only by design: the battery is NOT on `batteries/index.ts`, so the smoke check
+    // has to reach it the way a consumer does. `createOrchestration` is async and enforces its
+    // preconditions at construction, so a successful build is itself the assertion that the
+    // encoder peer resolved and every wired cell loaded.
+    const { createOrchestration, InMemoryPlanStore, createStructuredCell, NodeRef } =
+      await import('@nhtio/adk/batteries/orchestration')
+
+    const orchestration = await createOrchestration({
+      store: new InMemoryPlanStore(),
+      invocable: { has: () => true, names: () => ['t'], returns: () => undefined },
+      deps: { evaluators: [createStructuredCell()] },
+    })
+
+    expect(typeof orchestration.freezePlan).toBe('function')
+    expect(typeof orchestration.approvePlan).toBe('function')
+    expect(typeof orchestration.executePlan).toBe('function')
+    // The tool tiers a consumer actually forges from.
+    expect(Object.keys(orchestration.tools('front')).length).toBeGreaterThan(0)
+    expect(Object.keys(orchestration.tools('authoring')).length).toBeGreaterThan(0)
+    // And the reference classes are real values through the published surface, not phantom
+    // type-only declarations — which is exactly what `types.ts` once shipped.
+    expect(NodeRef.isNodeRef(new NodeRef('n1', 'first'))).toBe(true)
+  })
+
   it('registers published tools through the public package API', async () => {
     const registry = new ToolRegistry([calculateTool])
 
