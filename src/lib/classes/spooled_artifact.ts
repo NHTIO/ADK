@@ -185,6 +185,7 @@ const baseToolMethods: ReadonlyArray<ToolMethodDescriptor> = Object.freeze([
         .description('Regular expression pattern, applied via JavaScript RegExp.'),
       flags: validator
         .string()
+        .allow('')
         .pattern(/^[imsu]*$/)
         .optional()
         .description(

@@ -6,7 +6,13 @@
  * fallback predicates here; doing so would make the handle's security posture depend on two
  * subtly different implementations.
  */
-import { E_SANDBOX_DEPENDENCY_MISSING, E_SANDBOX_UNSUPPORTED_ENV } from './exceptions'
+import { isException } from '../../lib/utils/exceptions'
+import {
+  E_SANDBOX_DEPENDENCY_MISSING,
+  E_SANDBOX_FAILED,
+  E_SANDBOX_UNSUPPORTED_ENV,
+} from './exceptions'
+import type { SandboxPolicy } from './types'
 import type { SandboxEventSink } from './observability'
 import type { SandboxPolicyEnforcer } from './contracts/policy_enforcer'
 
@@ -92,3 +98,66 @@ export const preflightSandbox = async (options: PreflightOptions): Promise<Sandb
 
 /** Compatibility alias for the construction-site call in WP-A1. */
 export const runSandboxPreflight = preflightSandbox
+
+/** Probe spawning after policy admission, rather than as part of preflight. */
+export const probeSandboxSpawn = async (
+  enforcer: SandboxPolicyEnforcer,
+  policy: SandboxPolicy
+): Promise<void> => {
+  let result: Awaited<ReturnType<SandboxPolicyEnforcer['run']>>
+  try {
+    result = await enforcer.run({
+      argv: ['true'],
+      policy,
+      correlationId: crypto.randomUUID(),
+      cwd: process.cwd(),
+    })
+  } catch (error) {
+    // Preserve policy and lifecycle classifications; only an untyped spawn failure is treated as
+    // the dependency/liveness failure this opt-in probe is designed to detect.
+    if (isException(error) && error.name.startsWith('E_SANDBOX_')) throw error
+    throw new E_SANDBOX_DEPENDENCY_MISSING([`Sandbox spawn probe failed: ${String(error)}`])
+  }
+  const drain = async (stream: ReadableStream<Uint8Array>): Promise<string> => {
+    const reader = stream.getReader()
+    const chunks: Uint8Array[] = []
+    try {
+      for (;;) {
+        const next = await reader.read()
+        if (next.done) break
+        chunks.push(next.value)
+      }
+    } finally {
+      reader.releaseLock()
+    }
+    const bytes = new Uint8Array(chunks.reduce((size, chunk) => size + chunk.length, 0))
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.length
+    }
+    return new TextDecoder().decode(bytes)
+  }
+  let stderr: string
+  let completed: Awaited<ReturnType<SandboxPolicyEnforcer['run']>>['completed'] extends Promise<
+    infer T
+  >
+    ? T
+    : never
+  try {
+    ;[, stderr, completed] = await Promise.all([
+      drain(result.stdout),
+      drain(result.stderr),
+      result.completed,
+    ])
+  } catch (error) {
+    if (isException(error) && error.name.startsWith('E_SANDBOX_')) throw error
+    throw new E_SANDBOX_DEPENDENCY_MISSING([
+      `Sandbox spawn probe failed while draining output: ${String(error)}`,
+    ])
+  }
+  if (completed.failed)
+    throw new E_SANDBOX_FAILED([
+      `Sandbox spawn probe failed (exit code ${completed.exitCode}): ${stderr || 'no stderr'}`,
+    ])
+}

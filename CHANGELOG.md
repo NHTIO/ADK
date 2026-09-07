@@ -21,15 +21,65 @@ upgrading.
 
 - **Four new spooled-artifact batteries with six bidirectional converters.** {@link SpooledToonArtifact}, {@link SpooledYamlArtifact}, {@link SpooledXmlArtifact}, and {@link SpooledEcmaScriptArtifact} add structured query methods over their formats — `artifact_toon_*`, `artifact_yaml_*`, `artifact_xml_*`, and `artifact_es_*` — enabling the model to navigate structured output by path or AST rather than by line-oriented grep. TOON and YAML/XML converters (`toon_to_json`, `json_to_toon`, `yaml_to_json`, `json_to_yaml`, `xml_to_json`, `json_to_xml`) accept either inline text or an artifact reference, and return a new spooled artifact ready for query on the next iteration. TOON's token-reduction encoding makes `json_to_toon` valuable for shrinking large artifacts before passing them onward. Three optional peer dependencies: `@toon-format/toon@^4.1.1`, `fast-xml-parser@^5.11.1`, `typescript@^5.9.3` (promoted from devDependency); `js-yaml` is already a core dependency. See [Artifact batteries](/assembly/batteries-artifacts).
 
-## 2026-09-06
+- **Linux sandbox escape hatches and an opt-in spawn-liveness probe.** `srtEnforcer` now accepts
+  Linux-only `bwrapPath` and `socatPath` options for wrapper scripts that need to adjust SRT's
+  bubblewrap invocation. Supplied paths must be absolute; on Linux, a nonexistent absolute path
+  fails inside SRT's `initialize()`, while on macOS these options are neither validated by SRT nor
+  used. `createSandbox({ probeSpawn: true })` performs a real `true` spawn after policy admission,
+  drains both streams, and fails closed rather than consulting `allowUnsandboxedFallback` — that
+  option provides no unsandboxed runner, so honouring it here would admit a handle whose every call
+  still fails. It is opt-in and off by default.
+
+  **Error classification is preserved, not flattened.** A typed sandbox exception thrown by the
+  probed spawn — `E_SANDBOX_POLICY_CONFLICT`, `E_SANDBOX_REFUSED`, and the rest — propagates with its
+  own type, so an operator whose *policy* is wrong is not told to install a missing dependency. Only
+  a genuinely untyped failure — the child could not be spawned, or its output could not be read —
+  becomes `E_SANDBOX_DEPENDENCY_MISSING`. A child that RAN and exited non-zero throws the neutral
+  `E_SANDBOX_FAILED` with its exit code and stderr, because the probe cannot know the cause: issue
+  #22's own symptom (`bwrap: loopback: Failed RTM_NEWADDR`) arrives exactly that way and is a kernel
+  permission problem, not a missing dependency.
+
+  **A failed probe rolls the session back completely.** Clearing the manager's ownership record
+  without disposing the backend session would leave the SRT adapter's session claim held, and it
+  refuses to construct while that claim stands — so a failed probe would have wedged the process
+  permanently, with no handle in existence able to release it. The rollback now disposes the
+  enforcer it established, and only when the session was *owned*: an adopted foreign sandbox is
+  never reset. Disposal of a secondary handle no longer aborts an unrelated in-flight construction —
+  only a disposal that can actually reset the established owner invalidates one.
 
 ### Changed
 
-- **BREAKING (orchestration, one release-day of exposure): `runPlanStoreConformance` is no longer re-exported from the battery barrel.** It is reachable only at `@nhtio/adk/batteries/orchestration/conformance`, which is the subpath the documentation and the changelog already used. With `vitest` installed the barrel export DID resolve, so a test file that imported it from `@nhtio/adk/batteries/orchestration` must change its specifier. It is called out as breaking rather than filed quietly under a fix because that is what it is — the mitigating facts are that the export existed only in `1.20260905.1`, and that any consumer without `vitest` could not import the battery at all (see below).
+- **Sandbox construction is now serialized for every consumer.** Concurrent `createSandbox()` calls
+  queue behind an establishment promise, and `dispose()` participates in the same queue. A slow
+  teardown can therefore delay a concurrent construction; the coupling prevents teardown from
+  resetting the owner while another construction is being established.
 
 ### Fixed
 
+- **#22: sandbox construction can now be configured around a container's netlink failure.** The
+  reporter measured `@anthropic-ai/sandbox-runtime` 0.0.73; this repository uses 0.0.70. On a runner
+  reporting `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`, the new Linux-only binary
+  passthrough lets a wrapper adjust bwrap's argv. The `network.disabled` mapping is unchanged. The
+  paths are not a general SRT existence check: the nonexistent-path failure is in SRT's Linux
+  `initialize()` path, while macOS does not validate or use them.
+- **#23: empty grep flags are now reachable.** Across five production CI traces, 17 of 3,043
+  artifact-tool calls were rejected, all with `flags: ""`; the reported rejection gave no path from
+  the error to a working call. `artifact_grep` now treats `flags: ""` like omission, while still
+  rejecting unsupported flags. The sibling Markdown `lang: ""` case is admitted too, so its existing
+  no-language query is reachable.
+- **The environment allow-list now holds at the child process.** On macOS, a real `srtEnforcer`
+  end-to-end measurement showed the post-fix result: `HOST_SECRET_E4` absent and `PATH` present. On
+  Linux, real bubblewrap 0.10.0 reproduced the environment-relevant portion of the bwrap spawn shape
+  (not the enforcer and not its exact argv) on both sides: the pre-fix environment merge leaked
+  `HOST_SECRET_E4`, while the post-fix allow-list did not. The fix is platform-independent because it
+  changes what ADK hands to `spawn`, and the post-fix result is measured on both platforms; the
+  measurements differ in both scope and coverage. The macOS pre-fix leak is supported by the unit
+  tests and by `wrapWithSandboxArgv` returning `env: process.env`, not by an OS-layer measurement.
+
+- **BREAKING (orchestration, one release-day of exposure): `runPlanStoreConformance` is no longer re-exported from the battery barrel.** It is reachable only at `@nhtio/adk/batteries/orchestration/conformance`, which is the subpath the documentation and the changelog already used. With `vitest` installed the barrel export DID resolve, so a test file that imported it from `@nhtio/adk/batteries/orchestration` must change its specifier. It is called out as breaking rather than filed quietly under a fix because that is what it is — the mitigating facts are that the export existed only in `1.20260905.1`, and that any consumer without `vitest` could not import the battery at all (see below).
+
 - **Importing the orchestration battery required `vitest` to be installed.** The barrel re-exported `runPlanStoreConformance`, which pulled `conformance.ts` — and its `import { describe, expect, it } from 'vitest'` — into the module graph of every consumer. `vitest` is an **optional** peer dependency, so a package manager does not install it, and any consumer without a test runner got a hard `ERR_MODULE_NOT_FOUND` on `@nhtio/adk/batteries/orchestration` itself. The suite is now subpath-only (`@nhtio/adk/batteries/orchestration/conformance`), matching `batteries/vector`, whose conformance suite is likewise vitest-based and likewise excluded from its barrel. Nothing in this repository referenced it through the barrel — the spec, both documentation pages and the changelog already used the subpath. Found by installing the published `1.20260905.1` tarball as a real consumer; the in-repo test suite aliases `@nhtio/adk` to `./src` and is structurally incapable of catching this class.
+
 
 ## 2026-09-05
 

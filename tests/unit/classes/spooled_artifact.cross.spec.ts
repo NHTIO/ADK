@@ -401,6 +401,37 @@ describe('SpooledArtifact', () => {
       ).resolves.toBeDefined()
     })
 
+    it('accepts empty grep flags and treats them like omitted flags', async () => {
+      const { artifact } = await makeSpooledArtifact(SAMPLE, 'tc-empty-flags')
+      const ctx = makeDispatchContext({
+        toolCalls: [makeToolCall(artifact, { id: 'tc-empty-flags' })],
+      })
+      const grep = SpooledArtifact.forgeTools(ctx).get('artifact_grep')!
+      await expect(
+        grep.validate({ callId: 'tc-empty-flags', pattern: 'a', flags: '' })
+      ).resolves.toBeDefined()
+      await expect(
+        grep.executor(ctx)({ callId: 'tc-empty-flags', pattern: 'a', flags: '' })
+      ).resolves.toBe(await grep.executor(ctx)({ callId: 'tc-empty-flags', pattern: 'a' }))
+    })
+
+    it('reports the allowed pattern when rejecting unsupported grep flags', async () => {
+      const { artifact } = await makeSpooledArtifact(SAMPLE, 'tc-invalid-flags')
+      const ctx = makeDispatchContext({
+        toolCalls: [makeToolCall(artifact, { id: 'tc-invalid-flags' })],
+      })
+      const grep = SpooledArtifact.forgeTools(ctx).get('artifact_grep')!
+      for (const flags of ['g', 'y']) {
+        await expect(
+          grep.validate({ callId: 'tc-invalid-flags', pattern: 'a', flags })
+        ).rejects.toMatchObject({
+          cause: expect.objectContaining({
+            message: expect.stringContaining('/^[imsu]*$/'),
+          }),
+        })
+      }
+    })
+
     it('excludes ToolCalls with fromArtifactTool=true from the callId enum', async () => {
       const { artifact } = await makeSpooledArtifact(SAMPLE, 'tc-real')
       const { artifact: aFromArtifact } = await makeSpooledArtifact(SAMPLE, 'tc-fromArtifact')

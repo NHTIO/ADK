@@ -1,7 +1,7 @@
 import { statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { spawn } from 'node:child_process'
-import { quoteShellArgs, validateBinShell } from '../escape'
+import { quoteShellArgs, validateAbsoluteBinaryPath, validateBinShell } from '../escape'
 import { derivedRulesFromSrt, primeGlobMatcher, reproduceMandatoryDeny } from './fs_node'
 import {
   E_INVALID_SANDBOX_CONFIG,
@@ -44,6 +44,8 @@ type SrtConfig = {
   git?: { safeDirectories: string[] }
   /** Top-level and session-level: SRT reads this from the config `initialize()` stored, not per call. */
   enableWeakerNestedSandbox?: boolean
+  bwrapPath?: string
+  socatPath?: string
 }
 
 const unsupported = (): never => {
@@ -133,7 +135,11 @@ const dotGitIsDirectory = (cwd: string): boolean => {
  */
 const mapPolicy = (
   policy: SandboxPolicy,
-  runtime: { enableWeakerNestedSandbox?: boolean } = {}
+  runtime: {
+    enableWeakerNestedSandbox?: boolean
+    bwrapPath?: string
+    socatPath?: string
+  } = {}
 ): SrtConfig => {
   const fs = policy.filesystem
   const net = policy.network
@@ -154,6 +160,8 @@ const mapPolicy = (
     // Emitted only when enabled, so an untouched configuration is byte-identical to before this
     // option existed — a drift snapshot taken either side of the upgrade compares equal.
     ...(runtime.enableWeakerNestedSandbox === true ? { enableWeakerNestedSandbox: true } : {}),
+    ...(runtime.bwrapPath !== undefined ? { bwrapPath: runtime.bwrapPath } : {}),
+    ...(runtime.socatPath !== undefined ? { socatPath: runtime.socatPath } : {}),
     filesystem: {
       ...(fs.disabled ? { disabled: true } : {}),
       denyRead: nonEmpty(fs.denyRead),
@@ -302,6 +310,20 @@ export type SrtEnforcerOptions = {
    */
   inheritHostEnv?: boolean
   /**
+   * Absolute path to a Linux bubblewrap wrapper or binary. SRT reads it from the config passed to
+   * `initialize()`; on the Linux launch path it becomes argv[0] of the bwrap command
+   * (`linux-sandbox-utils.js:1539`). A wrapper script placed at this path therefore receives every
+   * bwrap argument and can strip or rewrite options such as `--unshare-net`. On Linux a nonexistent
+   * path fails in SRT's `initialize()`; on macOS it is neither validated nor used.
+   */
+  bwrapPath?: string
+  /**
+   * Absolute path to a Linux socat binary or wrapper. SRT passes it to `initializeLinuxNetworkBridge`
+   * on Linux. A nonexistent path fails in SRT's `initialize()`; on macOS it is neither validated nor
+   * used.
+   */
+  socatPath?: string
+  /**
    * Enable SRT's weaker nested-sandbox mode, for running inside an unprivileged container.
    *
    * @remarks
@@ -340,6 +362,8 @@ export type SrtEnforcerOptions = {
 export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxPolicyEnforcer> => {
   if (process.platform !== 'darwin' && process.platform !== 'linux') return unsupported()
   const binShell = validateBinShell(options.binShell)
+  const bwrapPath = validateAbsoluteBinaryPath(options.bwrapPath, 'bwrapPath')
+  const socatPath = validateAbsoluteBinaryPath(options.socatPath, 'socatPath')
   // Resolved ONCE: the allow-list is fixed for the enforcer's life, so re-picking per spawn would only
   // add a chance for the two to disagree. Validation throws here, at construction, so a typo'd variable
   // name is a startup error rather than a variable that silently never arrives.
@@ -403,6 +427,8 @@ export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxP
       await manager.initialize(
         mapPolicy(options.policy, {
           enableWeakerNestedSandbox: options.enableWeakerNestedSandbox,
+          bwrapPath,
+          socatPath,
         })
       )
       selfInitialized = true
@@ -502,13 +528,11 @@ export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxP
       )
       const child = spawn(wrapped.argv[0], wrapped.argv.slice(1), {
         cwd: op.cwd,
-        // ORDER IS LOAD-BEARING — do not "tidy" it into something more uniform.
-        //   1. `hostEnv` is the DENY-BY-DEFAULT host half, resolved once at construction. It was
-        //      `...process.env`, which handed every host secret to a command the model chose.
-        //   2. `wrapped.env` is SRT's own plumbing (proxy, CA bundle, git `safe.directory`) and must
-        //      outrank the host half, or a stale ambient `HTTP_PROXY` would defeat the network policy.
-        //   3. `op.env` is the caller's per-call overlay and wins last, by contract.
-        env: { ...hostEnv, ...wrapped.env, ...(op.env ?? {}) },
+        // SRT's `wrapped.env` is the unchanged process environment, not sandbox plumbing. Merging it
+        // here would defeat the allow-list by reintroducing every host variable. SRT's proxy, CA
+        // bundle, and git safe-directory plumbing are encoded in `wrapped.argv` instead. The caller's
+        // per-call environment remains the final overlay, by contract.
+        env: { ...hostEnv, ...(op.env ?? {}) },
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: false,
       })

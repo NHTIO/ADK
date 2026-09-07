@@ -204,6 +204,7 @@ export class SpooledMarkdownArtifact extends SpooledArtifact {
       argsSchema: validator.object({
         lang: validator
           .string()
+          .allow('')
           .optional()
           .description('Language identifier. Pass empty string to match blocks with no lang.'),
       }),

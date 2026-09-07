@@ -21,11 +21,11 @@ import type { SandboxPolicy } from '../../../../src/batteries/sandbox/types'
  */
 
 /** Captures what the enforcer actually asked `child_process.spawn` for. */
-const spawns: Array<{ env: Record<string, string | undefined> }> = []
+const spawns: Array<{ env: Record<string, string | undefined>; argv: string[] }> = []
 
 vi.mock('node:child_process', () => ({
-  spawn: (_cmd: string, _argv: string[], opts: { env: Record<string, string | undefined> }) => {
-    spawns.push({ env: opts.env })
+  spawn: (_cmd: string, argv: string[], opts: { env: Record<string, string | undefined> }) => {
+    spawns.push({ env: opts.env, argv })
     // Minimal duck of the surface `run()` touches: two closable streams and the two lifecycle events.
     const stream = () => ({
       on: () => undefined,
@@ -55,13 +55,15 @@ vi.mock('@anthropic-ai/sandbox-runtime', () => ({
     isSupportedPlatform: () => true,
     isSandboxingEnabled: () => state.enabled,
     checkDependenciesAsync: async () => ({ errors: [], warnings: [] }),
-    // Returns SRT's own plumbing so a test can prove it still outranks the host half.
+    // Faithfully model SRT: its returned env is the unchanged host environment, while plumbing is
+    // composed into the wrapped command itself.
     wrapWithSandboxArgv: async (command: string, shell: string) => ({
-      argv: [shell, '-c', command],
-      env: {
-        HTTP_PROXY: 'http://localhost:9999',
-        NODE_EXTRA_CA_CERTS: '/srt/ca.pem',
-      },
+      argv: [
+        shell,
+        '-c',
+        `--setenv HTTP_PROXY http://localhost:9999 --setenv NODE_EXTRA_CA_CERTS /srt/ca.pem ${command}`,
+      ],
+      env: { ...process.env } as Record<string, string>,
     }),
     getFsReadConfig: () => ({ denyOnly: [], allowWithinDeny: [] }),
     getFsWriteConfig: () => ({ allowOnly: [], denyWithinAllow: [] }),
@@ -123,23 +125,23 @@ describe('sandbox child environment isolation', () => {
     expect(Object.values(env)).not.toContain('sk-do-not-leak')
   })
 
-  it("keeps SRT's own proxy and CA variables, which the boundary depends on", async () => {
-    // The property that makes deny-by-default SAFE rather than merely strict: SRT's plumbing is spread
-    // after the host half, so restricting the host half cannot break the network boundary.
-    const env = await envForRun()
-    expect(env.HTTP_PROXY).toBe('http://localhost:9999')
-    expect(env.NODE_EXTRA_CA_CERTS).toBe('/srt/ca.pem')
+  it("keeps SRT's own proxy and CA variables in the wrapped command", async () => {
+    await envForRun()
+    expect(spawns[0]!.argv.join(' ')).toContain('--setenv HTTP_PROXY http://localhost:9999')
+    expect(spawns[0]!.argv.join(' ')).toContain('--setenv NODE_EXTRA_CA_CERTS /srt/ca.pem')
   })
 
   it("lets SRT's plumbing OUTRANK an allow-listed host variable of the same name", async () => {
-    // Pins the spread ORDER, which the two assertions above cannot: they only pass because the default
-    // allow-list and SRT's keys do not overlap, so swapping the order leaves them green. Here the host
-    // exports a stale HTTP_PROXY and the caller allow-lists it — SRT's value must still win, or an
-    // ambient proxy would silently redirect traffic around the network boundary.
+    // The stale ambient value is intentionally visible at this seam because it is allow-listed.
+    // SRT's --setenv assignment is also present in the wrapped command. bwrap inherits the spawn
+    // environment implicitly and resolves --setenv precedence at exec time, in argument order
+    // (linux-sandbox-utils.js:1396-1400). This unit boundary cannot observe that final child-env
+    // resolution; the override itself is covered by the OS-layer measurement.
     process.env.HTTP_PROXY = 'http://stale-host-proxy'
     try {
-      const env = await envForRun({ envAllowList: ['PATH', 'HTTP_PROXY'] })
-      expect(env.HTTP_PROXY).toBe('http://localhost:9999')
+      await envForRun({ envAllowList: ['PATH', 'HTTP_PROXY'] })
+      expect(spawns[0]!.env.HTTP_PROXY).toBe('http://stale-host-proxy')
+      expect(spawns[0]!.argv.join(' ')).toContain('--setenv HTTP_PROXY http://localhost:9999')
     } finally {
       delete process.env.HTTP_PROXY
     }
@@ -173,7 +175,12 @@ describe('sandbox child environment isolation', () => {
     expect(env.PATH).toBe(process.env.PATH)
   })
 
-  it('applies the per-call env last, over both the host half and SRT plumbing', async () => {
+  it('does not pass a host secret absent from the allow-list', async () => {
+    const env = await envForRun()
+    expect(env[SECRET]).toBeUndefined()
+  })
+
+  it('applies the per-call env last over the host half', async () => {
     const env = await envForRun(
       { envAllowList: ['PATH'] },
       { env: { PATH: '/call/path', HTTP_PROXY: 'http://call-proxy' } }
@@ -203,15 +210,41 @@ describe('sandbox child environment isolation', () => {
 })
 
 describe('nested sandbox pass-through', () => {
+  it('uses the configured bwrap path as argv[0] in upstream Linux wrapping', async () => {
+    const { wrapCommandWithSandboxLinux, cleanupBwrapMountPoints } =
+      await import('@anthropic-ai/sandbox-runtime/dist/sandbox/linux-sandbox-utils.js')
+    try {
+      const wrapped = await wrapCommandWithSandboxLinux({
+        command: 'echo hi',
+        needsNetworkRestriction: true,
+        readConfig: { denyOnly: [] },
+        writeConfig: undefined,
+        binShell: '/bin/bash',
+        bwrapPath: '/opt/custom/my-bwrap-wrapper',
+        socatPath: '/opt/custom/socat',
+      })
+      expect(wrapped).toMatch(/^\/opt\/custom\/my-bwrap-wrapper /)
+    } finally {
+      cleanupBwrapMountPoints({ force: true })
+    }
+  })
+
   it('reaches the initialize() config, which is the only place SRT reads it', async () => {
     // SRT resolves this from the module-level config `initialize()` stored, NOT from the per-call
     // config given to `wrapWithSandboxArgv` — so a fix threaded only through the per-call site would
     // compile, ship, and do nothing.
     releaseSrtOwnershipForTests()
     state.enabled = false
-    await srtEnforcer({ policy, enableWeakerNestedSandbox: true })
+    await srtEnforcer({
+      policy,
+      enableWeakerNestedSandbox: true,
+      bwrapPath: '/tmp/bwrap-wrapper',
+      socatPath: '/tmp/socat-wrapper',
+    })
     expect(initConfigs).toHaveLength(1)
     expect(initConfigs[0]!.enableWeakerNestedSandbox).toBe(true)
+    expect(initConfigs[0]!.bwrapPath).toBe('/tmp/bwrap-wrapper')
+    expect(initConfigs[0]!.socatPath).toBe('/tmp/socat-wrapper')
   })
 
   it('emits no key at all when unset, so an untouched config is unchanged', async () => {
@@ -220,5 +253,23 @@ describe('nested sandbox pass-through', () => {
     await srtEnforcer({ policy })
     expect(initConfigs).toHaveLength(1)
     expect('enableWeakerNestedSandbox' in initConfigs[0]!).toBe(false)
+    expect('bwrapPath' in initConfigs[0]!).toBe(false)
+    expect('socatPath' in initConfigs[0]!).toBe(false)
+  })
+
+  it('rejects relative binary overrides at construction', async () => {
+    releaseSrtOwnershipForTests()
+    state.enabled = false
+    await expect(srtEnforcer({ policy, bwrapPath: 'bwrap' })).rejects.toThrow(
+      E_INVALID_SANDBOX_CONFIG
+    )
+    await expect(srtEnforcer({ policy, bwrapPath: 'bwrap' })).rejects.toThrow(/bwrapPath/)
+
+    releaseSrtOwnershipForTests()
+    state.enabled = false
+    await expect(srtEnforcer({ policy, socatPath: 'socat' })).rejects.toThrow(
+      E_INVALID_SANDBOX_CONFIG
+    )
+    await expect(srtEnforcer({ policy, socatPath: 'socat' })).rejects.toThrow(/socatPath/)
   })
 })

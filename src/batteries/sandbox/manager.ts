@@ -1,5 +1,5 @@
 import { createSandboxEpoch } from './types'
-import { runSandboxPreflight } from './preflight'
+import { probeSandboxSpawn, runSandboxPreflight } from './preflight'
 import { createSandboxObservability, emitDriftCheck, emitFallback } from './observability'
 import {
   E_SANDBOX_NOT_INITIALIZED,
@@ -117,9 +117,22 @@ export interface CreateSandboxOptions {
   readonly optionalPeerPresent?: boolean
   /** Recorded on observability events so a rules-versus-backend mismatch is diagnosable without a bisect. */
   readonly fsNodeVersion?: string
+  /** Opt in to a real child-spawn liveness check during construction. */
+  readonly probeSpawn?: boolean
 }
 
 let owner: { baseline: DerivedRules; enforcer: SandboxPolicyEnforcer; owned: boolean } | undefined
+let establishment: Promise<void> = Promise.resolve()
+let disposalRequested = 0
+const acquireEstablishment = async (): Promise<() => void> => {
+  const previous = establishment
+  let release!: () => void
+  establishment = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await previous
+  return release
+}
 
 const list = (value: readonly string[] | undefined): readonly string[] => value ?? []
 const json = (value: unknown): string => JSON.stringify(value)
@@ -209,94 +222,137 @@ export const createSandbox = async (options: CreateSandboxOptions): Promise<Sand
     options.onSandbox && options.translator
       ? createSandboxObservability({ pathTranslator: options.translator, sink: options.onSandbox })
       : (options.onSandbox ?? (() => undefined))
-  const preflight = await runSandboxPreflight({
-    enforcer: options.enforcer,
-    allowUnsandboxedFallback: options.allowUnsandboxedFallback,
-    strictMode: options.strictMode,
-    optionalPeerPresent: options.optionalPeerPresent,
-    fsNodeVersion: options.fsNodeVersion,
-    onSandbox: sink,
-  })
-  const live = options.enforcer.effectivePolicy()
-  if (!live) throw new E_SANDBOX_POLICY_CONFLICT(['Sandbox has no derived policy'])
-  // An adopted enforcer has no ADK policy provenance, so admission must compare the requested
-  // effect against its genuinely live foreign baseline. Owned sessions retain the established
-  // first-writer baseline for subsequent handles.
-  const adopted = options.enforcer.adopted === true
-  const firstHandle = owner === undefined
-  if (owner !== undefined) {
-    const admissionBaseline = adopted ? live : owner.baseline
-    const requested = policyEffect(options.policy, admissionBaseline)
-    if (!admission(requested, admissionBaseline)) {
-      throw new E_SANDBOX_POLICY_CONFLICT([
-        `requested policy ${json(options.policy)} conflicts with ${json(admissionBaseline)}`,
-      ])
+  const release = await acquireEstablishment()
+  let assignedOwner: typeof owner
+  try {
+    const preflight = await runSandboxPreflight({
+      enforcer: options.enforcer,
+      allowUnsandboxedFallback: options.allowUnsandboxedFallback,
+      strictMode: options.strictMode,
+      optionalPeerPresent: options.optionalPeerPresent,
+      fsNodeVersion: options.fsNodeVersion,
+      onSandbox: sink,
+    })
+    const live = options.enforcer.effectivePolicy()
+    if (!live) throw new E_SANDBOX_POLICY_CONFLICT(['Sandbox has no derived policy'])
+    // An adopted enforcer has no ADK policy provenance, so admission must compare the requested
+    // effect against its genuinely live foreign baseline. Owned sessions retain the established
+    // first-writer baseline for subsequent handles.
+    const adopted = options.enforcer.adopted === true
+    const firstHandle = owner === undefined
+    if (owner !== undefined) {
+      const admissionBaseline = adopted ? live : owner.baseline
+      const requested = policyEffect(options.policy, admissionBaseline)
+      if (!admission(requested, admissionBaseline)) {
+        throw new E_SANDBOX_POLICY_CONFLICT([
+          `requested policy ${json(options.policy)} conflicts with ${json(admissionBaseline)}`,
+        ])
+      }
+    } else {
+      // Adoption has no caller policy to compare against until this point; rule 3b compares the
+      // requested effect with the foreign live baseline before admitting the first handle.
+      if (adopted && !admission(policyEffect(options.policy, live), live))
+        throw new E_SANDBOX_POLICY_CONFLICT([
+          `requested policy ${json(options.policy)} conflicts with ${json(live)}`,
+        ])
+      owner = { baseline: live, enforcer: options.enforcer, owned: !adopted }
+      assignedOwner = owner
     }
-  } else {
-    // Adoption has no caller policy to compare against until this point; rule 3b compares the
-    // requested effect with the foreign live baseline before admitting the first handle.
-    if (adopted && !admission(policyEffect(options.policy, live), live))
-      throw new E_SANDBOX_POLICY_CONFLICT([
-        `requested policy ${json(options.policy)} conflicts with ${json(live)}`,
-      ])
-    owner = { baseline: live, enforcer: options.enforcer, owned: !adopted }
-  }
-  const baseline = owner.baseline
-  const epoch = createSandboxEpoch()
-  let disposed = false
-  const controllers = new Set<AbortController>()
-  const check = (): void => {
-    if (disposed) throw new E_SANDBOX_NOT_INITIALIZED(['Sandbox handle has been disposed'])
-    const current = owner?.enforcer.effectivePolicy()
-    if (!current) throw new E_SANDBOX_NOT_INITIALIZED(['Sandbox policy is unavailable'])
-    const reason = drift(baseline, current)
-    if (reason) {
-      emitDriftCheck(sink, 'failed', { reason })
-      throw new E_SANDBOX_POLICY_CONFLICT([`sandbox drift detected: ${reason}`])
+    const admittedOwner = owner
+    if (!admittedOwner) throw new E_SANDBOX_NOT_INITIALIZED(['Sandbox owner was not established'])
+    if (options.probeSpawn) {
+      // Probe only after admission: preflight runs before admission and could exercise a rejected policy.
+      // Probe failures fail closed; manager.ts:272 calls enforcer.run() unconditionally, so
+      // allowUnsandboxedFallback cannot provide an unsandboxed alternative here.
+      await probeSandboxSpawn(admittedOwner.enforcer, options.policy)
     }
-    if (baseline.network.disabled) emitDriftCheck(sink, 'skipped', { networkDomainsSkipped: true })
-    else emitDriftCheck(sink, 'passed')
+    if (owner !== admittedOwner)
+      throw new E_SANDBOX_NOT_INITIALIZED(['Sandbox owner changed during construction'])
+    // A disposal requested while this construction was probing must invalidate construction rather
+    // than return a handle that the queued disposal would immediately reset.
+    if (disposalRequested > 0)
+      throw new E_SANDBOX_NOT_INITIALIZED(['Sandbox disposal was requested during construction'])
+    const baseline = admittedOwner.baseline
+    const epoch = createSandboxEpoch()
+    let disposed = false
+    const controllers = new Set<AbortController>()
+    const check = (): void => {
+      if (disposed) throw new E_SANDBOX_NOT_INITIALIZED(['Sandbox handle has been disposed'])
+      const current = owner?.enforcer.effectivePolicy()
+      if (!current) throw new E_SANDBOX_NOT_INITIALIZED(['Sandbox policy is unavailable'])
+      const reason = drift(baseline, current)
+      if (reason) {
+        emitDriftCheck(sink, 'failed', { reason })
+        throw new E_SANDBOX_POLICY_CONFLICT([`sandbox drift detected: ${reason}`])
+      }
+      if (baseline.network.disabled)
+        emitDriftCheck(sink, 'skipped', { networkDomainsSkipped: true })
+      else emitDriftCheck(sink, 'passed')
+    }
+    const handle: SandboxHandle = {
+      epoch,
+      effectivePolicy: () => owner?.enforcer.effectivePolicy(),
+      run: async (runOptions) => {
+        check()
+        const controller = new AbortController()
+        controllers.add(controller)
+        const signal = runOptions.signal
+        if (signal) {
+          if (signal.aborted) controller.abort(signal.reason)
+          else
+            signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
+        }
+        const result = owner!.enforcer.run({ ...runOptions, signal: controller.signal })
+        void result.then(
+          () => controllers.delete(controller),
+          () => controllers.delete(controller)
+        )
+        if (preflight.fallbackFired) emitFallback(sink, 'sandbox', 'unsandboxed fallback')
+        return result
+      },
+      narrow: async (policy) => {
+        check()
+        const candidate = options.enforcer as SandboxPolicyEnforcer & {
+          narrow?: (requested: SandboxPolicy) => Promise<void>
+        }
+        if (typeof candidate.narrow !== 'function')
+          throw new E_SANDBOX_NARROWING_UNSUPPORTED(['filesystem/network'])
+        await candidate.narrow(policy)
+      },
+      isEpochLive: (candidate) => !disposed && candidate === epoch,
+      dispose: async () => {
+        if (disposed) return
+        disposed = true
+        // Mark synchronously, before waiting for the establishment queue, so a pending probe can
+        // fail with a lifecycle error instead of returning a handle that this disposal resets.
+        if (firstHandle) disposalRequested += 1
+        const releaseDispose = await acquireEstablishment()
+        try {
+          for (const controller of controllers) controller.abort()
+          controllers.clear()
+          if (firstHandle) {
+            if (!adopted) await options.enforcer.dispose()
+            if (owner?.enforcer === options.enforcer) owner = undefined
+          }
+        } finally {
+          if (firstHandle) disposalRequested -= 1
+          releaseDispose()
+        }
+      },
+    }
+    release()
+    return handle
+  } catch (error) {
+    try {
+      if (assignedOwner && owner === assignedOwner) {
+        owner = undefined
+        // Roll back the backend session as well as the manager record. Calling the enforcer
+        // directly avoids re-entering the establishment queue held by this construction.
+        if (assignedOwner.owned) await options.enforcer.dispose()
+      }
+    } finally {
+      release()
+    }
+    throw error
   }
-  const handle: SandboxHandle = {
-    epoch,
-    effectivePolicy: () => owner?.enforcer.effectivePolicy(),
-    run: async (runOptions) => {
-      check()
-      const controller = new AbortController()
-      controllers.add(controller)
-      const signal = runOptions.signal
-      if (signal) {
-        if (signal.aborted) controller.abort(signal.reason)
-        else signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
-      }
-      const result = owner!.enforcer.run({ ...runOptions, signal: controller.signal })
-      void result.then(
-        () => controllers.delete(controller),
-        () => controllers.delete(controller)
-      )
-      if (preflight.fallbackFired) emitFallback(sink, 'sandbox', 'unsandboxed fallback')
-      return result
-    },
-    narrow: async (policy) => {
-      check()
-      const candidate = options.enforcer as SandboxPolicyEnforcer & {
-        narrow?: (requested: SandboxPolicy) => Promise<void>
-      }
-      if (typeof candidate.narrow !== 'function')
-        throw new E_SANDBOX_NARROWING_UNSUPPORTED(['filesystem/network'])
-      await candidate.narrow(policy)
-    },
-    isEpochLive: (candidate) => !disposed && candidate === epoch,
-    dispose: async () => {
-      if (disposed) return
-      disposed = true
-      for (const controller of controllers) controller.abort()
-      controllers.clear()
-      if (firstHandle) {
-        if (!adopted) await options.enforcer.dispose()
-        if (owner?.enforcer === options.enforcer) owner = undefined
-      }
-    },
-  }
-  return handle
 }

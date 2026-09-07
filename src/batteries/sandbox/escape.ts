@@ -53,6 +53,23 @@ export const validateBinShell = (value = '/bin/bash'): string => {
 /** Alias used by the SRT adapter at construction time. */
 export const assertPosixBinShell = validateBinShell
 
+/** Validate a configurable binary path without checking whether the binary exists. */
+export const validateAbsoluteBinaryPath = (
+  value: string | undefined,
+  optionName: string
+): string | undefined => {
+  if (value === undefined) return undefined
+  if (!value.startsWith('/')) {
+    throw new E_INVALID_SANDBOX_CONFIG([
+      `${optionName} ${JSON.stringify(value)} must be an absolute path`,
+    ])
+  }
+  if (value.includes('\0')) {
+    throw new E_INVALID_SANDBOX_CONFIG([`${optionName} ${JSON.stringify(value)} contains NUL`])
+  }
+  return value
+}
+
 /** Reject an argv value which would otherwise be interpreted as an option. */
 export const assertArgvValue = (value: string): string => {
   if (value.startsWith('-')) {

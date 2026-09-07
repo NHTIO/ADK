@@ -111,6 +111,27 @@ describe('SpooledMarkdownArtifact', () => {
       const blocks = await make(MD_NO_FRONTMATTER).md_code_blocks('rust')
       expect(blocks).toHaveLength(0)
     })
+
+    it('filters to fenced blocks without a language for an empty lang', async () => {
+      const content = ['```ts', 'const typed = true', '```', '', '```', 'plain text', '```'].join(
+        '\n'
+      )
+      const artifact = make(content)
+      const ctx = makeDispatchContext({
+        toolCalls: [makeToolCall(artifact, { id: 'tc-md-code' })],
+      })
+      const tool = SpooledMarkdownArtifact.forgeTools(ctx).get('artifact_md_code_blocks')!
+      await expect(tool.validate({ callId: 'tc-md-code', lang: '' })).resolves.toBeDefined()
+      const serialized = await tool.executor(ctx)({ callId: 'tc-md-code', lang: '' })
+      expect(typeof serialized).toBe('string')
+      const result = JSON.parse(serialized as string)
+      expect(result).toHaveLength(1)
+      expect(result[0]).toMatchObject({ lang: null })
+      expect(result[0]).toHaveProperty('startLine')
+      const blocks = await artifact.md_code_blocks('')
+      expect(blocks).toHaveLength(1)
+      expect(blocks[0].lang).toBeNull()
+    })
   })
 
   describe('md_sections', () => {
