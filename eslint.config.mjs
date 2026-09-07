@@ -45,6 +45,7 @@ export default [
       'src/batteries/tools/**/*.ts',
       'src/batteries/sandbox/**/*.ts',
       'src/batteries/media/**/*.ts',
+      'src/batteries/artifacts/**/*.ts',
     ],
     rules: {
       'adk/require-string-empty-disposition': 'error',

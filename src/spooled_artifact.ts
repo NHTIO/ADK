@@ -45,3 +45,18 @@ export type {
   MarkdownCodeEntry,
   MarkdownSection,
 } from './lib/classes/spooled_markdown_artifact'
+
+/**
+ * @primaryExport
+ */
+export { collectArtifactCompatibleIds } from './lib/classes/spooled_artifact'
+
+/**
+ * @primaryExport
+ */
+export { resolveArtifactById } from './lib/classes/spooled_artifact'
+
+/**
+ * @primaryExport
+ */
+export { defaultSerialise } from './lib/classes/spooled_artifact'

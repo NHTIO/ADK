@@ -68,6 +68,14 @@ export interface ToolMethodDescriptor {
 
 const noArgsSchema = validator.object<Record<string, never>>({})
 
+/**
+ * Collect artifact IDs from the current turn's tool calls and retrievables that are instances of a specific artifact class.
+ *
+ * @param ctx - The dispatch context containing tool calls and retrievables.
+ * @param requires - The artifact class constructor to filter by.
+ * @returns An array of unique artifact IDs matching the specified class, with collision detection.
+ * @throws {@link @nhtio/adk!E_ARTIFACT_ID_COLLISION} when the same ID appears in both tool calls and retrievables.
+ */
 export function collectArtifactCompatibleIds(
   ctx: {
     turnToolCalls: Iterable<{
@@ -94,6 +102,14 @@ export function collectArtifactCompatibleIds(
   return [...new Set([...toolIds, ...retrievableIds])]
 }
 
+/**
+ * Resolve an artifact by ID from the current turn's tool calls or retrievables, with type narrowing.
+ *
+ * @param ctx - The dispatch context containing tool calls and retrievables.
+ * @param id - The artifact ID to resolve.
+ * @param requires - The artifact class constructor to narrow by; only artifacts of this type are returned.
+ * @returns The resolved artifact and its source (tool call or retrievable), or undefined if not found.
+ */
 export function resolveArtifactById(
   ctx: {
     turnToolCalls: Iterable<{
