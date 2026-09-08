@@ -15,6 +15,53 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-09-08
+
+### Changed
+
+- **`ClaudeCodeCliAdapter` now honours the same executor contract as every other LLM battery.** It
+  was the only one that diverged, and it shipped unused. Two changes bring it in line, both
+  established against the live `claude` CLI (2.1.251) rather than inferred from its documentation.
+
+  **Fixed single-turn dispatch.** `--max-turns 1` is now unconditional argv rather than an option:
+  one dispatch permits one generation and all of its tool calls, then control returns to
+  {@link TurnRunner} instead of letting Claude start a second generation. Claude signals that
+  boundary with a terminal `result` carrying `subtype: error_max_turns` and `isError: true` — a
+  specific, machine-readable "the cap did its job", not a crash — so it now routes through the
+  success path with its generation stats and `autoAck` intact. Previously every tool-using dispatch
+  ended as {@link E_CLAUDE_CODE_CLI_TURN_FAILED} with its already-streamed output discarded. The
+  `subtype` field was parsed from Claude's stream-json but silently dropped before reaching the
+  adapter; it is now first-class on the wrapper wire event, because without it the normal boundary
+  is indistinguishable from a failure. Other error subtypes, notably `--max-budget-usd` exhaustion,
+  remain genuine failures.
+
+  **`maxTurns` is deprecated and inert.** It stays in the public options surface for compatibility,
+  but only `maxTurns: 1` validates — any other value fails with a message explaining that
+  single-turn dispatch is the fixed contract — and the value is ignored, since argv always carries
+  the cap. There is no capability probe: the installed CLI supports `--max-turns` without listing
+  it in `--help`, so a documentation grep is a false negative, and a CLI genuinely lacking the flag
+  exits non-zero with `error: unknown option`, already surfaced as
+  {@link E_CLAUDE_CODE_CLI_PROCESS_EXITED_NONZERO}.
+
+### Added
+
+- **Pre-flight context-window guard for the Claude Code CLI battery.** `contextWindow` and
+  `tokenEncoding` now behave as they do in the five wire batteries: the same six buckets, the same
+  spooled-retrievable handle accounting, the same `context-window-usage` debug record, throwing the
+  new {@link E_CLAUDE_CODE_CLI_CONTEXT_OVERFLOW} **before the wrapper process is spawned**. The
+  point is refusing an unsendable payload before spending money and latency; `maxBudgetUsd` caps
+  spend *after* dispatch and was never a substitute for it. A non-null `tokenEncoding` without a
+  `contextWindow` is rejected at iteration time, matching the sibling batteries.
+
+  This battery has no wire `tools` array to tally — tools reach the model through the MCP bridge —
+  so the tools bucket counts the serialized bridged declarations plus the
+  `mcp__adk_bridge__`-prefixed names as Claude sees them. The rendered `-p` prompt and optional
+  `appendSystemPrompt` are measured directly; raw source-bucket figures remain diagnostics for
+  shedding decisions and are not double-counted. The estimate is exact for content this adapter
+  renders and forwards, but is deliberately an **honest floor** for Claude Code content the adapter
+  cannot observe: its Agent SDK preamble, `CWD:`/`Date:`, billing header, built-in tool schemas, and
+  MCP declaration envelope. The same reasoning ollama applies only to its server-side chat templates.
+
 ## 2026-09-07
 
 ### Added

@@ -18,9 +18,8 @@
  * disabled via `--tools ""`; real ADK tools are bridged into the CLI's tool loop via an injected
  * MCP server, but actual execution always happens on the ADK side via `tool.executor(ctx)(args)`;
  * permissions are bypassed wholesale (`--dangerously-skip-permissions`) since the bridge itself —
- * not a CLI allow-flag — is what enforces which bridged tools are callable; and there is no
- * client-side `contextWindow` guard, since `--max-budget-usd`/`--max-turns` are the CLI-native
- * substitutes.
+ * not a CLI allow-flag — is what enforces which bridged tools are callable; and context usage is
+ * checked client-side when `tokenEncoding` and `contextWindow` are configured.
  */
 
 export { ClaudeCodeCliAdapter, resolveDefaultWrapperPath } from './adapter'
@@ -119,5 +118,6 @@ export {
   E_CLAUDE_CODE_CLI_STARTUP_TIMEOUT,
   E_CLAUDE_CODE_CLI_MCP_BRIDGE_STARTUP_FAILED,
   E_CLAUDE_CODE_CLI_TURN_FAILED,
+  E_CLAUDE_CODE_CLI_CONTEXT_OVERFLOW,
   E_CLAUDE_CODE_CLI_UNSUPPORTED_MEDIA_MODALITY,
 } from './exceptions'

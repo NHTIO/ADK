@@ -210,7 +210,7 @@ describe('claude_code_cli validation', () => {
         cwd: '/tmp',
         addDir: ['/tmp/a', '/tmp/b'],
         disallowedTools: ['dangerous_tool'],
-        maxTurns: 5,
+        maxTurns: 1,
         maxBudgetUsd: 1.5,
         fallbackModel: ['claude-fable-5', 'claude-opus-5'],
         selfIdentity: 'agent',
@@ -229,7 +229,7 @@ describe('claude_code_cli validation', () => {
         disableErrorReporting: true,
         disableNonessentialTraffic: true,
       })
-      expect(resolved.maxTurns).toBe(5)
+      expect(resolved.maxTurns).toBe(1)
       expect(resolved.fallbackModel).toEqual(['claude-fable-5', 'claude-opus-5'])
       expect(resolved.disallowedTools).toEqual(['dangerous_tool'])
     })
@@ -269,10 +269,24 @@ describe('claude_code_cli validation', () => {
       )
     })
 
-    it('rejects a non-integer maxTurns', () => {
-      expect(() => validateOptions({ ...baseOptions(), maxTurns: 1.5 })).toThrow(
-        E_INVALID_CLAUDE_CODE_CLI_OPTIONS
+    it.each([2, 0, 5])('rejects maxTurns %s with the deprecation guidance', (maxTurns) => {
+      expect(() => validateOptions({ ...baseOptions(), maxTurns })).toThrow(
+        /deprecated and inert.*only maxTurns: 1 is accepted/
       )
+    })
+
+    it('accepts maxTurns 1 and omission', () => {
+      expect(validateOptions({ ...baseOptions(), maxTurns: 1 }).maxTurns).toBe(1)
+      expect(validateOptions(baseOptions()).maxTurns).toBeUndefined()
+    })
+
+    it('checks tokenEncoding/contextWindow at iteration time', async () => {
+      const { ClaudeCodeCliAdapter } =
+        await import('../../../../../src/batteries/llm/claude_code_cli/adapter')
+      const adapter = new ClaudeCodeCliAdapter({ ...baseOptions(), tokenEncoding: 'cl100k_base' })
+      await expect(
+        adapter.executor()({ stash: { get: () => ({}) } } as never, {} as never)
+      ).rejects.toBeInstanceOf(E_INVALID_CLAUDE_CODE_CLI_OPTIONS)
     })
   })
 })

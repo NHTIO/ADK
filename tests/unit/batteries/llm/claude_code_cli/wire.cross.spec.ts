@@ -55,7 +55,7 @@ describe('claude_code_cli wire protocol', () => {
         { type: 'thought_delta', id: '1', delta: 'y' },
         { type: 'tool_call_request', requestId: '1', tool: 't', args: { a: 1 } },
         { type: 'retry', attempt: 1 },
-        { type: 'result', isError: false, resultText: 'ok' },
+        { type: 'result', isError: false, subtype: 'success', resultText: 'ok' },
         { type: 'error', message: 'boom' },
         { type: 'log', level: 'trace', kind: 'k', message: 'm' },
         { type: 'shutdown_complete' },

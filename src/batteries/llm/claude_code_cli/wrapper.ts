@@ -110,9 +110,8 @@ const buildClaudeArgv = (cmd: WrapperRunCommand, bridgeUrl: string): string[] =>
   if (cmd.maxBudgetUsd !== undefined) {
     args.push('--max-budget-usd', String(cmd.maxBudgetUsd))
   }
-  if (cmd.maxTurns !== undefined) {
-    args.push('--max-turns', String(cmd.maxTurns))
-  }
+  // Fixed single-turn dispatch contract: the harness owns iteration boundaries.
+  args.push('--max-turns', '1')
   if (cmd.fallbackModel !== undefined && cmd.fallbackModel.length > 0) {
     // ONE comma-joined value, never separate argv tokens — confirmed by direct reproduction: the
     // flag is singular (`--fallback-model <model>`) and documented as accepting "a comma-separated
@@ -410,6 +409,7 @@ const main = async (): Promise<void> => {
           totalCostUsd: line.total_cost_usd,
           usage: line.usage,
           isError: line.is_error === true,
+          subtype: line.subtype,
           stopReason: line.stop_reason,
           raw: line,
         })

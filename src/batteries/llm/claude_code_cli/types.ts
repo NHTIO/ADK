@@ -12,8 +12,8 @@
  * harnesses) and is re-exported here for convenience.
  */
 
-import type { SpoolStore } from '@nhtio/adk/common'
 import type { ClaudeCodeCliExtraArg } from './wire'
+import type { SpoolStore, TokenEncoding } from '@nhtio/adk/common'
 import type {
   ChatCompletionsBucketOrder,
   UnsupportedMediaPolicy,
@@ -223,9 +223,13 @@ export interface ClaudeCodeCliAdapterOptions {
    * once `--dangerously-skip-permissions` is set). Never emitted as its own CLI flag.
    */
   disallowedTools?: string[]
+  /** Size of the model's token context window for the ADK pre-flight guard. */
+  contextWindow?: number
+  /** Tokenizer encoding configuration for token counting. */
+  tokenEncoding?: TokenEncoding | null
   /**
-   * Forwarded to `--max-turns` ONLY when a capability probe confirms the running CLI supports it
-   * (the flag does not exist in every CLI version). Silently omitted otherwise.
+   * @deprecated Single-turn dispatch is the fixed battery contract. Only `1` is accepted; the
+   * option is ignored because argv always carries `--max-turns 1`.
    */
   maxTurns?: number
   /** Forwarded to `--max-budget-usd`. Always available. */

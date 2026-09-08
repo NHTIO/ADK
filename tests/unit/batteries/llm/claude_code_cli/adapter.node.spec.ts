@@ -4,6 +4,7 @@ import { validator } from '@nhtio/validation'
 import { describe, expect, it, vi } from 'vitest'
 import { ClaudeCodeCliAdapter } from '../../../../../src/batteries/llm/claude_code_cli/adapter'
 import { E_INVALID_CLAUDE_CODE_CLI_OPTIONS } from '../../../../../src/batteries/llm/claude_code_cli/exceptions'
+import { defaultDescriptionToChatCompletionsJsonSchema } from '../../../../../src/batteries/llm/claude_code_cli/helpers'
 import {
   Tokenizable,
   Message,
@@ -22,6 +23,7 @@ import {
   E_CLAUDE_CODE_CLI_PROCESS_EXITED_NONZERO,
   E_CLAUDE_CODE_CLI_STREAM_STALLED,
   E_CLAUDE_CODE_CLI_TURN_FAILED,
+  E_CLAUDE_CODE_CLI_CONTEXT_OVERFLOW,
 } from '../../../../../src/batteries/llm/claude_code_cli/exceptions'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
@@ -191,7 +193,10 @@ const makeHelpers = (): DispatchExecutorHelpers & {
  */
 const makeExecaFn = (
   fake: FakeWrapperChild
-): { execaFn: (...args: unknown[]) => FakeWrapperChild; calls: unknown[][] } => {
+): {
+  execaFn: (...args: unknown[]) => FakeWrapperChild
+  calls: unknown[][]
+} => {
   const calls: unknown[][] = []
   const execaFn = (...args: unknown[]): FakeWrapperChild => {
     calls.push(args)
@@ -232,8 +237,9 @@ describe('ClaudeCodeCliAdapter — spawn shape', () => {
     fake.exit(0)
     await result
 
-    expect(calls).toHaveLength(1)
-    const [cmd, args, options] = calls[0] as [string, string[], Record<string, unknown>]
+    const wrapperCalls = calls.filter((call) => call[0] === process.execPath)
+    expect(wrapperCalls).toHaveLength(1)
+    const [cmd, args, options] = wrapperCalls[0] as [string, string[], Record<string, unknown>]
     expect(cmd).toBe(process.execPath)
     expect(args).toEqual(['/fake/wrapper.mjs'])
     expect(options).toMatchObject({ cleanup: true })
@@ -269,7 +275,12 @@ describe('ClaudeCodeCliAdapter — happy path', () => {
     await nextTurn()
     fake.emit({ type: 'init', model: 'claude-sonnet-5' })
     await nextTurn()
-    fake.emit({ type: 'message_delta', id: 'msg-1', delta: 'Hello there', isComplete: true })
+    fake.emit({
+      type: 'message_delta',
+      id: 'msg-1',
+      delta: 'Hello there',
+      isComplete: true,
+    })
     await nextTurn()
 
     // Terminal `result` observed — the adapter must await the wrapper's OWN self-shutdown (its
@@ -315,6 +326,26 @@ describe('ClaudeCodeCliAdapter — happy path', () => {
     await promise
     expect(ctx.nack).toHaveBeenCalledWith(expect.any(E_CLAUDE_CODE_CLI_TURN_FAILED))
   })
+
+  it('treats error_max_turns as normal completion even without result text', async () => {
+    const fake = new FakeWrapperChild()
+    const { execaFn } = makeExecaFn(fake)
+    const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn, autoAck: true }))
+    const ctx = makeCtx()
+    const helpers = makeHelpers()
+    const promise = adapter.executor()(ctx, helpers)
+    await nextTurn()
+    fake.emit({ type: 'ready' })
+    await nextTurn()
+    fake.emit({ type: 'init' })
+    await nextTurn()
+    fake.emit({ type: 'result', isError: true, subtype: 'error_max_turns' })
+    fake.exit(0)
+    await promise
+    expect(ctx.nack).not.toHaveBeenCalled()
+    expect(ctx.ack).toHaveBeenCalledTimes(1)
+    expect(helpers._stats).toHaveLength(1)
+  })
 })
 
 describe('ClaudeCodeCliAdapter — real ADK tool invocation via tool_call_request/tool_call_response', () => {
@@ -357,7 +388,9 @@ describe('ClaudeCodeCliAdapter — real ADK tool invocation via tool_call_reques
     // A plain (non-ArtifactTool) Tool's raw string return is spooled and rendered as a bounded
     // handle, not inlined verbatim — matching Ollama's own `inline: isArtifactTool` behavior
     // (see the outbound-rendering-matrix tests below for the ArtifactTool inline counterpart).
-    const results = response!.results as { content: Array<{ type: string; text?: string }> }
+    const results = response!.results as {
+      content: Array<{ type: string; text?: string }>
+    }
     expect(results.content[0]).toMatchObject({ type: 'text' })
     expect(results.content[0]!.text).toContain('was not inlined to preserve context budget')
     expect(results.content[0]!.text).toContain('callId: req-1')
@@ -442,12 +475,20 @@ describe('ClaudeCodeCliAdapter — real ADK tool invocation via tool_call_reques
     await nextTurn()
     fake.emit({ type: 'init' })
     await nextTurn()
-    fake.emit({ type: 'tool_call_request', requestId: 'req-x', tool: 'ghost_tool', args: {} })
+    fake.emit({
+      type: 'tool_call_request',
+      requestId: 'req-x',
+      tool: 'ghost_tool',
+      args: {},
+    })
     await nextTurn()
 
     const response = parsedWrites(fake).find((w) => w.type === 'tool_call_response')
     expect(response).toBeDefined()
-    const results = response!.results as { content: Array<{ text: string }>; isError: boolean }
+    const results = response!.results as {
+      content: Array<{ text: string }>
+      isError: boolean
+    }
     expect(results.isError).toBe(true)
     expect(results.content[0]!.text).toContain('Tool not found')
 
@@ -476,12 +517,20 @@ describe('ClaudeCodeCliAdapter — real ADK tool invocation via tool_call_reques
     await nextTurn()
     fake.emit({ type: 'init' })
     await nextTurn()
-    fake.emit({ type: 'tool_call_request', requestId: 'req-boom', tool: 'boom_tool', args: {} })
+    fake.emit({
+      type: 'tool_call_request',
+      requestId: 'req-boom',
+      tool: 'boom_tool',
+      args: {},
+    })
     await nextTurn()
 
     expect(ctx._stored.toolCalls[0]!.isError).toBe(true)
     const response = parsedWrites(fake).find((w) => w.type === 'tool_call_response')
-    const results = response!.results as { content: Array<{ text: string }>; isError: boolean }
+    const results = response!.results as {
+      content: Array<{ text: string }>
+      isError: boolean
+    }
     expect(results.isError).toBe(true)
 
     fake.emit({ type: 'result', isError: false, resultText: 'done' })
@@ -527,7 +576,9 @@ describe('ClaudeCodeCliAdapter — outbound tool-result rendering matrix', () =>
     await withReadyToolCall(fake, promise, 'r1', 'text_tool')
 
     const response = parsedWrites(fake).find((w) => w.type === 'tool_call_response')
-    const results = response!.results as { content: Array<{ type: string; text: string }> }
+    const results = response!.results as {
+      content: Array<{ type: string; text: string }>
+    }
     expect(results.content).toEqual([{ type: 'text', text: 'plain text result' }])
 
     fake.emit({ type: 'result', isError: false })
@@ -599,7 +650,9 @@ describe('ClaudeCodeCliAdapter — outbound tool-result rendering matrix', () =>
     await withReadyToolCall(fake, promise, 'r3', 'plain_spool_tool')
 
     const response = parsedWrites(fake).find((w) => w.type === 'tool_call_response')
-    const results = response!.results as { content: Array<{ type: string; text: string }> }
+    const results = response!.results as {
+      content: Array<{ type: string; text: string }>
+    }
     expect(results.content[0]!.type).toBe('text')
     expect(results.content[0]!.text).toContain('was not inlined to preserve context budget')
     expect(results.content[0]!.text).not.toContain(
@@ -626,7 +679,9 @@ describe('ClaudeCodeCliAdapter — outbound tool-result rendering matrix', () =>
     await withReadyToolCall(fake, promise, 'r4', 'inline_artifact_tool')
 
     const response = parsedWrites(fake).find((w) => w.type === 'tool_call_response')
-    const results = response!.results as { content: Array<{ type: string; text: string }> }
+    const results = response!.results as {
+      content: Array<{ type: string; text: string }>
+    }
     expect(results.content[0]!.text).toBe('the full inline body')
 
     fake.emit({ type: 'result', isError: false })
@@ -686,7 +741,11 @@ describe('ClaudeCodeCliAdapter — timeouts and abnormal termination', () => {
       const fake = new FakeWrapperChild()
       const { execaFn } = makeExecaFn(fake)
       const adapter = new ClaudeCodeCliAdapter(
-        baseOptions({ execa: execaFn, streamIdleTimeoutMs: 50, disposeGraceMs: 10 })
+        baseOptions({
+          execa: execaFn,
+          streamIdleTimeoutMs: 50,
+          disposeGraceMs: 10,
+        })
       )
       const ctx = makeCtx()
       const promise = adapter.executor()(ctx, makeHelpers())
@@ -800,7 +859,7 @@ describe('ClaudeCodeCliAdapter — timeouts and abnormal termination', () => {
       catch: (reject: (e: unknown) => unknown): Promise<unknown> =>
         Promise.reject(new Error('boom')).catch(reject),
     }
-    const execaFn = (): typeof rejecting => rejecting
+    const execaFn = (..._args: unknown[]): typeof rejecting => rejecting
     ;(execaFn as unknown as { exec: unknown }).exec = true
     const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn as never }))
     const ctx = makeCtx()
@@ -879,7 +938,11 @@ describe('ClaudeCodeCliAdapter — options-merge precedence and validation', () 
     const fake = new FakeWrapperChild()
     const { execaFn } = makeExecaFn(fake)
     const adapter = new ClaudeCodeCliAdapter(
-      baseOptions({ execa: execaFn, model: 'ctor-model', appendSystemPrompt: 'ctor' })
+      baseOptions({
+        execa: execaFn,
+        model: 'ctor-model',
+        appendSystemPrompt: 'ctor',
+      })
     )
     const executor = adapter.executor({ model: 'exec-model' })
     const ctx = makeCtx({
@@ -936,7 +999,9 @@ describe('ClaudeCodeCliAdapter — options-merge precedence and validation', () 
     const ctx = makeCtx({ stash: { claudeCodeCli: { apiKey: 'also-set' } } })
     // Both apiKey (ctor) and authToken-equivalent stash apiKey collide only if XOR fields differ;
     // force a genuine XOR violation instead by stashing authToken alongside the ctor's apiKey.
-    const ctxXor = makeCtx({ stash: { claudeCodeCli: { authToken: 'also-set' } } })
+    const ctxXor = makeCtx({
+      stash: { claudeCodeCli: { authToken: 'also-set' } },
+    })
     void ctx
     await expect(adapter.executor()(ctxXor, makeHelpers())).rejects.toBeInstanceOf(
       E_INVALID_CLAUDE_CODE_CLI_OPTIONS
@@ -977,6 +1042,197 @@ describe('ClaudeCodeCliAdapter — options-merge precedence and validation', () 
     fake.emit({ type: 'result', isError: false })
     fake.exit(0)
     await promise
+  })
+})
+
+describe('ClaudeCodeCliAdapter — context-window pre-flight guard', () => {
+  const completeDispatch = async (
+    adapter: ClaudeCodeCliAdapter,
+    ctx: MockCtx,
+    fake: FakeWrapperChild
+  ): Promise<void> => {
+    const promise = adapter.executor()(ctx, makeHelpers())
+    await nextTurn()
+    fake.emit({ type: 'ready' })
+    await nextTurn()
+    fake.emit({ type: 'init' })
+    await nextTurn()
+    fake.emit({ type: 'result', isError: false })
+    fake.exit(0)
+    await promise
+  }
+
+  it('throws overflow before spawning the wrapper', async () => {
+    const fake = new FakeWrapperChild()
+    const { execaFn, calls } = makeExecaFn(fake)
+    const adapter = new ClaudeCodeCliAdapter(
+      baseOptions({
+        execa: execaFn,
+        tokenEncoding: 'cl100k_base',
+        contextWindow: 1,
+      })
+    )
+    await expect(
+      adapter.executor()(
+        makeCtx({
+          turnMessages: [
+            new Message({
+              id: 'overflow',
+              role: 'user',
+              content: 'x'.repeat(1000),
+              createdAt: dt('2026-01-01T00:00:00Z'),
+              updatedAt: dt('2026-01-01T00:00:00Z'),
+            }),
+          ],
+        }),
+        makeHelpers()
+      )
+    ).rejects.toThrow(E_CLAUDE_CODE_CLI_CONTEXT_OVERFLOW)
+    expect(calls.some(([command]) => command === process.execPath)).toBe(false)
+  })
+
+  it.each([undefined, null])(
+    'dispatches massive content when tokenEncoding is %s',
+    async (tokenEncoding) => {
+      const fake = new FakeWrapperChild()
+      const { execaFn, calls } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn, tokenEncoding }))
+      await completeDispatch(
+        adapter,
+        makeCtx({
+          turnMessages: [
+            new Message({
+              id: 'massive',
+              role: 'user',
+              content: 'x'.repeat(50_000),
+              createdAt: dt('2026-01-01T00:00:00Z'),
+              updatedAt: dt('2026-01-01T00:00:00Z'),
+            }),
+          ],
+        }),
+        fake
+      )
+      expect(calls.some(([command]) => command === process.execPath)).toBe(true)
+    }
+  )
+
+  it('counts appendSystemPrompt in the threshold', async () => {
+    const enc = 'cl100k_base' as const
+    const prompt = 'rendered prompt'
+    const buildPrompt = vi.fn(async () => ({ prompt, reasoningPayloads: [] }))
+    const toolBlock = Tokenizable.estimateTokens('{}|', enc)
+    const promptBlock = Tokenizable.estimateTokens(prompt, enc)
+    const appendValue = 'x'.repeat(1000)
+    const contextWindow = promptBlock + toolBlock + 1
+    const helperOptions = { buildClaudeCodeCliPrompt: buildPrompt }
+
+    const fittingFake = new FakeWrapperChild()
+    const fitting = makeExecaFn(fittingFake)
+    const withoutAppend = new ClaudeCodeCliAdapter(
+      baseOptions({
+        execa: fitting.execaFn,
+        tokenEncoding: enc,
+        contextWindow,
+        helpers: helperOptions,
+      })
+    )
+    await completeDispatch(withoutAppend, makeCtx(), fittingFake)
+    expect(fitting.calls.some(([command]) => command === process.execPath)).toBe(true)
+
+    const overflowingFake = new FakeWrapperChild()
+    const overflowing = makeExecaFn(overflowingFake)
+    const withAppend = new ClaudeCodeCliAdapter(
+      baseOptions({
+        execa: overflowing.execaFn,
+        tokenEncoding: enc,
+        contextWindow,
+        appendSystemPrompt: appendValue,
+        helpers: helperOptions,
+      })
+    )
+    await expect(withAppend.executor()(makeCtx(), makeHelpers())).rejects.toThrow(
+      E_CLAUDE_CODE_CLI_CONTEXT_OVERFLOW
+    )
+    expect(overflowing.calls.some(([command]) => command === process.execPath)).toBe(false)
+  })
+
+  it('counts tool declarations in the threshold and does not over-count them', async () => {
+    const tool = new Tool({
+      name: 'search_docs',
+      description: 'A deliberately verbose search tool declaration.',
+      inputSchema: validator.object({ query: validator.string().required() }),
+      handler: async () => 'ok',
+    })
+    const tools = new ToolRegistry([tool])
+    const described = tool.describe()
+    const bridgedTools = [
+      {
+        name: described.name,
+        description: described.description,
+        inputSchema: defaultDescriptionToChatCompletionsJsonSchema(described.inputSchema as never),
+      },
+    ]
+    const enc = 'cl100k_base' as const
+    const sysAndMsg =
+      Tokenizable.estimateTokens('You are a helpful assistant.', enc) +
+      Tokenizable.estimateTokens('hi', enc)
+    const toolSerialization = `${JSON.stringify(bridgedTools)}|mcp__adk_bridge__search_docs`
+    const toolBlock = Tokenizable.estimateTokens(toolSerialization, enc)
+    expect(toolBlock).toBeGreaterThan(sysAndMsg)
+    const fake = new FakeWrapperChild()
+    const { execaFn, calls } = makeExecaFn(fake)
+    const adapter = new ClaudeCodeCliAdapter(
+      baseOptions({
+        execa: execaFn,
+        tokenEncoding: enc,
+        contextWindow: sysAndMsg + Math.floor(toolBlock / 2),
+      })
+    )
+    await expect(
+      adapter.executor()(
+        makeCtx({
+          turnMessages: [
+            new Message({
+              id: 'tool-overflow',
+              role: 'user',
+              content: 'hi',
+              createdAt: dt('2026-01-01T00:00:00Z'),
+              updatedAt: dt('2026-01-01T00:00:00Z'),
+            }),
+          ],
+          tools,
+        }),
+        makeHelpers()
+      )
+    ).rejects.toThrow(E_CLAUDE_CODE_CLI_CONTEXT_OVERFLOW)
+    expect(calls.some(([command]) => command === process.execPath)).toBe(false)
+
+    const fake2 = new FakeWrapperChild()
+    const resolved = makeExecaFn(fake2)
+    const fitting = new ClaudeCodeCliAdapter(
+      baseOptions({
+        execa: resolved.execaFn,
+        tokenEncoding: enc,
+        contextWindow: sysAndMsg + toolBlock + 256,
+      })
+    )
+    await completeDispatch(
+      fitting,
+      makeCtx({
+        turnMessages: [
+          new Message({
+            id: 'tool-fitting',
+            role: 'user',
+            content: 'hi',
+            createdAt: dt('2026-01-01T00:00:00Z'),
+            updatedAt: dt('2026-01-01T00:00:00Z'),
+          }),
+        ],
+        tools,
+      }),
+      fake2
+    )
+    expect(resolved.calls.some(([command]) => command === process.execPath)).toBe(true)
   })
 })
 

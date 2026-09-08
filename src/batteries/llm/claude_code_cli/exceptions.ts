@@ -102,8 +102,29 @@ export const E_CLAUDE_CODE_CLI_MCP_BRIDGE_STARTUP_FAILED = createException<[stri
 )
 
 /**
- * Thrown when Claude's terminal `result` reports `isError: true` — includes `--max-budget-usd`/
- * `--max-turns` exhaustion, the CLI-native substitutes for a client-side `contextWindow` guard.
+ * Thrown when the assembled request exceeds the configured `contextWindow` during the pre-flight
+ * context-window guard. Only raised when `tokenEncoding` is non-null. Carries `{ total,
+ * contextWindow, tokenEncoding, perBucket }` in the message so middleware can target shedding.
+ *
+ * @remarks
+ * This is the ADK-side token-budget guard and refuses the request before the Claude Code CLI
+ * wrapper is spawned. The rendered prompt and append-system prompt are measured exactly; it is
+ * an honest floor only because Claude Code injects additional vendor-owned content (the Agent SDK
+ * preamble, CWD/Date, billing header, built-in tool schemas, and MCP declaration envelope).
+ */
+export const E_CLAUDE_CODE_CLI_CONTEXT_OVERFLOW = createException<[number, number, string, string]>(
+  'E_CLAUDE_CODE_CLI_CONTEXT_OVERFLOW',
+  'Claude Code CLI request token weight (%d) exceeds context window (%d) under encoding %s. Per-bucket breakdown: %s',
+  'E_CLAUDE_CODE_CLI_CONTEXT_OVERFLOW',
+  529,
+  true
+)
+
+/**
+ * Thrown when Claude's terminal `result` reports `isError: true` for a terminal error subtype
+ * other than `error_max_turns`, notably CLI-native budget exhaustion from `--max-budget-usd`.
+ * The `error_max_turns` subtype is the normal successful completion signal for this adapter's
+ * fixed single-turn dispatch contract.
  */
 export const E_CLAUDE_CODE_CLI_TURN_FAILED = createException<[string, string]>(
   'E_CLAUDE_CODE_CLI_TURN_FAILED',

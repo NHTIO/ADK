@@ -21,9 +21,9 @@
  */
 
 import { isError } from '@nhtio/adk/guards'
-import { byteStoreSchema } from '@nhtio/adk/common'
 import { validator, ValidationError } from '@nhtio/validation'
 import { E_INVALID_CLAUDE_CODE_CLI_OPTIONS } from './exceptions'
+import { byteStoreSchema, TokenEncoding } from '@nhtio/adk/common'
 import type { ClaudeCodeCliAdapterOptions } from './types'
 
 // ─── Sub-schemas ──────────────────────────────────────────────────────────────
@@ -37,6 +37,10 @@ const bucketOrderSchema = validator
   .items(bucketLabelSchema)
   .unique()
   .default(['standingInstructions', 'memories', 'retrievables', 'timeline'])
+
+const tokenEncodingSchema = validator
+  .alternatives(validator.string().valid(...TokenEncoding), validator.any().valid(null).optional())
+  .default(null)
 
 const unsupportedMediaPolicySchema = validator
   .alternatives(
@@ -133,7 +137,17 @@ export const claudeCodeCliOptionsSchema = validator
     cwd: validator.string().optional(),
     addDir: validator.array().items(validator.string().min(1)).optional(),
     disallowedTools: validator.array().items(validator.string().min(1)).default([]),
-    maxTurns: validator.number().integer().min(1).optional(),
+    maxTurns: validator
+      .number()
+      .valid(1)
+      .messages({
+        'any.only':
+          'maxTurns is deprecated and inert: single-turn dispatch is the fixed battery contract; ' +
+          'only maxTurns: 1 is accepted, and the option is ignored because argv always carries --max-turns 1.',
+      })
+      .optional(),
+    contextWindow: validator.number().integer().min(1).optional(),
+    tokenEncoding: tokenEncodingSchema,
     maxBudgetUsd: validator.number().min(0).optional(),
     fallbackModel: validator.array().items(validator.string().min(1)).optional(),
     selfIdentity: validator.string().min(1).default('assistant'),

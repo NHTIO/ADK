@@ -226,14 +226,13 @@ describe.skipIf(!distBuilt)('claude_code_cli wrapper — argv construction (Deci
     expect(argv[idx + 1]).toBe('be terse')
   })
 
-  it('--max-turns is included when maxTurns is set and omitted when absent', async () => {
-    const argvWith = await runToCompletionAndReadArgv({ maxTurns: 5 })
-    const idx = argvWith.indexOf('--max-turns')
-    expect(idx).toBeGreaterThanOrEqual(0)
-    expect(argvWith[idx + 1]).toBe('5')
-
-    const argvWithout = await runToCompletionAndReadArgv()
-    expect(argvWithout).not.toContain('--max-turns')
+  it('always emits the fixed single-turn cap regardless of options', async () => {
+    for (const options of [{ maxTurns: 1 }, {}]) {
+      const argv = await runToCompletionAndReadArgv(options)
+      const idx = argv.indexOf('--max-turns')
+      expect(idx).toBeGreaterThanOrEqual(0)
+      expect(argv[idx + 1]).toBe('1')
+    }
   })
 
   it('the -- separator precedes the positional prompt', async () => {
@@ -359,6 +358,20 @@ describe.skipIf(!distBuilt)('claude_code_cli wrapper — happy path + exit code'
     const { exitCode, signal } = await h.waitForExit()
     expect(exitCode).toBe(0)
     expect(signal).toBeFalsy()
+  })
+
+  it("forwards Claude's result subtype to the emitted wrapper result event", async () => {
+    const h = spawnHarness({
+      FAKE_CLAUDE_LINES: JSON.stringify([
+        { type: 'result', subtype: 'error_max_turns', is_error: true },
+      ]),
+    })
+    await h.waitFor((e) => e.type === 'ready')
+    h.send(baseRunCommand())
+    const result = await h.waitFor((e) => e.type === 'result')
+    expect(result.subtype).toBe('error_max_turns')
+    expect(result.isError).toBe(true)
+    await h.waitFor((e) => e.type === 'shutdown_complete')
   })
 })
 

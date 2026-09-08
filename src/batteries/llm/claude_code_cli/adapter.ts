@@ -27,10 +27,12 @@ import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import {
   Tokenizable,
   ToolCall,
+  Memory,
   Message,
   Media,
   ArtifactTool,
   SpooledArtifact,
+  TokenEncoding,
 } from '@nhtio/adk/common'
 import {
   E_CLAUDE_CODE_CLI_WRAPPER_SPAWN_ERROR,
@@ -40,6 +42,8 @@ import {
   E_CLAUDE_CODE_CLI_STARTUP_TIMEOUT,
   E_CLAUDE_CODE_CLI_MCP_BRIDGE_STARTUP_FAILED,
   E_CLAUDE_CODE_CLI_TURN_FAILED,
+  E_INVALID_CLAUDE_CODE_CLI_OPTIONS,
+  E_CLAUDE_CODE_CLI_CONTEXT_OVERFLOW,
 } from './exceptions'
 import {
   defaultDescriptionToChatCompletionsJsonSchema,
@@ -206,26 +210,10 @@ const resolveHelpers = (
   }
 }
 
-// ─── capability probe (--max-turns) ─────────────────────────────────────────
-
-/** Cache of `--max-turns` capability probes, keyed by resolved `claudeBin`, shared across dispatches for one adapter-instance lifetime. */
-const maxTurnsProbeCache = new Map<string, Promise<boolean>>()
-
-const probeMaxTurnsSupport = (execaFn: ExecaLike, claudeBin: string): Promise<boolean> => {
-  let cached = maxTurnsProbeCache.get(claudeBin)
-  if (cached) return cached
-  cached = (async () => {
-    try {
-      const result = await Promise.resolve(execaFn(claudeBin, ['--help'], { cleanup: true }))
-      const stdout = (result as unknown as { stdout?: unknown }).stdout
-      return typeof stdout === 'string' && stdout.includes('--max-turns')
-    } catch {
-      return false
-    }
-  })()
-  maxTurnsProbeCache.set(claudeBin, cached)
-  return cached
-}
+const estimateTokensOf = async (
+  value: { estimateTokens: (encoding: TokenEncoding) => number | Promise<number> },
+  encoding: TokenEncoding
+): Promise<number> => Promise.resolve(value.estimateTokens(encoding))
 
 // ─── time / checksum helpers ────────────────────────────────────────────────
 
@@ -373,6 +361,12 @@ export class ClaudeCodeCliAdapter {
           : {}
       const merged = validateOptions(mergeOptions(baseline, overrides, stashOverrides))
 
+      if (merged.tokenEncoding !== null && merged.contextWindow === undefined) {
+        throw new E_INVALID_CLAUDE_CODE_CLI_OPTIONS([
+          'tokenEncoding is non-null but contextWindow is undefined',
+        ])
+      }
+
       // ── Step 2: resolve helpers ───────────────────────────────────────────
       const resolvedHelpers = resolveHelpers(merged.helpers)
 
@@ -386,21 +380,6 @@ export class ClaudeCodeCliAdapter {
       }
       const wrapperPath = merged.wrapperPath ?? resolveDefaultWrapperPath()
       const claudeBin = merged.claudeBin ?? 'claude'
-
-      // ── Step 4: capability-probe maxTurns (cached per adapter-instance lifetime) ──
-      let maxTurns: number | undefined
-      if (merged.maxTurns !== undefined) {
-        const supported = await probeMaxTurnsSupport(execaFn, claudeBin)
-        if (supported) {
-          maxTurns = merged.maxTurns
-        } else {
-          helpers.log.debug({
-            kind: 'max-turns-unsupported',
-            message:
-              'The installed Claude Code CLI does not support --max-turns; maxTurns option ignored.',
-          })
-        }
-      }
 
       // ── Step 5: pre-render inbound tool-call results (for history) ────────
       // Key by primitive identity, not id: repeated vendor/request ids must not cross-wire results.
@@ -493,7 +472,78 @@ export class ClaudeCodeCliAdapter {
         }
       })
 
-      // ── Step 8: spawn the wrapper ──────────────────────────────────────────
+      // ── Step 8: context window enforcement ────────────────────────────────
+      if (merged.tokenEncoding !== null && merged.contextWindow !== undefined) {
+        const encoding = merged.tokenEncoding as TokenEncoding
+        // The rendered prompt is the actual `-p` wire value. Measure it directly rather than
+        // re-summing its source buckets: renderers add envelopes, provenance, and ordering.
+        const promptTokens = await estimateTokensOf(new Tokenizable(prompt), encoding)
+        const appendSystemPromptTokens = merged.appendSystemPrompt
+          ? await estimateTokensOf(new Tokenizable(merged.appendSystemPrompt), encoding)
+          : 0
+
+        // Keep source-bucket diagnostics for middleware deciding what to shed. They are not part
+        // of the authoritative total above, since their content is already represented by prompt.
+        const rawSystemPrompt = await estimateTokensOf(ctx.systemPrompt, encoding)
+        let rawStandingInstructions = 0
+        for (const value of ctx.standingInstructions)
+          rawStandingInstructions += await estimateTokensOf(value, encoding)
+        let rawMemories = 0
+        for (const value of ctx.turnMemories as Set<Memory>)
+          rawMemories += await estimateTokensOf(value.content, encoding)
+        let rawRetrievables = 0
+        for (const r of ctx.turnRetrievables) {
+          rawRetrievables +=
+            !r.inline && SpooledArtifact.isSpooledArtifact(r.content) && r.content.hasSizeHints()
+              ? r.content.estimateHandleTokens(
+                  r.id,
+                  encoding,
+                  resolvedHelpers.renderRetrievableHandleBody
+                )
+              : await estimateTokensOf(r.content, encoding)
+        }
+        let rawTimeline = 0
+        for (const msg of ctx.turnMessages)
+          if (msg.content !== undefined)
+            rawTimeline += await estimateTokensOf(msg.content, encoding)
+        for (const thought of ctx.turnThoughts)
+          rawTimeline += await estimateTokensOf(thought.content, encoding)
+        for (const rendered of renderedToolCallResults.values())
+          rawTimeline += await estimateTokensOf(new Tokenizable(rendered), encoding)
+        // Claude Code receives declarations through MCP, not a wire `tools` array. This stable
+        // serialization is an honest floor: JSON declarations plus the CLI-visible names.
+        const toolSerialization = `${JSON.stringify(bridgedTools)}|${bridgedTools
+          .map((t) => `mcp__adk_bridge__${t.name}`)
+          .join(',')}`
+        const tools = await estimateTokensOf(new Tokenizable(toolSerialization), encoding)
+        const perBucket = {
+          prompt: promptTokens,
+          appendSystemPrompt: appendSystemPromptTokens,
+          tools,
+          raw: {
+            systemPrompt: rawSystemPrompt,
+            standingInstructions: rawStandingInstructions,
+            memories: rawMemories,
+            retrievables: rawRetrievables,
+            timeline: rawTimeline,
+          },
+        }
+        const total = promptTokens + appendSystemPromptTokens + tools
+        helpers.log.debug({
+          kind: 'context-window-usage',
+          message: `Context window usage: ${total}/${merged.contextWindow} tokens`,
+          payload: { total, limit: merged.contextWindow, encoding, perBucket },
+        })
+        if (total > merged.contextWindow)
+          throw new E_CLAUDE_CODE_CLI_CONTEXT_OVERFLOW([
+            total,
+            merged.contextWindow,
+            encoding,
+            JSON.stringify(perBucket),
+          ])
+      }
+
+      // ── Step 9: spawn the wrapper ──────────────────────────────────────────
       const spoolStore = merged.spoolStore ?? new InMemorySpoolStore()
       let child: ReturnType<ExecaLike>
       try {
@@ -733,7 +783,6 @@ export class ClaudeCodeCliAdapter {
               cwd: merged.cwd,
               addDir: merged.addDir,
               allowedTools: bridgedTools.map((t) => t.name),
-              maxTurns,
               maxBudgetUsd: merged.maxBudgetUsd,
               fallbackModel: merged.fallbackModel,
               auth: {
@@ -807,7 +856,7 @@ export class ClaudeCodeCliAdapter {
             sawTerminalEvent = true
             await sealCurrentMessage()
             settleOnce(() => {
-              if (event.isError) {
+              if (event.isError && event.subtype !== 'error_max_turns') {
                 ctx.nack(
                   new E_CLAUDE_CODE_CLI_TURN_FAILED([
                     event.stopReason ?? 'unknown',
@@ -815,6 +864,14 @@ export class ClaudeCodeCliAdapter {
                   ])
                 )
                 return
+              }
+              if (event.isError && event.subtype === 'error_max_turns') {
+                helpers.log.debug({
+                  kind: 'claude-max-turns-reached',
+                  message:
+                    'Claude reached the fixed single-turn limit; treating it as normal completion.',
+                  payload: { subtype: event.subtype },
+                })
               }
               helpers.reportGenerationStats({
                 provider: 'claude_code_cli',

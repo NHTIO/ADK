@@ -74,8 +74,6 @@ export interface WrapperRunCommand {
    * next argv token).
    */
   allowedTools: string[]
-  /** Included only if a prior capability probe confirmed the running CLI supports `--max-turns`. */
-  maxTurns?: number
   /** Forwarded to `--max-budget-usd`. */
   maxBudgetUsd?: number
   /** Forwarded to `--fallback-model` as one comma-joined value, never as separate argv tokens. */
@@ -229,6 +227,8 @@ export interface WrapperResultEvent {
   usage?: Record<string, unknown>
   /** Whether this turn ended in an error (e.g. `--max-turns`/`--max-budget-usd` exhaustion). */
   isError: boolean
+  /** Claude's machine-readable reason the turn stopped. */
+  subtype?: string
   /** Claude's own stated reason the turn stopped. */
   stopReason?: string
   /** The original, unmodified terminal `result` stream-json line. */
