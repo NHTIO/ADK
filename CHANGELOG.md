@@ -15,6 +15,87 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-09-11
+
+### Fixed
+
+- **`@nhtio/adk/batteries/skills` — hardening from the AI-review panel.** Five defects surfaced
+  during review of the skills battery, each fixed with a mutation-proven regression test:
+  - A skill script no longer misreports enclosing-turn/dispatch cancellation as
+    `E_SKILL_WORKSPACE_FAILED`: an abort (`E_TURN_GATE_ABORTED`, or any error observed while
+    `ctx.abortSignal.aborted`) now propagates unchanged from `forgeSkillScriptTool`.
+  - `refresh_skills` with no argument now refreshes **and reprojects every loaded skill** rather
+    than only re-discovering the catalog — the previous `if (id)` guard left loaded bodies and
+    tools stale while reporting success.
+  - **Security:** `assertPolicySubset` no longer special-cases a per-call `allowedDomains: ['*']`.
+    A wildcard is the widest possible request and must clear the same session-membership check as
+    any named domain; it is authorised only when the session policy itself permits `*`. Previously
+    a script could reach arbitrary hosts under a session restricted to named domains.
+  - The `turnOutput` middleware's placement contract is corrected in its TSDoc and docs: the strip
+    runs at the **head** of the turn-output pipeline, before `next()`, so no downstream output
+    middleware (a consumer's persistence or observation) ever sees the projection — which is what
+    makes "the body never leaves" true. The code was already correct; the docs read as the
+    opposite. A test now pins the ordering.
+  - Removed a dead policy-selection ternary in `forgeSkillScriptTool` whose branches were
+    identical.
+
+## 2026-09-10
+
+### Added
+
+- **`@nhtio/adk/batteries/skills` — a plugin lifecycle for agent skills.** Agent skills as the
+  industry ships them are discovery plus activation and nothing else: the body loads into
+  append-only conversation history and never leaves.
+  [anthropics/claude-code#21583](https://github.com/anthropics/claude-code/issues/21583) asked for
+  removal and was closed as *not planned*; agentskills.io standardises Discovery → Activation →
+  Execution with no fourth stage. Plugin systems settled this decades ago — WordPress pairs
+  `register_activation_hook` with `register_deactivation_hook`, VS Code pairs `activate()` with
+  `deactivate()`, OSGi's `BundleActivator` is `start()` and `stop()`.
+
+  This battery treats a skill as what it structurally is: a plugin. The manifest is metadata, the
+  body is plugin-provided operational guidance, tools are exported capabilities, the gate is the
+  host permission boundary, {@link SkillSource} is the repository/loader seam, and
+  load/unload/refresh are activation, deactivation and upgrade. Deactivation works because ADK
+  reassembles context per dispatch instead of appending to a log — a design consequence, not a
+  trick.
+
+  Five explicit tools — `list_skills`, `list_loaded_skills`, `refresh_skills`, `load_skill`,
+  `unload_skill` — so nothing is ambiently loaded and every context change is a tool the model
+  invoked. Bodies project as handle-mode retrievables by default (a handle, not the body) or
+  inline per skill; either way unload reclaims them, because neither becomes a `Message`.
+
+  Three capability tiers, chosen by where the code runs: module tools rewrapped at the boundary
+  (gate enforced by the wrapper, not by convention; errors contained; `trusted` forced false;
+  the deployer's artifact binding not bypassable), isolated JS in a SES or BYO guest, and scripts
+  in a child process under a per-skill SRT policy narrowed to a materialized workspace. Containment
+  is **opt-out**, through a typed `unsafe` block that announces every disabled control in a
+  construction warning and in what `list_skills` tells the model.
+
+  Middleware is supplied for all four pipelines so the consumer controls placement; shape is
+  constant and behaviour is config-derived. `SkillSource` is BYO with an `InMemorySkillSource`
+  reference implementation and a `runSkillSourceConformance` suite at
+  `@nhtio/adk/batteries/skills/conformance`.
+
+  **The honest limits, stated as loudly as the features:** unload removes the body from future
+  context but does not reclaim bytes already written to the consumer's spool store, does not erase
+  an excerpt the model already extracted, and leaves a one-iteration reader residual that core
+  closes on its own. No memory, CPU or process limits — a plugin lifecycle, not an operating
+  system.
+
+### Fixed
+
+- **Artifact handle renderers advertised only a subclass's own tool methods.** `static toolMethods`
+  shadows rather than concatenates, so four renderers reading `ctor?.toolMethods` raw listed a
+  markdown handle's eight `md_*` readers and none of the seven base readers — which exist and work.
+  The core fallback in `estimateHandleTokens` fed that undercount into token estimation.
+  `effectiveToolMethods` now unions the static prototype chain and is used by the core fallback,
+  `chat_common`, `openai_chat_completions` and `ollama`;
+  `orchestration/artifact_methods.ts`, which had solved this locally, re-exports it.
+
+- **Sandbox guest capabilities could not be cancelled.** `createGuestRunner` invoked every
+  capability with `declaration.fn(args, new AbortController().signal)` — a fresh controller nobody
+  ever aborts. Capabilities now receive the signal passed to `spawn()`.
+
 ## 2026-09-08
 
 ### Changed

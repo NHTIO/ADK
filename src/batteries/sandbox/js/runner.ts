@@ -10,13 +10,13 @@ export const createGuestRunner = async (
   modules: Record<string, unknown> = {}
 ): Promise<GuestRuntimeLike> => {
   return {
-    async spawn(): Promise<Awaited<ReturnType<GuestRuntimeLike['spawn']>>> {
+    async spawn(options): Promise<Awaited<ReturnType<GuestRuntimeLike['spawn']>>> {
       const implementations: Record<string, (...args: unknown[]) => unknown> = {}
       for (const [name, declaration] of Object.entries(globals))
         implementations[name] = (...args: unknown[]) =>
-          declaration.fn(args, new AbortController().signal)
+          declaration.fn(args, options.signal ?? new AbortController().signal)
       const runtime = await createGuestRuntime(implementations, limits, modules)
-      return runtime.spawn({ modules: Object.keys(modules), globals: [], limits })
+      return runtime.spawn(options)
     },
   }
 }

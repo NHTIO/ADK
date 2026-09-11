@@ -15,6 +15,7 @@
  */
 
 import { isObject } from '@nhtio/adk/guards'
+import { effectiveToolMethods } from '@nhtio/adk/common'
 import type {
   Tool,
   ArtifactTool,
@@ -464,7 +465,7 @@ const buildHandleBody = (input: {
     'To read this artifact in this turn, call one of the following tools with',
     `callId=${callId}:`
   )
-  for (const m of ctor?.toolMethods ?? [])
+  for (const m of effectiveToolMethods(ctor ?? {}))
     lines.push(m.description ? `- ${m.name} — ${m.description}` : `- ${m.name}`)
   lines.push(
     '',

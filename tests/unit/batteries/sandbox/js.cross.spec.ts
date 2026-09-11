@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { guestLimitFloors } from '../../../../src/batteries/sandbox/types'
+import { createGuestRunner } from '../../../../src/batteries/sandbox/js/runner'
 import { E_INVALID_SANDBOX_CONFIG } from '../../../../src/batteries/sandbox/exceptions'
 import { createEvaluateJavascriptTool } from '../../../../src/batteries/sandbox/js/tool'
 import { E_SES_EVALUATION_TIMEOUT } from '../../../../src/batteries/sandbox/js/exceptions'
@@ -53,6 +54,44 @@ describe('sandbox JavaScript B1 configuration', () => {
 })
 
 describe('SES guest realm', () => {
+  it('forwards the caller lifecycle signal to every capability', async () => {
+    const controller = new AbortController()
+    const signals: AbortSignal[] = []
+    const runner = await createGuestRunner(
+      {
+        first: {
+          cancellation: 'cooperative',
+          fn: (_args, signal) => {
+            signals.push(signal)
+            return 1
+          },
+        },
+        second: {
+          cancellation: 'cooperative',
+          fn: (_args, signal) => {
+            signals.push(signal)
+            return 2
+          },
+        },
+      },
+      resolveGuestLimits()
+    )
+    const guest = await runner.spawn({
+      modules: [],
+      globals: [
+        { name: 'first', kind: 'async-fn' },
+        { name: 'second', kind: 'async-fn' },
+      ],
+      limits: resolveGuestLimits(),
+      signal: controller.signal,
+    })
+    const result = await guest.evaluate('({ one: await first(), two: await second() })', {
+      timeoutMs: 1000,
+    })
+    expect(result.ok).toBe(true)
+    expect(signals).toEqual([controller.signal, controller.signal])
+  })
+
   it('has only injected globals and no ambient authority', async () => {
     const runtime = await createCompartmentRuntime({ answer: () => 42 }, resolveGuestLimits())
     const out = await runtime.evaluate(

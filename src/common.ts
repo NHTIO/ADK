@@ -95,7 +95,7 @@ export type { TurnGate } from './lib/classes/turn_gate'
  */
 export type { RawTurnGate } from './lib/classes/turn_gate'
 
-export { SpooledArtifact } from './lib/classes/spooled_artifact'
+export { SpooledArtifact, effectiveToolMethods } from './lib/classes/spooled_artifact'
 export { implementsSpoolReader } from './lib/contracts/spool_reader'
 export type { SpoolReader } from './lib/contracts/spool_reader'
 

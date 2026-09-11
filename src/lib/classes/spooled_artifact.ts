@@ -66,6 +66,52 @@ export interface ToolMethodDescriptor {
   serialise?: (result: unknown) => string
 }
 
+/**
+ * Returns the effective artifact tool descriptors from a constructor's static prototype chain.
+ *
+ * Core subclasses declare only their own `toolMethods`; a static property shadows its ancestor
+ * rather than concatenating it. This walks leaf-first and deduplicates by `name`, the absolute
+ * model-facing tool identifier, rather than `method`, which is the instance dispatch name and may
+ * legitimately differ (and is not the vocabulary exposed to callers). The nearest declaration
+ * wins, matching tool collision replacement semantics.
+ *
+ * @param ctor The artifact constructor whose effective descriptors are wanted.
+ * @returns A frozen, leaf-first array of descriptors, or an empty array when none are declared.
+ */
+export const effectiveToolMethods = (ctor: unknown): readonly ToolMethodDescriptor[] => {
+  const seen = new Set<string>()
+  const out: ToolMethodDescriptor[] = []
+  // Only objects and functions have a prototype chain; a null/undefined/primitive ctor has no
+  // declarations and `Object.getPrototypeOf` would throw on it.
+  let current: unknown = typeof ctor === 'object' || typeof ctor === 'function' ? ctor : null
+  while (current !== null && current !== Function.prototype) {
+    const own = Object.getOwnPropertyDescriptor(current, 'toolMethods')
+    // Read via the descriptor's getter when it is accessor-backed, so a `static get toolMethods()`
+    // declaration is honoured rather than silently skipped (a data descriptor has `value`).
+    const value = own
+      ? 'get' in own && typeof own.get === 'function'
+        ? own.get.call(current)
+        : own.value
+      : undefined
+    if (Array.isArray(value)) {
+      for (const descriptor of value as unknown[]) {
+        if (
+          descriptor &&
+          typeof descriptor === 'object' &&
+          typeof (descriptor as ToolMethodDescriptor).name === 'string' &&
+          !seen.has((descriptor as ToolMethodDescriptor).name)
+        ) {
+          const method = descriptor as ToolMethodDescriptor
+          seen.add(method.name)
+          out.push(method)
+        }
+      }
+    }
+    current = Object.getPrototypeOf(current)
+  }
+  return Object.freeze(out)
+}
+
 const noArgsSchema = validator.object<Record<string, never>>({})
 
 /**
@@ -573,7 +619,7 @@ export class SpooledArtifact {
             }
           }
         ).constructor
-        const methods = ctor?.toolMethods ?? []
+        const methods = effectiveToolMethods(ctor ?? {})
         return [
           'This tool returned a large artifact that was not inlined to preserve context budget.',
           '',

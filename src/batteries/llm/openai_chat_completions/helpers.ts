@@ -19,9 +19,9 @@
  * here.
  */
 
-import { Media } from '@nhtio/adk/common'
 import { isInstanceOf } from '@nhtio/adk/guards'
 import { E_UNSUPPORTED_MEDIA_MODALITY } from './exceptions'
+import { Media, effectiveToolMethods } from '@nhtio/adk/common'
 import {
   escapeXmlAttribute,
   sanitiseNameField,
@@ -503,7 +503,7 @@ const renderArtifactHandleBody = (
       constructor: { toolMethods?: ReadonlyArray<{ name: string; description?: string }> }
     }
   ).constructor
-  const methods = ctor?.toolMethods ?? []
+  const methods = effectiveToolMethods(ctor ?? {})
   const lines: string[] = []
   lines.push(`This tool returned a large artifact that was not inlined to preserve context budget.`)
   lines.push(``)
