@@ -4,9 +4,10 @@ import { Tokenizable } from '../../../src/lib/classes/tokenizable'
 import { Retrievable } from '../../../src/lib/classes/retrievable'
 import { ArtifactTool } from '../../../src/lib/classes/artifact_tool'
 import { makeDispatchContext } from '../../_fixtures/dispatch_context'
-import { SpooledArtifact } from '../../../src/lib/classes/spooled_artifact'
 import { InMemorySpoolReader } from '../../../src/batteries/storage/in_memory'
 import { makeSpooledArtifact, makeToolCall } from '../../_fixtures/primitives'
+import { SpooledMarkdownArtifact } from '../../../src/lib/classes/spooled_markdown_artifact'
+import { SpooledArtifact, effectiveToolMethods } from '../../../src/lib/classes/spooled_artifact'
 import {
   E_NOT_A_SPOOL_READER,
   E_INVALID_TOOL_ARGS,
@@ -52,6 +53,52 @@ describe('SpooledArtifact', () => {
       expect(await a.lineCount()).toBe(7)
       expect(byteLength).toHaveBeenCalledTimes(1)
       expect(lineCount).toHaveBeenCalledTimes(1)
+    })
+
+    it('estimateHandleTokens includes markdown and base reader methods in its fallback handle', () => {
+      const a = new SpooledMarkdownArtifact(new InMemorySpoolReader('# heading'))
+      a._setSizeHints({ byteLength: 9, lineCount: 1 })
+      const methods = effectiveToolMethods(SpooledMarkdownArtifact)
+      const names = methods.map((method) => method.name)
+      for (const name of [
+        'artifact_md_frontmatter',
+        'artifact_md_headings',
+        'artifact_md_code_blocks',
+        'artifact_md_sections',
+        'artifact_md_links',
+        'artifact_md_images',
+        'artifact_md_text',
+        'artifact_md_ast',
+        'artifact_head',
+        'artifact_tail',
+        'artifact_grep',
+        'artifact_cat',
+        'artifact_byte_length',
+        'artifact_line_count',
+        'artifact_estimate_tokens',
+      ]) {
+        expect(names).toContain(name)
+      }
+      const expected = [
+        'This tool returned a large artifact that was not inlined to preserve context budget.',
+        '',
+        'Artifact metadata:',
+        '- callId: handle-md',
+        '- kind: SpooledMarkdownArtifact',
+        '- byteLength: 9',
+        '- lineCount: 1',
+        '',
+        'To read this artifact in this turn, call one of the following tools with',
+        'callId=handle-md:',
+        ...methods.map((method) =>
+          method.description ? `- ${method.name} — ${method.description}` : `- ${method.name}`
+        ),
+        '',
+        "The artifact persists in this turn's context — multiple queries against the same callId are allowed and efficient. Do not assume the body has been inlined anywhere else.",
+      ].join('\n')
+      expect(a.estimateHandleTokens('handle-md', 'cl100k_base')).toBe(
+        Tokenizable.estimateTokens(expected, 'cl100k_base')
+      )
     })
 
     it('estimateHandleTokens uses the default and explicit renderers', () => {
@@ -457,5 +504,24 @@ describe('SpooledArtifact', () => {
       expect(await asyncA.grep(/a$/)).toEqual(await syncA.grep(/a$/))
       expect(await asyncA.byteLength()).toEqual(await syncA.byteLength())
     })
+  })
+})
+
+describe('effectiveToolMethods robustness (AI-review findings)', () => {
+  it('returns [] for null, undefined, and primitive constructors without throwing', () => {
+    for (const v of [null, undefined, 42, 'str', true, Symbol('s')]) {
+      expect(() => effectiveToolMethods(v as never)).not.toThrow()
+      expect(effectiveToolMethods(v as never)).toEqual([])
+    }
+  })
+
+  it('honours a static getter-backed toolMethods rather than skipping it', () => {
+    class GetterArtifact {
+      static get toolMethods() {
+        return [{ name: 'getter_only', method: 'getter_only' }]
+      }
+    }
+    const names = effectiveToolMethods(GetterArtifact as never).map((m) => m.name)
+    expect(names).toContain('getter_only')
   })
 })
