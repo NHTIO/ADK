@@ -1,3 +1,4 @@
+import type { SkillOutputKind } from './output'
 import type { SandboxHandle } from '../sandbox/manager'
 import type { GuestLimits, SandboxPolicy } from '../sandbox/types'
 import type { SpooledArtifactConstructor } from '@nhtio/adk/forge'
@@ -38,6 +39,13 @@ export interface SkillDescriptor {
   readonly tools?: readonly Tool[]
   /** Advisory default artifact kind; an explicit registry binding takes precedence. */
   readonly artifactKind?: string
+  /**
+   * Optional per-tool declaration of the output shape a module tool produces (`'text'`,
+   * `'binary'`, `'media'`, or `'retrievable'`). When set, a runtime return whose sniffed shape
+   * disagrees fails `E_SKILL_TOOL_BAD_RESPONSE` rather than being silently reinterpreted; when
+   * omitted, the wrapper sniffs the returned shape. Keyed by the tool's own name.
+   */
+  readonly toolOutputs?: Readonly<Record<string, SkillOutputKind>>
   /** Tier-3 scripts; their declared paths are materialized and their argv is battery-built. */
   readonly scripts?: readonly SkillScriptSpec[]
   /** Tier-2 source tools executed through the configured guest runtime. */

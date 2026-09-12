@@ -15,6 +15,36 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-09-12
+
+### Added
+
+- **`@nhtio/adk/batteries/skills` — framework-agnostic typed output from skill tools** (closes the
+  gap tracked in issue #31). A skill tool is third-party code that should not have to import this
+  library to describe what it produced, so the wrapper is now the adaptation boundary for output as
+  well as for the gate, errors, and trust. Beyond the existing `string | Uint8Array | Media |
+  Media[]`, a tool may return a plain-object descriptor and the host constructs the primitive:
+  - `{ bytes, mimeType, filename? }` → a typed `Media`. The host wraps the bytes in a reader via
+    `ctx.storeMediaBytes` and infers the `MediaKind` and a conservative modality hazard from the
+    MIME type, so a PDF is a PDF and a WAV is a WAV — with no `@nhtio/adk/common` import in the tool.
+  - `{ retrievable: { content, source?, kind?, score?, inline? } }` → a `Retrievable` the model can
+    cite, search, and hold a handle to. Its text is spooled behind a handle and the record is
+    persisted durably through `ctx.storeRetrievable` — id-collision-checked, written to the
+    deployer's store, and added to this turn's context. The tool's result is a short acknowledgement
+    naming the new retrievable. It is durable work product — not the reclaimable instruction set a
+    skill body is, nor the transient stdout a script produces — so it outlives an `unload_skill`.
+    Byte cleanup after a rejecting persistence callback is explicitly the consumer's responsibility
+    (documented in Tool results and Context channels): core spools through the consumer's own byte
+    conduit under a known id, so the consumer is the party positioned to reconcile it; the library
+    offers no byte-delete conduit by design, matching core and the built-in retrievables battery.
+
+  Output trust is floored from the skill's tier (`first-party` → `third-party-private`; both
+  third-party tiers pass through) — a skill can never label its own output first-party. A descriptor
+  may declare `SkillDescriptor.toolOutputs[toolName]` (`'text' | 'binary' | 'media' | 'retrievable'`)
+  so a runtime shape that disagrees fails `E_SKILL_TOOL_BAD_RESPONSE` loudly rather than being
+  silently reinterpreted; when omitted the wrapper sniffs the returned shape. A prebuilt
+  `SpooledArtifact` is still refused, since it would bypass the deployer's artifact binding.
+
 ## 2026-09-11
 
 ### Fixed

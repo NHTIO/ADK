@@ -22,3 +22,9 @@ export type { ForgeSkillToolsOptions } from './forge'
 export { createSkillArtifactRegistry } from './artifacts'
 export type { SkillArtifactRegistry } from './artifacts'
 export { renderError } from './exceptions'
+export type {
+  SkillOutputKind,
+  SkillBinaryOutput,
+  SkillRetrievableOutput,
+  SkillTrustTier,
+} from './output'

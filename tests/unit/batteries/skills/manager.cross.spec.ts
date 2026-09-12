@@ -451,4 +451,27 @@ describe('skills manager central claims', () => {
     expect(manager.loaded()).toEqual([])
     await manager.dispose()
   })
+
+  it('does not treat an inherited toolOutputs key as a declared output kind', async () => {
+    // A tool named after an inherited Object key ('toString') with NO own toolOutputs entry must
+    // not pick up Function.prototype.toString as its declared output kind — that would reject every
+    // valid string return as a shape mismatch and make the tool undispatchable.
+    const toStringTool = new Tool({
+      name: 'toString',
+      description: 'a tool with a reserved-key name',
+      inputSchema: validator.object({}).unknown(false),
+      handler: async () => 'ok',
+    })
+    const manager = await createSkillManager({
+      // toolOutputs is present but has no OWN 'toString' entry.
+      sources: [sourceFor({ ...descriptor([toStringTool]), toolOutputs: { demo_run: 'text' } })],
+      gate,
+    })
+    const ctx = makeDispatchContext()
+    const load = await manager.load('demo', ctx)
+    const tool = load.tools.find((t) => t.name === 'toString')!
+    // The tool resolves and returns its string; no spurious declared-mismatch rejection.
+    await expect(tool.executor(ctx)({})).resolves.toBe('ok')
+    await manager.dispose()
+  })
 })

@@ -348,10 +348,17 @@ export const createSkillManager = async (config: SkillManagerConfig): Promise<Sk
         ...originals.map((original) =>
           rewrapSkillTool({
             original,
-            skill: { id, version: entry.ref.version },
+            skill: { id, version: entry.ref.version, trustTier: descriptor.trustTier },
             record: recordPlaceholder,
             gate: config.unsafe?.ungatedSkillTools ? undefined : config.gate,
             resolveArtifact: () => artifactRegistry.resolve(id, original.name, descriptor),
+            // Own-property only: bracket access would walk the prototype chain, so a tool named
+            // after an inherited Object key ('toString', 'constructor', …) would pick up a
+            // function as its "declared" output kind and reject every valid return as a mismatch.
+            declaredOutput:
+              descriptor.toolOutputs && Object.hasOwn(descriptor.toolOutputs, original.name)
+                ? descriptor.toolOutputs[original.name]
+                : undefined,
           })
         ),
         ...(scriptDeclarations.length

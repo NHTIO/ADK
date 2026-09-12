@@ -1,9 +1,9 @@
 /** Imported skill-tool wrapping and name preflight. */
-import { isInstanceOf, isError } from '@nhtio/adk/guards'
+import { isError } from '@nhtio/adk/guards'
+import { resolveSkillToolOutput } from './output'
 import { runToolGate } from '@nhtio/adk/batteries/tools/_shared'
 import {
   effectiveToolMethods,
-  Media,
   SpooledArtifact,
   SpooledMarkdownArtifact,
   Tool,
@@ -11,12 +11,12 @@ import {
 import {
   E_SKILL_MANIFEST_INVALID,
   E_SKILL_NOT_LOADED,
-  E_SKILL_TOOL_BAD_RESPONSE,
   E_SKILL_TOOL_COLLISION,
   E_SKILL_TOOL_DUPLICATE,
   E_SKILL_TOOL_FAILED,
 } from './exceptions'
 import type { SkillRecord } from './manager'
+import type { SkillOutputKind, SkillTrustTier } from './output'
 import type { SpooledArtifactConstructor } from '@nhtio/adk/common'
 import type { ToolGateFn } from '@nhtio/adk/batteries/tools/_shared'
 
@@ -33,15 +33,17 @@ export const rewrapSkillTool = (o: {
   /** The third-party tool exactly as the descriptor supplied it. */
   original: Tool
   /** Identity of the owning skill; becomes `meta.skill` / `meta.skillVersion`. */
-  skill: { readonly id: string; readonly version: string }
+  skill: { readonly id: string; readonly version: string; readonly trustTier?: SkillTrustTier }
   /** The loaded record. The wrapper closes over it for the liveness check (retired + refcount). */
   record: SkillRecord
   /** Undefined only when `unsafe.ungatedSkillTools` is set. */
   gate: ToolGateFn | undefined
   /** Resolves this tool's artifact kind. */
   resolveArtifact: (skillId: string, toolName: string) => SpooledArtifactConstructor
+  /** Descriptor-declared output kind for this tool; enforced against the runtime shape when set. */
+  declaredOutput?: SkillOutputKind
 }): Tool => {
-  const { original, skill, record, gate, resolveArtifact } = o
+  const { original, skill, record, gate, resolveArtifact, declaredOutput } = o
   return new Tool({
     name: original.name,
     description: original.description,
@@ -65,20 +67,18 @@ export const rewrapSkillTool = (o: {
         record.exit()
       }
 
-      if (isInstanceOf(raw, 'SpooledArtifact', SpooledArtifact)) {
-        throw new E_SKILL_TOOL_BAD_RESPONSE([`${original.name} returned a SpooledArtifact`])
-      }
-      const mediaArray =
-        Array.isArray(raw) && raw.every((item) => isInstanceOf(item, 'Media', Media))
-      if (
-        typeof raw !== 'string' &&
-        !isInstanceOf(raw, 'Uint8Array', Uint8Array) &&
-        !isInstanceOf(raw, 'Media', Media) &&
-        !mediaArray
-      ) {
-        throw new E_SKILL_TOOL_BAD_RESPONSE([original.name])
-      }
-      return raw as string | Uint8Array | Media | Media[]
+      // Output resolution runs after the executor (and its refcount exit): a legal string,
+      // Uint8Array, Media or Media[] passes through; a framework-agnostic bytes/retrievable
+      // descriptor is constructed into the real primitive host-side; a prebuilt SpooledArtifact
+      // and every other shape fail E_SKILL_TOOL_BAD_RESPONSE. Validation sits OUTSIDE the executor
+      // try/catch so an illegal return shape is not masked as E_SKILL_TOOL_FAILED.
+      return resolveSkillToolOutput({
+        raw,
+        ctx,
+        toolName: original.name,
+        trustTier: skill.trustTier,
+        declared: declaredOutput,
+      })
     },
   })
 }
