@@ -6,9 +6,10 @@ import type { GuestRuntimeLike } from './ses_contracts'
 export const createGuestRuntime = async (
   globals: Record<string, (...args: unknown[]) => unknown>,
   limits: GuestLimits,
-  modules: Record<string, unknown> = {}
+  modules: Record<string, unknown> = {},
+  hostLockdown = true
 ): Promise<GuestRuntimeLike> => ({
   async spawn() {
-    return createCompartmentRuntime(globals, limits, modules)
+    return createCompartmentRuntime(globals, limits, modules, hostLockdown)
   },
 })

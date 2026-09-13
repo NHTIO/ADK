@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { HnswlibVectorStore } from '@nhtio/adk/batteries/vector/hnswlib'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -22,5 +22,7 @@ d('HnswlibVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('HnswlibVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('HnswlibVectorStore', makeStore)
+  })
 })

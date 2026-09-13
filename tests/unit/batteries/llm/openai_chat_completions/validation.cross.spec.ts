@@ -513,12 +513,12 @@ describe('OpenAI Chat Completions option validation', () => {
       expectAccept({ ...baseValid, tokenEncoding: enc })
     })
 
-    it('rejects unknown bpe', () => {
-      expectReject({ ...baseValid, tokenEncoding: 'bpe' })
+    it('accepts an arbitrary custom tokenizer name', () => {
+      expectAccept({ ...baseValid, tokenEncoding: 'custom-tokenizer-v9' })
     })
 
-    it('rejects unknown tiktoken', () => {
-      expectReject({ ...baseValid, tokenEncoding: 'tiktoken' })
+    it('rejects an empty tokenizer name', () => {
+      expectReject({ ...baseValid, tokenEncoding: '' })
     })
 
     it('rejects number', () => {

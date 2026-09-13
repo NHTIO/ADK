@@ -13,7 +13,8 @@
  */
 
 import type { ClaudeCodeCliExtraArg } from './wire'
-import type { SpoolStore, TokenEncoding } from '@nhtio/adk/common'
+import type { SpoolStore } from '@nhtio/adk/common'
+import type { TokenEncodingId } from '@nhtio/adk/types'
 import type {
   ChatCompletionsBucketOrder,
   UnsupportedMediaPolicy,
@@ -226,7 +227,7 @@ export interface ClaudeCodeCliAdapterOptions {
   /** Size of the model's token context window for the ADK pre-flight guard. */
   contextWindow?: number
   /** Tokenizer encoding configuration for token counting. */
-  tokenEncoding?: TokenEncoding | null
+  tokenEncoding?: TokenEncodingId | null
   /**
    * @deprecated Single-turn dispatch is the fixed battery contract. Only `1` is accepted; the
    * option is ignored because argv always carries `--max-turns 1`.

@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { S3VectorsVectorStore } from '@nhtio/adk/batteries/vector/s3vectors'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -33,5 +33,7 @@ d('S3VectorsVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('S3VectorsVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('S3VectorsVectorStore', makeStore)
+  })
 })

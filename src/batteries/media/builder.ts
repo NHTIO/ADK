@@ -14,6 +14,7 @@
  */
 
 import { toPipe } from './plan'
+import type { ImageAnnotation } from './contracts'
 import type { PlanResult, StepPayload } from './runtime'
 import type { MediaPlan, MediaOp, MediaArgValue, MediaArgJson, MediaRef } from './plan'
 
@@ -428,6 +429,10 @@ export class ImageNamespace {
   /** Strip EXIF/ICC metadata. */
   stripMetadata(): MediaChain {
     return this.#chain.withOp('image.strip_metadata', {})
+  }
+  /** Draw vector primitives and text over the image. */
+  annotate(shapes: ImageAnnotation[]): MediaChain {
+    return this.#chain.withOp('image.annotate', { shapes })
   }
 }
 

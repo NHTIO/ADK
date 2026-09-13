@@ -13,7 +13,7 @@
  * (`export type X = Y`), never direct re-exports of the externalized peer (which breaks the bundler).
  */
 
-import type { TokenEncoding } from '@nhtio/adk'
+import type { TokenEncodingId } from '@nhtio/adk/types'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { BatteryLifecycleHooks } from '../chat_common'
 import type { SpoolStore, ToolRegistry } from '@nhtio/adk/common'
@@ -283,7 +283,7 @@ export interface TransformersJsAdapterOptions extends BatteryLifecycleHooks {
   /** Which thoughts are surfaced into history. */
   thoughtSurfacing?: 'all-self' | 'latest-self' | 'all'
   /** Token encoding used for context-window accounting, or `null` to disable (default `null`). */
-  tokenEncoding?: TokenEncoding | null
+  tokenEncoding?: TokenEncodingId | null
   /** Replay-compatibility tags whose opaque reasoning payloads may be replayed. */
   replayCompatibility?: ReadonlyArray<string>
   /** Precedence order for reasoning/thought fields. */

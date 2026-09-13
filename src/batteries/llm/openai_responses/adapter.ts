@@ -105,8 +105,9 @@ import {
   defaultCreateResponsesOutputSlotMachine,
   normalizeOpenAIResponsesItemId,
 } from './helpers'
+import type { Tool, Memory } from '@nhtio/adk/common'
 import type { DispatchContext } from '@nhtio/adk/types'
-import type { Tool, Memory, TokenEncoding } from '@nhtio/adk/common'
+import type { TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
 import type {
   DispatchExecutorFn,
   DispatchExecutorHelpers,
@@ -291,9 +292,9 @@ const nowIso = (): string => DateTime.now().toISO() ?? new Date().toISOString()
 
 const estimateTokensOf = async (
   value: { estimateTokens: (encoding: TokenEncoding) => number | Promise<number> },
-  encoding: TokenEncoding
+  encoding: TokenEncodingId
 ): Promise<number> => {
-  return Promise.resolve(value.estimateTokens(encoding))
+  return Promise.resolve(value.estimateTokens(encoding as TokenEncoding))
 }
 
 // ─── Generation-stats extraction ───────────────────────────────────────────────
@@ -465,7 +466,7 @@ export class OpenAIResponsesAdapter {
 
       // ── Step 5: context window enforcement ────────────────────────────────
       if (merged.tokenEncoding !== null && merged.contextWindow !== undefined) {
-        const encoding = merged.tokenEncoding as TokenEncoding
+        const encoding = merged.tokenEncoding as TokenEncodingId
         let spTokens = await estimateTokensOf(ctx.systemPrompt, encoding)
         let siTokens = 0
         {
@@ -487,7 +488,7 @@ export class OpenAIResponsesAdapter {
             !r.inline && SpooledArtifact.isSpooledArtifact(r.content) && r.content.hasSizeHints()
               ? r.content.estimateHandleTokens(
                   r.id,
-                  encoding,
+                  encoding as TokenEncoding,
                   resolvedHelpers.renderRetrievableHandleBody
                 )
               : await estimateTokensOf(r.content, encoding)

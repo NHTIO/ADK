@@ -20,6 +20,7 @@ import { isError } from '@nhtio/adk/guards'
 import { default as SharpDefault } from 'sharp'
 import { E_INVALID_MEDIA_PIPELINE_CONFIG } from '../exceptions'
 import type {
+  ImageAnnotation,
   MediaEngine,
   MutateCapability,
   MutateRequest,
@@ -65,10 +66,70 @@ const resolveSharp = async (supplied: SharpEngineOptions['sharp']): Promise<Shar
 
 /** Run a fused mutate request through a sharp instance function. */
 const runTransform = async (sharp: SharpFn, request: MutateRequest): Promise<EngineBytesResult> => {
-  let img = sharp(request.bytes)
+  let img = sharp(request.bytes, { animated: true })
+
+  if (request.annotate) {
+    const metadata = await img.metadata()
+    const pages = metadata.pages ?? 1
+    const width = metadata.width ?? 1
+    const height = metadata.pageHeight ?? metadata.height ?? 1
+    const esc = (value: string): string =>
+      value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+    const stroke = (shape: ImageAnnotation): string => esc(shape.color ?? '#ff0000')
+    const elements = request.annotate
+      .map((shape) => {
+        switch (shape.type) {
+          case 'rect':
+            return `<rect x="${shape.x}" y="${shape.y}" width="${shape.width}" height="${shape.height}" fill="${esc(shape.fill ?? 'none')}" stroke="${stroke(shape)}" stroke-width="${shape.strokeWidth ?? 2}"/>`
+          case 'line':
+            return `<line x1="${shape.x1}" y1="${shape.y1}" x2="${shape.x2}" y2="${shape.y2}" stroke="${stroke(shape)}" stroke-width="${shape.strokeWidth ?? 2}"/>`
+          case 'arrow': {
+            const angle = Math.atan2(shape.y2 - shape.y1, shape.x2 - shape.x1)
+            const size = Math.max(shape.strokeWidth ?? 2, 6)
+            const left = `${shape.x2 - size * Math.cos(angle - Math.PI / 6)},${shape.y2 - size * Math.sin(angle - Math.PI / 6)}`
+            const right = `${shape.x2 - size * Math.cos(angle + Math.PI / 6)},${shape.y2 - size * Math.sin(angle + Math.PI / 6)}`
+            return `<line x1="${shape.x1}" y1="${shape.y1}" x2="${shape.x2}" y2="${shape.y2}" stroke="${stroke(shape)}" stroke-width="${shape.strokeWidth ?? 2}"/><polygon points="${shape.x2},${shape.y2} ${left} ${right}" fill="${stroke(shape)}"/>`
+          }
+          case 'ellipse':
+            return `<ellipse cx="${shape.cx}" cy="${shape.cy}" rx="${shape.rx}" ry="${shape.ry}" fill="${esc(shape.fill ?? 'none')}" stroke="${stroke(shape)}" stroke-width="${shape.strokeWidth ?? 2}"/>`
+          case 'text':
+            return `<text x="${shape.x}" y="${shape.y}" fill="${stroke(shape)}" font-size="${shape.size ?? 16}" font-family="${esc(shape.font ?? 'sans-serif')}">${esc(shape.text)}</text>`
+        }
+      })
+      .join('')
+    const overlay = Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><g>${elements}</g></svg>`
+    )
+    const composites: Array<{
+      input: Buffer
+      blend: 'over'
+      top: number
+      left: number
+    }> = []
+    for (let i = 0; i < pages; i++) {
+      composites.push({
+        input: overlay,
+        blend: 'over',
+        top: i * height,
+        left: 0,
+      })
+    }
+    img = img.composite(composites)
+
+    // Sharp evaluates operations lazily. If we chain resize or rotate after composite, Sharp
+    // applies the resize FIRST, breaking the original-coordinate geometry of the SVG overlay.
+    // Force materialization here to apply annotations in original image space before rotating/resizing.
+    img = sharp(await img.toBuffer(), { animated: true })
+  }
+
   if (request.rotate) img = img.rotate(request.rotate)
   if (request.flip?.vertical) img = img.flip()
   if (request.flip?.horizontal) img = img.flop()
+
   if (
     request.resize &&
     (request.resize.width !== undefined || request.resize.height !== undefined)
@@ -108,7 +169,7 @@ const capabilityOf = (
   run: (request: MutateRequest) => Promise<EngineBytesResult>
 ): MutateCapability => ({
   over: ['image/*'],
-  ops: ['resize', 'rotate', 'flip', 'strip_metadata'],
+  ops: ['resize', 'rotate', 'flip', 'strip_metadata', 'annotate'],
   encodes: SUPPORTED_OUTPUT,
   mutate: run,
 })

@@ -15,7 +15,19 @@ const makeStore = async () => {
   return vs
 }
 
-runVectorStoreConformance('InMemoryVectorStore', makeStore)
+describe('InMemoryVectorStore conformance', () => {
+  it('satisfies the shared contract', async () => {
+    await runVectorStoreConformance('InMemoryVectorStore', makeStore)
+  })
+
+  it('reports failure for a deliberately broken vector-store fake', async () => {
+    await expect(
+      runVectorStoreConformance('broken', async () => {
+        throw new Error('broken fake')
+      })
+    ).rejects.toThrow('broken fake')
+  })
+})
 
 // Plus a couple in-memory-specific direct assertions:
 describe('InMemoryVectorStore specifics', () => {

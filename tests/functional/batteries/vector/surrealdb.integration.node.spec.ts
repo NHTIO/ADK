@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { SurrealDBVectorStore } from '@nhtio/adk/batteries/vector/surrealdb'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -33,5 +33,7 @@ d('SurrealDBVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('SurrealDBVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('SurrealDBVectorStore', makeStore)
+  })
 })

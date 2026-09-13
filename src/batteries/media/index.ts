@@ -121,6 +121,7 @@ export type {
   ImagesConvertOptions,
   MutateCapability,
   MutateRequest,
+  ImageAnnotation,
   EditCapability,
   EditRequest,
   EditResult,

@@ -35,7 +35,9 @@ const makeStore = async () => {
 const d = driverAvailable ? describe : describe.skip
 
 d('SqliteVecVectorStore (real backend, :memory:)', () => {
-  runVectorStoreConformance('SqliteVecVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('SqliteVecVectorStore', makeStore)
+  })
 
   it('reports transactions capability true', async () => {
     const vs = await makeStore()

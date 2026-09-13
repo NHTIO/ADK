@@ -5,8 +5,24 @@
  */
 
 import { validator } from '@nhtio/validation'
+import { TokenEncoding } from '@nhtio/adk/common'
 import { E_INVALID_GEMINI_GENERATE_CONTENT_OPTIONS } from './exceptions'
 import type { GeminiGenerateContentAdapterOptions } from './types'
+
+/** Schema for {@link GeminiGenerateContentAdapterOptions}. */
+const tokenEncodingSchema = validator
+  .alternatives(
+    // Known values are suggestions from the canonical list, not a whitelist: consumers may provide
+    // a custom or newer tokenizer name. The field accepts any non-empty string, explicit null, or
+    // absent (undefined = "no token counting"). `.optional()` preserves the null/undefined
+    // disposition required by adk/require-validator-any-required.
+    validator
+      .string()
+      .min(1)
+      .description(`Known encodings: ${TokenEncoding.join(', ')}`),
+    validator.any().valid(null).optional()
+  )
+  .default(null)
 
 /** Schema for {@link GeminiGenerateContentAdapterOptions}. */
 export const geminiGenerateContentOptionsSchema = validator.object({
@@ -15,6 +31,8 @@ export const geminiGenerateContentOptionsSchema = validator.object({
   useBearerAuth: validator.boolean().optional(),
   baseURL: validator.string().optional(),
   stream: validator.boolean().optional(),
+  contextWindow: validator.number().integer().min(1).optional(),
+  autoAck: validator.boolean().default(true),
   maxOutputTokens: validator.number().integer().positive().optional(),
   temperature: validator.number().min(0).max(2).optional(),
   topP: validator.number().min(0).max(1).optional(),
@@ -60,11 +78,21 @@ export const geminiGenerateContentOptionsSchema = validator.object({
     })
     .optional(),
   fetch: validator.function().optional(),
-  tokenEncoding: validator.any().optional(),
+  tokenEncoding: tokenEncodingSchema,
   spoolStore: validator.any().optional(),
   bucketOrder: validator.any().optional(),
   thoughtSurfacing: validator.string().valid('all-self', 'latest-self', 'all').optional(),
-  unsupportedMediaPolicy: validator.string().optional(),
+  unsupportedMediaPolicy: validator
+    .alternatives(
+      validator.string().valid('throw', 'fallback-stash', 'synthetic-description'),
+      validator
+        .object({
+          mode: validator.string().valid('fallback-stash').required(),
+          stashKeys: validator.array().items(validator.string().min(1)).required(),
+        })
+        .unknown(false)
+    )
+    .default('throw'),
   localToolCallParser: validator.any().optional(),
   onRawGeneration: validator.function().optional(),
   onPromptAssembled: validator.function().optional(),

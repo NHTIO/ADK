@@ -9,7 +9,7 @@
  * types only; runtime validation lives in `validation.ts` (`openAIChatCompletionsOptionsSchema`).
  */
 
-import type { TokenEncoding } from '@nhtio/adk/common'
+import type { TokenEncodingId } from '@nhtio/adk/types'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { SpooledArtifact, Media, SpoolStore } from '@nhtio/adk/common'
 import type { ToolCallParserName, ToolCallParserFn } from '../chat_common/tool_parsers'
@@ -510,7 +510,7 @@ export interface OpenAIChatCompletionsAdapterOptions {
   /** Determines which thoughts are surfaced back to the model. */
   thoughtSurfacing?: 'all-self' | 'latest-self' | 'all'
   /** Tokenizer encoding configuration for token counting. */
-  tokenEncoding?: TokenEncoding | null
+  tokenEncoding?: TokenEncodingId | null
   /** List of replay labels supported by the assistant. */
   replayCompatibility?: ReadonlyArray<string>
 

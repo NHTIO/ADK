@@ -38,7 +38,7 @@ type SrtManager = {
 }
 type SrtConfig = {
   filesystem: Record<string, unknown>
-  network: Record<string, unknown>
+  network?: Record<string, unknown>
   /** SRT's Linux mandatory-deny scan depth is session-level. */
   mandatoryDenySearchDepth?: number
   git?: { safeDirectories: string[] }
@@ -170,15 +170,21 @@ const mapPolicy = (
       denyWrite: nonEmpty(fs.denyWrite),
       allowGitConfig: fs.allowGitConfig ?? false,
     },
-    network: {
-      allowedDomains,
-      deniedDomains,
-      deniedDomainReasons,
-      strictAllowlist: true,
-      allowLocalBinding: false,
-      allowUnixSockets: [],
-      allowMachLookup: [],
-    },
+    // SRT keys network restriction by presence of this object. There is no schema-valid allow-all
+    // domain pattern, so disabled deliberately omits the key instead of emitting the rejected '*'.
+    ...(!net.disabled
+      ? {
+          network: {
+            allowedDomains,
+            deniedDomains,
+            deniedDomainReasons,
+            strictAllowlist: true,
+            allowLocalBinding: false,
+            allowUnixSockets: [],
+            allowMachLookup: [],
+          },
+        }
+      : {}),
     git: {
       safeDirectories: nonEmpty(fs.gitSafeDirectories ?? [process.cwd()]),
     },
@@ -472,7 +478,7 @@ export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxP
             ? network.allowedDomains
             : []
           : options.policy.network.disabled
-            ? ['*']
+            ? undefined
             : nonEmpty(options.policy.network.allowedDomains),
         deniedDomains: adopted
           ? Array.isArray(network.deniedDomains)
@@ -535,15 +541,39 @@ export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxP
         env: { ...hostEnv, ...(op.env ?? {}) },
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: false,
+        detached: true,
       })
+      let terminate: (() => void) | undefined
+      if (op.signal) {
+        terminate = () => {
+          try {
+            if (child.pid) process.kill(-child.pid, 'SIGKILL')
+            else child.kill('SIGKILL')
+          } catch {
+            child.kill('SIGKILL')
+          }
+        }
+        if (op.signal.aborted) terminate()
+        else op.signal.addEventListener('abort', terminate, { once: true })
+      }
+      const cleanup = () => {
+        if (terminate && op.signal) op.signal.removeEventListener('abort', terminate)
+        terminate = undefined
+      }
       const completed = new Promise<{ exitCode: number; failed: boolean }>((settle) => {
         // 'error' MUST be handled, and not only so `completed` settles: an unhandled 'error' on a
         // ChildProcess is an uncaught exception that terminates the HOST process. A missing wrapper
         // binary or an unusable `cwd` would therefore kill the agent instead of failing one command.
         // Both listeners are `once` and the promise settles first-write-wins, so the pair is safe:
         // a spawn failure emits 'error' then 'close', and the later 'close' is discarded.
-        child.once('error', () => settle({ exitCode: 1, failed: true }))
-        child.once('close', (code) => settle({ exitCode: code ?? 1, failed: (code ?? 1) !== 0 }))
+        child.once('error', () => {
+          cleanup()
+          settle({ exitCode: 1, failed: true })
+        })
+        child.once('close', (code) => {
+          cleanup()
+          settle({ exitCode: code ?? 1, failed: (code ?? 1) !== 0 })
+        })
       })
       return {
         stdout: toWeb(child.stdout!),

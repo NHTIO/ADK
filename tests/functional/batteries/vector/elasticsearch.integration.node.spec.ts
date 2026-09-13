@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { ElasticsearchVectorStore } from '@nhtio/adk/batteries/vector/elasticsearch'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -28,5 +28,7 @@ d('ElasticsearchVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('ElasticsearchVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('ElasticsearchVectorStore', makeStore)
+  }, 180_000)
 })

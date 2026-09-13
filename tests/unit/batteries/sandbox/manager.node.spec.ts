@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createSandbox } from '../../../../src/batteries/sandbox/manager'
 import type { DerivedRules, SandboxPolicy } from '../../../../src/batteries/sandbox/types'
 import type { SandboxPolicyEnforcer } from '../../../../src/batteries/sandbox/contracts/policy_enforcer'
@@ -176,6 +176,70 @@ describe('sandbox manager', () => {
     ).resolves.toBeTruthy()
     expect(foreign.handle.effectivePolicy()?.network.disabled).toBe(false)
     await foreign.handle.dispose()
+  })
+
+  it('mirrors caller cancellation into the enforcer signal and disposal aborts in-flight work', async () => {
+    let received: AbortSignal | undefined
+    let completed!: Promise<{ exitCode: number; failed: boolean }>
+    let settle!: (value: { exitCode: number; failed: boolean }) => void
+    const enforcer = make(() => rules())
+    enforcer.run = async (op) => {
+      received = op.signal
+      completed = new Promise((resolve) => {
+        settle = resolve
+        op.signal?.addEventListener('abort', () => resolve({ exitCode: 1, failed: true }), {
+          once: true,
+        })
+      })
+      return { stdout: new ReadableStream(), stderr: new ReadableStream(), completed }
+    }
+    const handle = await createSandbox({ enforcer, policy: policy() })
+    const caller = new AbortController()
+    const run = await handle.run({
+      argv: ['true'],
+      cwd: '/',
+      policy: policy(),
+      correlationId: 'abort',
+      signal: caller.signal,
+    })
+    expect(received).toBeTruthy()
+    expect(received).not.toBe(caller.signal)
+    caller.abort('caller cancelled')
+    expect(received?.aborted).toBe(true)
+    await expect(run.completed).resolves.toEqual({ exitCode: 1, failed: true })
+    // The manager's own lifecycle controller also cancels work, rather than abandoning it.
+    const second = await handle.run({
+      argv: ['true'],
+      cwd: '/',
+      policy: policy(),
+      correlationId: 'dispose',
+    })
+    await handle.dispose()
+    expect(received?.aborted).toBe(true)
+    settle({ exitCode: 1, failed: true })
+    await expect(second.completed).resolves.toEqual({ exitCode: 1, failed: true })
+  })
+
+  it('removes the caller abort listener after a run completes', async () => {
+    const enforcer = make(() => rules())
+    const handle = await createSandbox({ enforcer, policy: policy() })
+    const caller = new AbortController()
+    const addListener = vi.spyOn(caller.signal, 'addEventListener')
+    const removeListener = vi.spyOn(caller.signal, 'removeEventListener')
+
+    const run = await handle.run({
+      argv: ['true'],
+      cwd: '/',
+      policy: policy(),
+      correlationId: 'listener-cleanup',
+      signal: caller.signal,
+    })
+    await run.completed
+
+    const forwardingListener = addListener.mock.calls.find(([type]) => type === 'abort')?.[1]
+    expect(forwardingListener).toBeTypeOf('function')
+    expect(removeListener).toHaveBeenCalledWith('abort', forwardingListener)
+    await handle.dispose()
   })
 
   it('disposal invalidates epochs and adoption does not dispose the foreign enforcer', async () => {

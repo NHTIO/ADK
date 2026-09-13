@@ -121,7 +121,7 @@ const observabilityHooksShape = {
 }
 
 /** Shape of the `autoRespawn` option shared by every `createIsolatedService`-flavored options bag
- *  (`isolatedServiceOptionsSchema` and, via WP2, `spawnIsolatedOptionsSchema`). Hoisted rather than
+ *  (`isolatedServiceOptionsSchema` and, via the browser transport, `spawnIsolatedOptionsSchema`). Hoisted rather than
  *  re-declared so both schemas stay in lockstep. */
 const autoRespawnSchema = validator
   .object({
@@ -192,7 +192,7 @@ export const validateServeIsolatedOptions = <T extends object>(input: T | undefi
   return value as T
 }
 
-// ── WP2 (browser): `spawnIsolated`/`createWorkerTransport` options ─────────────────────────────────────
+// ── Browser transport: `spawnIsolated`/`createWorkerTransport` options ─────────────────────────────────────
 
 /** A value is `URL`-like when it structurally exposes a string `href` (real `URL` instances, and
  *  anything sufficiently duck-compatible) — this schema never imports the DOM `URL` type; see

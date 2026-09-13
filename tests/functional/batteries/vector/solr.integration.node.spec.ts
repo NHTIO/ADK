@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { SolrVectorStore } from '@nhtio/adk/batteries/vector/solr'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -23,5 +23,7 @@ d('SolrVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('SolrVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('SolrVectorStore', makeStore)
+  })
 })

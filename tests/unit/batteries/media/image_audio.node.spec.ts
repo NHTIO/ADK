@@ -89,6 +89,33 @@ describe('image.* steps with the jimp engine', () => {
     expect(out.mimeType).toBe('image/jpeg')
   })
 
+  it('concatenates shapes from multiple annotate steps in order', async () => {
+    let annotations: MutateRequest['annotate']
+    const annotateProbe: MediaEngine = {
+      id: 'annotate-probe',
+      mutates: [
+        {
+          over: ['image/*'],
+          ops: ['annotate'],
+          encodes: ['png'],
+          async mutate(request) {
+            annotations = request.annotate
+            return { bytes: request.bytes, mimeType: request.mimeType }
+          },
+        },
+      ],
+    }
+    const mp = await createMediaPipeline({ engines: [annotateProbe] })
+    const png = await loadMediaFixture('sample.png')
+    await mp(png)
+      .image.annotate([{ type: 'rect', x: 1, y: 1, width: 4, height: 4 }])
+      .image.annotate([{ type: 'line', x1: 0, y1: 0, x2: 8, y2: 8 }])
+    expect(annotations).toEqual([
+      { type: 'rect', x: 1, y: 1, width: 4, height: 4 },
+      { type: 'line', x1: 0, y1: 0, x2: 8, y2: 8 },
+    ])
+  })
+
   it('two rotates cancel modulo 360 in the fused request', async () => {
     let sawRotate: number | undefined = 999
     const probe = probedJimp((request) => {
@@ -119,6 +146,77 @@ describe('image.* steps with the jimp engine', () => {
     const mp = await createMediaPipeline()
     const png = await loadMediaFixture('sample.png')
     await expect(mp(png).image.resize({ width: 8 })).rejects.toThrow(/Do not retry/)
+  })
+
+  it('annotates an image with sharp and preserves dimensions', async () => {
+    const { sharpEngine } = await import('../../../../src/batteries/media/engines/sharp')
+    const mp = await createMediaPipeline({ engines: [() => sharpEngine()] })
+    const png = await loadMediaFixture('sample.png')
+    const out = (await mp(png).image.annotate([
+      { type: 'rect', x: 2, y: 2, width: 12, height: 10, color: '#ff0000', strokeWidth: 3 },
+      { type: 'line', x1: 0, y1: 0, x2: 20, y2: 20, color: '#00ff00' },
+      { type: 'text', x: 4, y: 20, text: 'mark', size: 12 },
+    ])) as StepPayload
+    const before = await dims(png)
+    const after = await dims(out)
+    expect(out.bytes).not.toEqual(png.bytes)
+    expect(after.w).toBe(before.w)
+    expect(after.h).toBe(before.h)
+    const beforeImage = await Jimp.read(Buffer.from(png.bytes))
+    const afterImage = await Jimp.read(Buffer.from(out.bytes))
+    const beforePixel = beforeImage.getPixelColor(3, 2)
+    const afterPixel = afterImage.getPixelColor(3, 2)
+    expect(afterPixel).not.toBe(beforePixel)
+    expect(afterPixel & 0xff).toBeGreaterThan(180)
+  })
+
+  it('annotates every frame of an animated GIF', async () => {
+    const { sharpEngine } = await import('../../../../src/batteries/media/engines/sharp')
+    const { default: sharp } = await import('sharp')
+    const mp = await createMediaPipeline({ engines: [() => sharpEngine()] })
+    const framePixels = Buffer.alloc(8 * 16 * 4, 255)
+    framePixels.fill(192, 8 * 8 * 4)
+    const gifBytes = await sharp(framePixels, {
+      raw: { width: 8, height: 16, pageHeight: 8, channels: 4 },
+    })
+      .gif({ delay: [100, 100], loop: 0 })
+      .toBuffer()
+    const gif: StepPayload = {
+      bytes: new Uint8Array(gifBytes),
+      mimeType: 'image/gif',
+      filename: 'animated.gif',
+    }
+
+    const out = (await mp(gif).image.annotate([
+      { type: 'rect', x: 1, y: 1, width: 4, height: 4, fill: '#0000ff' },
+    ])) as StepPayload
+
+    const afterMeta = await sharp(out.bytes).metadata()
+    expect(afterMeta.pages).toBe(2)
+    const secondFrame = await sharp(out.bytes, { page: 1, pages: 1 })
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true })
+    const pixelOffset = (2 * secondFrame.info.width + 2) * secondFrame.info.channels
+    expect([...secondFrame.data.subarray(pixelOffset, pixelOffset + 3)]).toEqual([0, 0, 255])
+  })
+
+  it('rejects malformed annotation primitives', async () => {
+    const { sharpEngine } = await import('../../../../src/batteries/media/engines/sharp')
+    const mp = await createMediaPipeline({ engines: [() => sharpEngine()] })
+    const png = await loadMediaFixture('sample.png')
+    await expect(mp(png).image.annotate([{ type: 'rect', x: 1, y: 1 } as never])).rejects.toThrow(
+      /requires width/
+    )
+    for (const shape of [
+      { type: 'rect', x: 1, y: 1, width: 2, height: 2, strokeWidth: Number.NaN },
+      { type: 'rect', x: 1, y: 1, width: 2, height: 2, color: 1 },
+      { type: 'rect', x: 1, y: 1, width: 2, height: 2, fill: 1 },
+      { type: 'text', x: 1, y: 1, text: 'x', size: Number.POSITIVE_INFINITY },
+      { type: 'text', x: 1, y: 1, text: 'x', font: 1 },
+    ]) {
+      await expect(mp(png).image.annotate([shape] as never)).rejects.toThrow(/annotate/)
+    }
   })
 
   it('image verbs on non-images fail with the family message', async () => {
@@ -274,15 +372,17 @@ describe('engine config validation (loud-config rules)', () => {
   })
 
   it('sharpEngine conforms to the contract and declares webp', async () => {
-    const { sharpEngine } = await import('../../../../src/batteries/media/engines/sharp')
-    const engine = sharpEngine()
+    const { sharpEngine: createSharpEngine } =
+      await import('../../../../src/batteries/media/engines/sharp')
+    const engine = createSharpEngine()
     expect(implementsMediaEngine(engine)).toBe(true)
     expect(engine.mutates![0].encodes).toContain('webp')
   })
 
   it('sharp engine transforms the png fixture to webp (native path)', async () => {
-    const { sharpEngine } = await import('../../../../src/batteries/media/engines/sharp')
-    const mp = await createMediaPipeline({ engines: [() => sharpEngine()] })
+    const { sharpEngine: createSharpEngine } =
+      await import('../../../../src/batteries/media/engines/sharp')
+    const mp = await createMediaPipeline({ engines: [() => createSharpEngine()] })
     const png = await loadMediaFixture('sample.png')
     const out = (await mp(png).image.resize({ width: 20 }).image.format('webp')) as StepPayload
     expect(out.mimeType).toBe('image/webp')

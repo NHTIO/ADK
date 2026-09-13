@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { MongoDBVectorStore } from '@nhtio/adk/batteries/vector/mongodb'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -34,5 +34,7 @@ d('MongoDBVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('MongoDBVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('MongoDBVectorStore', makeStore)
+  })
 })

@@ -29,12 +29,6 @@ import { resolveToolCallParser } from '../chat_common/tool_parsers'
 import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { ArtifactTool, Media, Message, Thought, Tokenizable, ToolCall } from '@nhtio/adk/common'
 import {
-  E_GEMINI_INVALID_TOOL_CALL_ARGS,
-  E_GEMINI_MISSING_THOUGHT_SIGNATURE,
-  E_GEMINI_REQUEST_FAILED,
-  E_GEMINI_STREAM_ERROR,
-} from './exceptions'
-import {
   DEFAULT_GEMINI_BUCKET_ORDER,
   buildGeminiRequest,
   extractGeminiGeneration,
@@ -42,6 +36,14 @@ import {
   renderGeminiToolResult,
   toolsToGeminiTools,
 } from './helpers'
+import {
+  E_GEMINI_GENERATE_CONTENT_CONTEXT_OVERFLOW,
+  E_INVALID_GEMINI_GENERATE_CONTENT_OPTIONS,
+  E_GEMINI_INVALID_TOOL_CALL_ARGS,
+  E_GEMINI_MISSING_THOUGHT_SIGNATURE,
+  E_GEMINI_REQUEST_FAILED,
+  E_GEMINI_STREAM_ERROR,
+} from './exceptions'
 import {
   descriptionToChatCompletionsJsonSchema,
   filterThoughts,
@@ -58,7 +60,8 @@ import {
   renderUntrustedContent,
 } from '../chat_common/helpers'
 import type { DispatchContext } from '@nhtio/adk/types'
-import type { SpooledArtifact, Tool } from '@nhtio/adk/common'
+import type { Memory, SpooledArtifact, Tool } from '@nhtio/adk/common'
+import type { TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
 import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/types'
 import type {
   GeminiGenerateContentAdapterOptions,
@@ -74,6 +77,11 @@ const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
  * Gemini reasoning session. See the option's TSDoc for why this is the default.
  */
 const DEFAULT_SENTINEL = 'skip_thought_signature_validator'
+
+const estimateTokensOf = async (
+  value: { estimateTokens: (encoding: TokenEncoding) => number | Promise<number> },
+  encoding: TokenEncodingId
+): Promise<number> => Promise.resolve(value.estimateTokens(encoding as TokenEncoding))
 
 const computeChecksum = (tool: string, args: Record<string, unknown>): string =>
   sha256(`${tool}:${canonicalStringify(args)}`)
@@ -186,6 +194,15 @@ export class GeminiGenerateContentAdapter {
         ? (stashRaw as Partial<GeminiGenerateContentAdapterOptions>)
         : {}
       const merged = validateOptions(mergeOptions(baseline, overrides, stashOverrides))
+      if (
+        merged.tokenEncoding !== undefined &&
+        merged.tokenEncoding !== null &&
+        merged.contextWindow === undefined
+      ) {
+        throw new E_INVALID_GEMINI_GENERATE_CONTENT_OPTIONS([
+          'tokenEncoding is non-null but contextWindow is undefined',
+        ])
+      }
       const resolved = resolveHelpers(merged.helpers)
       const selfIdentity = 'assistant'
       const dispatchStreamId = uuidv6()
@@ -208,6 +225,57 @@ export class GeminiGenerateContentAdapter {
             warn,
           })
         )
+      }
+
+      // ── context window enforcement ───────────────────────────────────────
+      if (
+        merged.tokenEncoding !== undefined &&
+        merged.tokenEncoding !== null &&
+        merged.contextWindow !== undefined
+      ) {
+        const encoding = merged.tokenEncoding
+        let total = await estimateTokensOf(ctx.systemPrompt, encoding)
+        for (const value of ctx.standingInstructions)
+          total += await estimateTokensOf(value, encoding)
+        for (const memory of ctx.turnMemories as Set<Memory>) {
+          total += await estimateTokensOf(memory.content, encoding)
+        }
+        for (const retrievable of ctx.turnRetrievables) {
+          total += await estimateTokensOf(
+            retrievable.inline
+              ? (retrievable.content as any)
+              : new Tokenizable(`[Reference available: ${retrievable.id}]`),
+            encoding
+          )
+        }
+        for (const message of ctx.turnMessages) {
+          if (message.content !== undefined)
+            total += await estimateTokensOf(message.content, encoding)
+        }
+        for (const thought of ctx.turnThoughts)
+          total += await estimateTokensOf(thought.content, encoding)
+        for (const result of renderedToolCallResults.values()) {
+          total += await estimateTokensOf(new Tokenizable(JSON.stringify(result)), encoding)
+        }
+        const tools = ctx.tools.visible()
+        // Tool DECLARATIONS: the Gemini wire ships tools as an array, which the PROVIDER
+        // serializes server-side into the model's own format. Tally the tokens of the wire
+        // tools JSON (`JSON.stringify`) as an honest FLOOR — a truthful lower bound. We add
+        // a highly conservative 50% margin to cover JSON structural overhead and nested formatting.
+        if (tools.length > 0) {
+          const toolTokens = await estimateTokensOf(
+            new Tokenizable(JSON.stringify(resolved.toolsToGeminiTools(tools))),
+            encoding
+          )
+          total += Math.ceil(toolTokens * 1.5)
+        }
+        if (total + (merged.maxOutputTokens ?? 0) > merged.contextWindow) {
+          throw new E_GEMINI_GENERATE_CONTENT_CONTEXT_OVERFLOW([
+            total + (merged.maxOutputTokens ?? 0),
+            merged.contextWindow,
+            encoding,
+          ])
+        }
       }
 
       // ── assemble ────────────────────────────────────────────────────────
@@ -382,7 +450,7 @@ export class GeminiGenerateContentAdapter {
           message: `generation ended with finishReason=${finishReason ?? 'unknown'} and no function calls`,
           payload: { finishReason: finishReason ?? 'unknown' },
         })
-        ctx.ack()
+        if (merged.autoAck) ctx.ack()
         return
       }
 

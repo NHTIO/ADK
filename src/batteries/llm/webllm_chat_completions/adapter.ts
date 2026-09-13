@@ -94,9 +94,10 @@ import {
   defaultCreateChatCompletionsToolCallDeltaAccumulator,
   extractReasoningFields,
 } from './helpers'
+import type { Tool, Memory } from '@nhtio/adk/common'
 import type { DispatchContext } from '@nhtio/adk/types'
-import type { Tool, Memory, TokenEncoding } from '@nhtio/adk/common'
 import type { BatteryLifecyclePhase } from '../chat_common/lifecycle'
+import type { TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
 import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
 import type {
   WebLLMChatCompletionsAdapterOptions,
@@ -232,9 +233,9 @@ const nowIso = (): string => DateTime.now().toISO() ?? new Date().toISOString()
 
 const estimateTokensOf = async (
   value: { estimateTokens: (encoding: TokenEncoding) => number | Promise<number> },
-  encoding: TokenEncoding
+  encoding: TokenEncodingId
 ): Promise<number> => {
-  return Promise.resolve(value.estimateTokens(encoding))
+  return Promise.resolve(value.estimateTokens(encoding as TokenEncoding))
 }
 
 // ─── Adapter class ────────────────────────────────────────────────────────────
@@ -461,7 +462,7 @@ export class WebLLMChatCompletionsAdapter {
 
       // ── Step 5: context window enforcement ────────────────────────────────
       if (merged.tokenEncoding !== null && merged.contextWindow !== undefined) {
-        const encoding = merged.tokenEncoding as TokenEncoding
+        const encoding = merged.tokenEncoding as TokenEncodingId
         let spTokens = await estimateTokensOf(ctx.systemPrompt, encoding)
         let siTokens = 0
         for (const si of ctx.standingInstructions) {
@@ -477,7 +478,7 @@ export class WebLLMChatCompletionsAdapter {
             !r.inline && SpooledArtifact.isSpooledArtifact(r.content) && r.content.hasSizeHints()
               ? r.content.estimateHandleTokens(
                   r.id,
-                  encoding,
+                  encoding as TokenEncoding,
                   resolvedHelpers.renderRetrievableHandleBody
                 )
               : await estimateTokensOf(r.content, encoding)

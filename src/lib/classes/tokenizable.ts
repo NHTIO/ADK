@@ -86,9 +86,8 @@ export type TokenEncoding = (typeof TokenEncoding)[number]
  * has no members beyond `string`, so it accepts any string value while `TokenEncoding` still
  * contributes its literal members to editor autocomplete (a bare `string` union member would erase
  * that autocomplete entirely, since TypeScript collapses `TokenEncoding | string` to `string`). Use
- * this type wherever an API accepts "a built-in encoding, or a registered custom one" — for example
- * {@link Tokenizable.estimateTokens}'s `encoding` parameter. APIs that only ever accept the CLOSED
- * built-in set (e.g. a battery's `tokenEncoding` validation list) should keep using {@link TokenEncoding}.
+ * this type wherever an API accepts "a built-in encoding, or a custom one" — including the `tokenEncoding`
+ * property on battery adapter options, which treat the built-ins as suggestions but permit any string.
  */
 export type TokenEncodingId = TokenEncoding | (string & {})
 
@@ -134,6 +133,7 @@ export const E_TOKEN_ESTIMATOR_SHADOWS_BUILTIN = createException<[string]>(
 // Custom encodings registered via registerTokenEstimator, consulted AFTER the built-in switch so the
 // closed set's fast path (and its degrade-vs-throw contract) is never disturbed by registration.
 const customEstimators = new Map<string, TokenEstimatorFn>()
+const warnedUnregisteredEncodings = new Set<string>()
 
 // The built-in identifiers as a Set for O(1) shadow-checks and the isBuiltinEncoding guard below.
 const builtinEncodingSet = new Set<string>(TokenEncoding)
@@ -462,8 +462,8 @@ export class Tokenizable {
     // Resolution order: (1) the built-in switch — completely unchanged, so the closed set's fast path
     // and degrade-vs-throw contract are untouched by the registry existing; (2) the custom-estimator
     // registry, for anything {@link registerTokenEstimator} has registered; (3) the pre-existing
-    // failure path for a truly unrecognised encoding (falls through with no return, same as before the
-    // registry was added — callers relying on that behaviour see no change).
+    // fallback path for a truly unrecognised encoding (emits a warning and falls back to the safe
+    // 3.5 chars/token heuristic, ensuring overflow math always gets a finite upper-bound estimate).
     const countFor = (encoding: TokenEncodingId, text: string): number => {
       if (isBuiltinEncoding(encoding)) {
         return countForBuiltin(encoding, text)
@@ -472,11 +472,16 @@ export class Tokenizable {
       if (custom) {
         return custom(text)
       }
-      // Unrecognised AND unregistered: same silent `undefined` this returned before the registry
-      // existed (verified against the pre-registry runtime behaviour — see the class-level remarks).
-      // The `number` return type is kept as-is (unchanged public contract); this cast documents the
-      // one deliberate escape from it, exactly as narrow as it was previously.
-      return undefined as unknown as number
+      // Unrecognised AND unregistered encodings use the generic character heuristic. Warn once per
+      // encoding so callers know the estimate is uncalibrated, while preserving a finite count for
+      // context-window arithmetic.
+      if (!warnedUnregisteredEncodings.has(encoding)) {
+        warnedUnregisteredEncodings.add(encoding)
+        console.warn(
+          `No token estimator is registered for "${encoding}"; using the uncalibrated character heuristic.`
+        )
+      }
+      return text.length
     }
 
     // The standard coercion protocol takes NO argument, so it resolves with no context → the static

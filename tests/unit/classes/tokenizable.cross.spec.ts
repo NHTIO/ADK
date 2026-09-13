@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ENCODE_METHOD, DECODE_METHOD } from '../../../src/lib/utils/encoder_symbols'
 import { E_TOKENIZABLE_EVALUATOR_INVALID } from '../../../src/lib/exceptions/runtime'
 import {
@@ -337,9 +337,14 @@ describe('Tokenizable', () => {
       )
     })
 
-    it('an unrecognised, unregistered encoding still resolves to undefined (pre-existing behaviour, unchanged)', () => {
+    it('uses the character heuristic for an unrecognised, unregistered encoding and warns once', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
       const t = new Tokenizable('hello world')
-      expect(t.estimateTokens('totally-unrecognised-encoding' as never)).toBeUndefined()
+      const expected = 'hello world'.length
+      expect(t.estimateTokens('totally-unrecognised-encoding' as never)).toBe(expected)
+      expect(t.estimateTokens('totally-unrecognised-encoding' as never)).toBe(expected)
+      expect(warn).toHaveBeenCalledTimes(1)
+      warn.mockRestore()
     })
 
     it('a Tokenizable INSTANCE measures via a registered custom estimator (constructor path, not just static)', () => {

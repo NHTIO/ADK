@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { DuckDBVectorStore } from '@nhtio/adk/batteries/vector/duckdb'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -27,5 +27,7 @@ d('DuckDBVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('DuckDBVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('DuckDBVectorStore', makeStore)
+  })
 })

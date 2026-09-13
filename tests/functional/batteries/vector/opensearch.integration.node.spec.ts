@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { OpenSearchVectorStore } from '@nhtio/adk/batteries/vector/opensearch'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -28,5 +28,7 @@ d('OpenSearchVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('OpenSearchVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('OpenSearchVectorStore', makeStore)
+  })
 })

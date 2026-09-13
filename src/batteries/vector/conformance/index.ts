@@ -1,13 +1,12 @@
 /**
  * Shared conformance suite for vector-store adapters. Drive any adapter through
  * {@link runVectorStoreConformance} to verify it honours the same contract all shipped adapters do.
- * Public, deep-import-only (`@nhtio/adk/batteries/vector/conformance`) — it imports `vitest`, an
- * optional peer you install to run the suite; it is never pulled in by the battery barrel.
+ * Public, deep-import-only (`@nhtio/adk/batteries/vector/conformance`). The suite has no test-runner
+ * dependency: callers invoke it and await the returned promise from any test framework.
  *
  * @module @nhtio/adk/batteries/vector/conformance
  */
 
-import { describe, expect, it } from 'vitest'
 import type { CallableVectorStore } from '../contract'
 
 /** A deterministic stub encoder producing a 3-dim vector from simple text features. */
@@ -53,14 +52,114 @@ const padVector = (v: number[], dim: number): number[] => {
  * @param dim - Vector dimensionality the harness pads to (default 3).
  * @param opts - Per-`it` retry/timeout overrides.
  */
-export const runVectorStoreConformance = (
+const assert: (condition: boolean, message: string) => asserts condition = (condition, message) => {
+  if (!condition) throw new Error(message)
+}
+const equal = (actual: unknown, expected: unknown): boolean => {
+  if (actual === expected) return true
+  if (
+    actual === null ||
+    expected === null ||
+    typeof actual !== 'object' ||
+    typeof expected !== 'object'
+  )
+    return false
+  if (Array.isArray(actual) !== Array.isArray(expected)) return false
+  const actualRecord = actual as Record<string, unknown>
+  const expectedRecord = expected as Record<string, unknown>
+  const keysA = Object.keys(actualRecord)
+  const keysB = Object.keys(expectedRecord)
+  if (keysA.length !== keysB.length) return false
+  return keysA.every(
+    (key) => Object.hasOwn(expectedRecord, key) && equal(actualRecord[key], expectedRecord[key])
+  )
+}
+const match = (actual: unknown, expected: unknown): boolean => {
+  if (expected === null || typeof expected !== 'object') return equal(actual, expected)
+  if (actual === null || typeof actual !== 'object') return false
+  return Object.entries(expected).every(([key, value]) =>
+    match((actual as Record<string, unknown>)[key], value)
+  )
+}
+const expectValue = (actual: unknown) => ({
+  toBe: (expected: unknown) =>
+    assert(equal(actual, expected), `expected ${String(actual)} to be ${String(expected)}`),
+  toEqual: (expected: unknown) => assert(equal(actual, expected), 'values were not equal'),
+  toMatchObject: (expected: unknown) =>
+    assert(match(actual, expected), 'value did not match expected object'),
+  toBeDefined: () => assert(actual !== undefined, 'value was undefined'),
+  toBeUndefined: () => assert(actual === undefined, 'value was defined'),
+  toHaveLength: (length: number) =>
+    assert((actual as { length: number }).length === length, 'unexpected length'),
+  rejects: {
+    toThrow: async () => {
+      try {
+        await (actual as Promise<unknown>)
+      } catch {
+        return
+      }
+      throw new Error('expected promise to reject')
+    },
+  },
+})
+
+/**
+ * Run the framework-free vector-store conformance suite against a consumer implementation.
+ *
+ * Each check creates a fresh store through `makeStore`; the returned promise rejects when any
+ * contract assertion fails. Consumers can await this function from any test runner without
+ * importing a test framework from the conformance module.
+ *
+ * @param label - Human-readable name used to identify the implementation under test.
+ * @param makeStore - Factory returning a fresh, connected store with the `docs` collection.
+ * @param dim - Vector dimensionality used by the suite (defaults to 3).
+ * @param opts - Retry count and per-attempt timeout in milliseconds for eventually consistent stores.
+ */
+export const runVectorStoreConformance = async (
   label: string,
   makeStore: () => Promise<CallableVectorStore>,
   dim = 3,
   opts: { retry?: number; timeout?: number } = {}
-): void => {
+): Promise<void> => {
   const p = (v: number[]): number[] => padVector(v, dim)
-  const io = { retry: opts.retry ?? 0, timeout: opts.timeout ?? 5000 }
+  const pending: Array<() => Promise<void>> = []
+  const retry = opts.retry ?? 0
+  const timeout = opts.timeout ?? 5000
+  const runCase = async (test: () => Promise<void>): Promise<void> => {
+    let last: unknown
+    for (let attempt = 0; attempt <= retry; attempt++) {
+      let timedOut = false
+      const operation = Promise.resolve().then(test)
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true
+          reject(new Error(`conformance check timed out after ${timeout}ms`))
+        }, timeout)
+      })
+      try {
+        await Promise.race([operation, deadline])
+        return
+      } catch (error) {
+        // A timeout cannot cancel an arbitrary backend operation. Drain it before retrying so a
+        // late write/read from this attempt cannot race the fresh store made by the next attempt.
+        if (timedOut) {
+          last = error
+          break
+        }
+        last = error
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
+      }
+    }
+    throw last
+  }
+  const it = (_name: string, _io: unknown, test: () => Promise<void>) => {
+    pending.push(() => runCase(test))
+  }
+  const describe = (_name: string, suite: () => void) => suite()
+  const expect = expectValue
+  const io = undefined
   describe('conformance: ' + label, () => {
     it('upserts vectors and searches by nearVector with [0,1] score', io, async () => {
       const vs = await makeStore()
@@ -149,4 +248,7 @@ export const runVectorStoreConformance = (
       }
     })
   })
+  for (const fn of pending) {
+    await fn()
+  }
 }

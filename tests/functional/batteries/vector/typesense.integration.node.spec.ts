@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { TypesenseVectorStore } from '@nhtio/adk/batteries/vector/typesense'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -26,5 +26,7 @@ d('TypesenseVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('TypesenseVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('TypesenseVectorStore', makeStore)
+  })
 })

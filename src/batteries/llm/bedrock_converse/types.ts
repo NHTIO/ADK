@@ -25,7 +25,7 @@
  * deliberately, since this battery must stay cross-environment and dependency-light.
  */
 
-import type { TokenEncoding } from '@nhtio/adk/common'
+import type { TokenEncodingId } from '@nhtio/adk/types'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { SpooledArtifact, Media, SpoolStore } from '@nhtio/adk/common'
 import type { ToolCallParserName, ToolCallParserFn } from '../chat_common/tool_parsers'
@@ -340,7 +340,11 @@ export interface BedrockConverseAdapterOptions {
   /** Injectable `fetch`, for tests or a custom transport. */
   fetch?: typeof globalThis.fetch
   /** Encoding used for token accounting. */
-  tokenEncoding?: TokenEncoding
+  tokenEncoding?: TokenEncodingId | null
+  /** Maximum token weight allowed for the assembled context. */
+  contextWindow?: number
+  /** Whether to acknowledge tool-call-free generations; defaults to true. */
+  autoAck?: boolean
   /** Spool store backing artifact-handle results. */
   spoolStore?: SpoolStore
   /** Order of context buckets in the system blocks. */

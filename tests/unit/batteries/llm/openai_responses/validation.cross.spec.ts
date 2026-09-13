@@ -330,8 +330,12 @@ describe('OpenAI Responses option validation', () => {
       expectAccept({ ...baseValid, tokenEncoding: 'cl100k_base', contextWindow: 128_000 })
     })
 
-    it('rejects an unknown encoding string', () => {
-      expectReject({ ...baseValid, tokenEncoding: 'bpe' })
+    it('accepts an arbitrary custom encoding string', () => {
+      expectAccept({ ...baseValid, tokenEncoding: 'custom-tokenizer-v9' })
+    })
+
+    it('rejects an empty encoding string', () => {
+      expectReject({ ...baseValid, tokenEncoding: '' })
     })
 
     it('schema alone accepts tokenEncoding set WITHOUT contextWindow (the adapter enforces this cross-field invariant, not the schema)', () => {

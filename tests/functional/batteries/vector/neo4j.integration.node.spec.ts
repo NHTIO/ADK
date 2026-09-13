@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { Neo4jVectorStore } from '@nhtio/adk/batteries/vector/neo4j'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -31,5 +31,7 @@ d('Neo4jVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('Neo4jVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('Neo4jVectorStore', makeStore)
+  })
 })

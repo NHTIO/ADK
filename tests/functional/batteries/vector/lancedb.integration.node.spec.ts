@@ -1,6 +1,6 @@
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { LanceDBVectorStore } from '@nhtio/adk/batteries/vector/lancedb'
@@ -31,5 +31,7 @@ d('LanceDBVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('LanceDBVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('LanceDBVectorStore', makeStore)
+  })
 })

@@ -762,6 +762,20 @@ export const VERBS: readonly VerbSpec[] = [
     appliesTo: ['image'],
     output: 'media',
   },
+  {
+    id: 'image.annotate',
+    description: 'Draw vector shapes and text over the image.',
+    args: {
+      shapes: {
+        type: 'json',
+        required: true,
+        description: 'Array of rect, line, arrow, ellipse, or text primitives.',
+      },
+    },
+    requires: { capability: 'mutate' },
+    appliesTo: ['image'],
+    output: 'media',
+  },
   // ── audio namespace ─────────────────────────────────────────────────────────
   {
     id: 'audio.transcribe',

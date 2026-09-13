@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { NetworkConfigSchema } from '@anthropic-ai/sandbox-runtime'
 import { mapPolicy } from '../../../../src/batteries/sandbox/node/srt_enforcer'
 import { createRipgrepSearch } from '../../../../src/batteries/sandbox/node/search_ripgrep'
 import {
@@ -43,12 +44,25 @@ describe('sandbox node enforcer and adapters', () => {
     expect(Object.hasOwn(mapped.filesystem, 'gitSafeDirectories')).toBe(false)
   })
 
-  it('maps disabled network to allow-all, and rejects contradictory restrictions', () => {
-    expect(mapPolicy(policy({ network: { disabled: true } })).network.allowedDomains).toEqual(['*'])
-    expect(mapPolicy(policy({ network: { disabled: true } })).network.deniedDomains).toEqual([])
-    expect(mapPolicy(policy({ network: { disabled: true } })).network.deniedDomainReasons).toEqual(
-      {}
+  it('documents that SRT rejects the former disabled-network encoding', () => {
+    expect(
+      NetworkConfigSchema.safeParse({ allowedDomains: ['*'], deniedDomains: [] }).success
+    ).toBe(false)
+  })
+
+  it('omits disabled network config and maps restricted domains to SRT-valid config', () => {
+    const disabled = mapPolicy(policy({ network: { disabled: true } }))
+    expect(disabled.network).toBeUndefined()
+    expect(NetworkConfigSchema.safeParse(disabled.network).success).toBe(false)
+
+    const restricted = mapPolicy(
+      policy({ network: { allowedDomains: ['example.com'], deniedDomains: ['bad.example'] } })
     )
+    expect(NetworkConfigSchema.safeParse(restricted.network).success).toBe(true)
+    expect(restricted.network).toMatchObject({
+      allowedDomains: ['example.com'],
+      deniedDomains: ['bad.example'],
+    })
     expect(() =>
       mapPolicy(policy({ network: { disabled: true, allowedDomains: ['foo.com'] } }))
     ).toThrow('network.disabled contradicts')

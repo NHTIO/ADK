@@ -8,8 +8,8 @@
  * `litert_lm_worker.ts` (id-correlated one-shot calls, a persistent stream-sink map fed by unsolicited
  * events, string-only error crossing) into a reusable, method/stream/event-name-generic core. Both
  * endpoint classes are PURE over {@link PortLike} — no `Worker`/`postMessage`/`process.send` reference
- * anywhere in this module; WP2/WP3 supply concrete `PortLike` adapters, WP1 exercises this file only
- * against linked in-memory fake ports (see the unit specs).
+ * anywhere in this module; the browser and Node transports supply concrete `PortLike` adapters, while
+ * this file is exercised only against linked in-memory fake ports (see the unit specs).
  *
  * `HostEndpoint` queues every outbound call/stream-start made before the guest's `ready` envelope
  * arrives, then flushes the queue in order once it does. `GuestEndpoint` requires no such queueing (it
@@ -24,8 +24,8 @@ import type { PortLike } from './types'
 /**
  * A single argument/result value as it crosses the wire — the codec's (`codec.ts`) output shape. `enc:
  * 'raw'` ships the value (mostly) untouched; `enc: 'nhtio'` ships an `@nhtio/encoder`-encoded string
- * (or a BYO-codec-encoded string). `transfer` is a pass-through marker WP2's browser transport unwraps
- * into a `postMessage` transfer list; node transports ignore it.
+ * (or a BYO-codec-encoded string). `transfer` is a pass-through marker the browser transport unwraps into a `postMessage` transfer list;
+ * Node transports ignore it.
  */
 export type WireValue =
   | { enc: 'raw'; v: unknown; transfer?: unknown[] }

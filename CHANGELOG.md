@@ -45,6 +45,18 @@ upgrading.
   silently reinterpreted; when omitted the wrapper sniffs the returned shape. A prebuilt
   `SpooledArtifact` is still refused, since it would bypass the deployer's artifact binding.
 
+### Fixed
+
+- **`gemini_generate_content` — `unsupportedMediaPolicy` schema now matches the other LLM
+  batteries and its own type.** The options schema declared `unsupportedMediaPolicy` as a bare
+  `string`, so it accepted any string and rejected the valid
+  `{ mode: 'fallback-stash'; stashKeys: string[] }` object that the `UnsupportedMediaPolicy` union
+  (and `anthropic_messages`, `ollama`, `openai_chat_completions`) permit. It is now the same
+  alternatives schema — the `'throw' | 'fallback-stash' | 'synthetic-description'` enum or the
+  `{ mode, stashKeys }` object, defaulting to `'throw'` — so a consumer building validation from the
+  exported schema treats the option consistently across batteries, and a valid object value no
+  longer fails validation on Gemini.
+
 ## 2026-09-11
 
 ### Fixed

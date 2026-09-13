@@ -59,8 +59,17 @@ export interface SandboxPolicy {
     /** Git safe directories passed to spawned children. */ readonly gitSafeDirectories?: readonly string[]
     /** Linux mandatory-deny scan depth. */ readonly mandatoryDenySearchDepth?: number
   }
-  /** Network rules. An absent allow list means deny all unless disabled. */
+  /**
+   * Network rules. An absent allow list means deny all unless disabled.
+   *
+   * @remarks
+   * `disabled` means that SRT's network configuration key is omitted entirely. SRT decides whether
+   * to create a network namespace from the presence of that key; its `NetworkConfigSchema` has no
+   * schema-valid allow-all domain pattern (`"*"` is explicitly rejected). Consequently disabled
+   * means no network namespace restriction, rather than an allow-all domain entry.
+   */
   readonly network: {
+    /** Omit SRT's network key, avoiding `--unshare-net`, when true. */
     readonly disabled?: boolean
     readonly allowedDomains?: readonly string[]
     readonly deniedDomains?: readonly string[]

@@ -10,7 +10,15 @@ export interface SandboxPolicyEnforcer {
   readonly adopted?: boolean
   /** Probe external prerequisites. A non-empty `errors` throws `E_SANDBOX_DEPENDENCY_MISSING`; `warnings` are surfaced through observability and are NOT fatal. */
   checkDependencies(): Promise<{ errors: string[]; warnings: string[] }>
-  /** Spawn under a narrowing policy; a non-zero exit is data, not a rejected promise. */
+  /**
+   * Spawn under a narrowing policy; a non-zero exit is data, not a rejected promise.
+   *
+   * @remarks
+   * When `op.signal` aborts, an implementation MUST terminate the spawned child (including a
+   * child hidden behind a sandbox wrapper) and settle `completed`; it MUST NOT leave the child
+   * running after the lifecycle owner has cancelled the invocation. The returned streams may end
+   * as a consequence of termination, but `completed` remains the authoritative settlement signal.
+   */
   run(op: {
     argv: string[]
     policy: SandboxPolicy
@@ -27,6 +35,10 @@ export interface SandboxPolicyEnforcer {
      * `process.env` into every child while this field sat unused.
      */
     env?: Record<string, string>
+    /**
+     * Lifecycle cancellation for this child. Implementations must kill the spawned child and
+     * settle `completed` when this signal aborts.
+     */
     signal?: AbortSignal
   }): Promise<{
     stdout: ReadableStream<Uint8Array>

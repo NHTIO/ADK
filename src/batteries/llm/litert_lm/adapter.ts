@@ -79,6 +79,7 @@ import {
 import type { Tool } from '@nhtio/adk/common'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { ParsedToolCall } from '../chat_common/tool_parsers'
+import type { TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
 import type { ChatSampler, ResolvedGenerationOptions } from '../chat_common/generation'
 import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
 import type {
@@ -599,7 +600,8 @@ export class LiteRtLmAdapter {
       // 4. Optional context-window enforcement.
       if (merged.tokenEncoding && merged.contextWindow !== undefined) {
         const enc = merged.tokenEncoding
-        const tally = (s: string): number => new Tokenizable(s).estimateTokens(enc)
+        const tally = (s: string): number =>
+          new Tokenizable(s).estimateTokens(enc as TokenEncodingId)
         // For Tokenizable-backed fields, measure the Tokenizable ITSELF with the live `ctx` (not a temp
         // built from its coerced string): a DYNAMIC value resolves against ctx, so `estimateTokens(enc,
         // ctx)` counts EXACTLY the string that `render(ctx)` will assemble below — keeping this guard's
@@ -626,7 +628,11 @@ export class LiteRtLmAdapter {
         for (const r of ctx.turnRetrievables) {
           b.retrievables +=
             !r.inline && SpooledArtifact.isSpooledArtifact(r.content) && r.content.hasSizeHints()
-              ? r.content.estimateHandleTokens(r.id, enc, h.renderRetrievableHandleBody)
+              ? r.content.estimateHandleTokens(
+                  r.id,
+                  enc as TokenEncoding,
+                  h.renderRetrievableHandleBody
+                )
               : tally((await r.contentString?.()) ?? '')
         }
         for (const m of ctx.turnMessages)

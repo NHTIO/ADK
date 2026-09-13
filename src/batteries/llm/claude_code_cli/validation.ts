@@ -39,7 +39,17 @@ const bucketOrderSchema = validator
   .default(['standingInstructions', 'memories', 'retrievables', 'timeline'])
 
 const tokenEncodingSchema = validator
-  .alternatives(validator.string().valid(...TokenEncoding), validator.any().valid(null).optional())
+  .alternatives(
+    // Known values are suggestions from the canonical list, not a whitelist: consumers may provide
+    // a custom or newer tokenizer name. The field accepts any non-empty string, explicit null, or
+    // absent (undefined = "no token counting"). `.optional()` preserves the null/undefined
+    // disposition required by adk/require-validator-any-required.
+    validator
+      .string()
+      .min(1)
+      .description(`Known encodings: ${TokenEncoding.join(', ')}`),
+    validator.any().valid(null).optional()
+  )
   .default(null)
 
 const unsupportedMediaPolicySchema = validator

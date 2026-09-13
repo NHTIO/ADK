@@ -42,10 +42,14 @@ const bucketOrderSchema = validator
 
 const tokenEncodingSchema = validator
   .alternatives(
-    validator.string().valid(...TokenEncoding),
-    // `tokenEncoding?: TokenEncoding | null` — OPTIONAL: a valid encoding string, explicit null, or
-    // absent (undefined = "no token counting"). `.optional()` makes the null/undefined disposition
-    // explicit per adk/require-validator-any-required, without rejecting "omitted".
+    // Known values are suggestions from the canonical list, not a whitelist: consumers may provide
+    // a custom or newer tokenizer name. The field accepts any non-empty string, explicit null, or
+    // absent (undefined = "no token counting"). `.optional()` preserves the null/undefined
+    // disposition required by adk/require-validator-any-required.
+    validator
+      .string()
+      .min(1)
+      .description(`Known encodings: ${TokenEncoding.join(', ')}`),
     validator.any().valid(null).optional()
   )
   .default(null)

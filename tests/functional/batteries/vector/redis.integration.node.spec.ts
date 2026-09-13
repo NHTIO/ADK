@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { RedisVectorStore } from '@nhtio/adk/batteries/vector/redis'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -31,5 +31,7 @@ d('RedisVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('RedisVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('RedisVectorStore', makeStore)
+  })
 })

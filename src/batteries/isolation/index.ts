@@ -130,7 +130,7 @@ export {
   type IsolatedServiceState,
 } from './host'
 
-// ── Browser transport (WP2) ──────────────────────────────────────────────────────────────────────────
+// ── Browser transport (Web Worker) ──────────────────────────────────────────────────────────────────
 export {
   createWorkerTransport,
   spawnIsolated,
@@ -142,7 +142,7 @@ export {
   type WorkerResolver,
 } from './browser'
 
-// ── Blob-URL escape hatch (WP2) ─────────────────────────────────────────────────────────────────────
+// ── Blob-URL escape hatch (Web Worker) ─────────────────────────────────────────────────────────────
 export {
   E_ISOLATE_FUNCTION_ARG_UNSUPPORTED,
   E_ISOLATE_FUNCTION_REQUIRES_SOURCE_REHYDRATION,

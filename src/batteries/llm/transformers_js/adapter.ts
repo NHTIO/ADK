@@ -78,6 +78,7 @@ import {
 import type { Tool } from '@nhtio/adk/common'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { ParsedToolCall } from '../chat_common/tool_parsers'
+import type { TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
 import type { ChatSampler, ResolvedGenerationOptions } from '../chat_common/generation'
 import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
 import type {
@@ -741,14 +742,19 @@ export class TransformersJsAdapter {
       // 4. Optional context-window enforcement.
       if (merged.tokenEncoding && merged.contextWindow !== undefined) {
         const enc = merged.tokenEncoding
-        const tally = (s: string): number => new Tokenizable(s).estimateTokens(enc)
+        const tally = (s: string): number =>
+          new Tokenizable(s).estimateTokens(enc as TokenEncodingId)
         let total = tally(ctx.systemPrompt.toString())
         for (const si of ctx.standingInstructions) total += tally(si.toString())
         for (const m of ctx.turnMemories) total += tally(m.content.toString())
         for (const r of ctx.turnRetrievables) {
           total +=
             !r.inline && SpooledArtifact.isSpooledArtifact(r.content) && r.content.hasSizeHints()
-              ? r.content.estimateHandleTokens(r.id, enc, h.renderRetrievableHandleBody)
+              ? r.content.estimateHandleTokens(
+                  r.id,
+                  enc as TokenEncoding,
+                  h.renderRetrievableHandleBody
+                )
               : tally((await r.contentString?.()) ?? '')
         }
         for (const m of ctx.turnMessages) total += tally(m.content?.toString() ?? '')

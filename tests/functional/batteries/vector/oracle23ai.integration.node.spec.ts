@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { Oracle23aiVectorStore } from '@nhtio/adk/batteries/vector/oracle23ai'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -37,5 +37,7 @@ d('Oracle23aiVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('Oracle23aiVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('Oracle23aiVectorStore', makeStore)
+  })
 })

@@ -12,7 +12,7 @@
  * re-exports through it fail the generated package build even when TypeScript type-checking passes.
  */
 
-import type { TokenEncoding } from '@nhtio/adk/common'
+import type { TokenEncodingId } from '@nhtio/adk/types'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { SpooledArtifact, Media, SpoolStore } from '@nhtio/adk/common'
 import type { ToolCallParserName, ToolCallParserFn } from '../chat_common/tool_parsers'
@@ -426,7 +426,7 @@ export interface AnthropicMessagesAdapterOptions {
   /** Determines which thoughts are surfaced back to the model. */
   thoughtSurfacing?: 'all-self' | 'latest-self' | 'all'
   /** Tokenizer encoding configuration for token counting. */
-  tokenEncoding?: TokenEncoding | null
+  tokenEncoding?: TokenEncodingId | null
   /** List of replay labels supported by this adapter. */
   replayCompatibility?: ReadonlyArray<string>
   /** Optional overrides for Anthropic translation helpers. */

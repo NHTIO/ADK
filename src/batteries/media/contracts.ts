@@ -324,6 +324,8 @@ export interface MutateRequest {
   flip?: { horizontal?: boolean; vertical?: boolean }
   /** Remove EXIF/ICC metadata. */
   stripMetadata?: boolean
+  /** Vector annotation primitives, rendered over the image. */
+  annotate?: readonly ImageAnnotation[]
   /** Re-encode target, when requested (rides the same fused call). */
   format?: { to: string; quality?: number }
   /** Abort signal threaded from the pipeline execution. */
@@ -331,10 +333,52 @@ export interface MutateRequest {
 }
 
 /** A same-format content-transform capability group. */
+/** A primitive rendered by the image annotation operation. */
+export type ImageAnnotation =
+  | {
+      type: 'rect'
+      x: number
+      y: number
+      width: number
+      height: number
+      color?: string
+      fill?: string
+      strokeWidth?: number
+    }
+  | {
+      type: 'line' | 'arrow'
+      x1: number
+      y1: number
+      x2: number
+      y2: number
+      color?: string
+      strokeWidth?: number
+    }
+  | {
+      type: 'ellipse'
+      cx: number
+      cy: number
+      rx: number
+      ry: number
+      color?: string
+      fill?: string
+      strokeWidth?: number
+    }
+  | {
+      type: 'text'
+      x: number
+      y: number
+      text: string
+      color?: string
+      size?: number
+      font?: string
+    }
+
+/** A same-format content-transform capability group. */
 export interface MutateCapability {
   /** Input patterns this block mutates. */
   over: readonly MimePattern[]
-  /** Content operations supported (`resize`, `rotate`, `flip`, `strip_metadata`). */
+  /** Content operations supported (`resize`, `rotate`, `flip`, `strip_metadata`, `annotate`). */
   ops: readonly string[]
   /** Format tokens reachable via `request.format` in the same fused call. */
   encodes: readonly string[]

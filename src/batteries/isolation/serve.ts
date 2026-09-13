@@ -6,8 +6,8 @@
  * @remarks
  * `serveIsolatedOverPort` is the environment-neutral primitive: it takes an already-constructed
  * {@link PortLike}, so it works identically whether that port wraps a Web Worker's global scope, a
- * node `process`, or (as in every WP1 unit spec) a linked in-memory fake port. `serveIsolated` is the
- * convenience wrapper WP2/WP3 guest entry points call directly: it duck-detects the environment
+ * node `process`, or (as in the shared protocol's unit specs) a linked in-memory fake port. `serveIsolated` is the
+ * convenience wrapper the browser and Node guest entry points call directly: it duck-detects the environment
  * (`globalThis.self.postMessage` → Worker; `globalThis.process?.send` → child_process) and builds the
  * matching `PortLike` itself — WITHOUT importing any `node:*` module (a plain `globalThis.process` duck
  * check, never `import 'node:...'`), keeping this module loadable in every environment.

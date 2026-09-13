@@ -5,7 +5,7 @@
  * @remarks
  * **This is a `new Function`-based eval trust surface. Read this before using it.**
  *
- * Every other seam in this battery (`spawnIsolated`/`serveIsolated`/WP3's node backend) runs a guest
+ * Every other seam in this battery (`spawnIsolated`/`serveIsolated`/the Node child_process backend) runs a guest
  * script the CALLER wrote, deployed, and controls the provenance of. `isolateFunction` is the opposite:
  * it takes an in-memory function VALUE, serializes it via `fn.toString()` (through
  * `@nhtio/encoder/function_serializer`'s `FunctionSerializer.dehydrate`), embeds that source text
@@ -34,7 +34,7 @@
  *   false; error: { message: string; name: string; stack?: string } }` — hand-rolled inline in the Blob
  *   source (no `codec.ts` import there either), but shaped compatibly with `protocol.ts`'s `WireValue`/
  *   `WireError` so the HOST side can decode results via the SAME {@link decodeArgument}/`fromWireError`
- *   helpers WP1 already defines, rather than a third, bespoke decode path.
+ *   helpers the shared isolation protocol already defines, rather than a third, bespoke decode path.
  *
  * `dispose()` terminates the Worker and revokes the Blob URL; every in-flight `invoke()` call, and every
  * call made afterward, rejects with {@link @nhtio/adk/batteries/isolation!E_ISOLATED_TERMINATED}. An

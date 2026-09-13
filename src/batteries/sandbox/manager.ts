@@ -101,14 +101,15 @@ export interface CreateSandboxOptions {
   /** Observability firehose: bypasses, fallbacks, drift outcomes, and the SRT version rules came from. */
   readonly onSandbox?: (event: Parameters<ReturnType<typeof createSandboxObservability>>[0]) => void
   /**
-   * Permit running WITHOUT OS containment when the environment cannot provide it.
+   * Permit degraded operation when the environment cannot provide OS containment.
    *
    * @remarks
    * Fires only for pre-execution conditions resolved once at construction — a platform the backend
    * cannot sandbox that we still run on, dependency errors, or an absent optional peer. It NEVER fires
    * for a violation (a violation means the sandbox worked), and native Windows is refused outright
-   * rather than degraded. When it fires the handle is permanently marked, every invocation emits a loud
-   * event, and the tool descriptions tell the model it has no OS containment.
+   * rather than degraded. When it fires the handle is permanently marked and every invocation emits
+   * a loud observability event. Execution STILL goes through `enforcer.run`; this option never runs
+   * a command unsandboxed, and the tool descriptions tell the model it has no OS containment.
    */
   readonly allowUnsandboxedFallback?: boolean
   /** Ignore the per-call escape entirely, matching the reference consumer's strict mode. */
@@ -294,19 +295,37 @@ export const createSandbox = async (options: CreateSandboxOptions): Promise<Sand
       effectivePolicy: () => owner?.enforcer.effectivePolicy(),
       run: async (runOptions) => {
         check()
+        // The manager owns this controller so disposal cancels every in-flight invocation. The
+        // enforcer contract requires that cancellation terminate the corresponding child and settle
+        // its `completed` promise; the caller's signal is mirrored into this lifecycle signal.
         const controller = new AbortController()
         controllers.add(controller)
         const signal = runOptions.signal
+        let callerAbortListener: (() => void) | undefined
+        const cleanup = (): void => {
+          if (signal && callerAbortListener) {
+            signal.removeEventListener('abort', callerAbortListener)
+            callerAbortListener = undefined
+          }
+          controllers.delete(controller)
+        }
         if (signal) {
           if (signal.aborted) controller.abort(signal.reason)
-          else
-            signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
+          else {
+            callerAbortListener = () => controller.abort(signal.reason)
+            signal.addEventListener('abort', callerAbortListener, { once: true })
+          }
         }
-        const result = owner!.enforcer.run({ ...runOptions, signal: controller.signal })
-        void result.then(
-          () => controllers.delete(controller),
-          () => controllers.delete(controller)
-        )
+        let result: ReturnType<SandboxPolicyEnforcer['run']>
+        try {
+          result = owner!.enforcer.run({ ...runOptions, signal: controller.signal })
+        } catch (error) {
+          cleanup()
+          throw error
+        }
+        // `run` resolves after spawn, while `completed` settles after exit. Keep this controller
+        // registered until completion so disposal can still cancel a live child.
+        void result.then(({ completed }) => completed.then(cleanup, cleanup), cleanup)
         if (preflight.fallbackFired) emitFallback(sink, 'sandbox', 'unsandboxed fallback')
         return result
       },

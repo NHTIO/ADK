@@ -1,3 +1,4 @@
+import { describe, it } from 'vitest'
 import { OramaVectorStore } from '../../../../src/batteries/vector/orama'
 import { createVectorStore } from '../../../../src/batteries/vector/factory'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -14,4 +15,8 @@ const makeStore = async () => {
   return vs
 }
 
-runVectorStoreConformance('OramaVectorStore', makeStore)
+describe('OramaVectorStore conformance', () => {
+  it('satisfies the shared contract', async () => {
+    await runVectorStoreConformance('OramaVectorStore', makeStore)
+  })
+})

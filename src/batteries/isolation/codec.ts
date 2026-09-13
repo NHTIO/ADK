@@ -110,10 +110,10 @@ interface TransferMarked {
 }
 
 /**
- * Mark `value` for transfer (rather than clone) across a `postMessage`-based transport — WP2's browser
+ * Mark `value` for transfer (rather than clone) across a `postMessage`-based transport — the Web Worker
  * transport unwraps this into the message's transfer list. The codec passes marked values through as
  * `raw` with `transferables` preserved on the {@link WireValue} envelope's `transfer` field. Node
- * transports (WP3) ignore the marker entirely (structured-clone/pipe semantics don't have a transfer
+ * transports ignore the marker entirely (structured-clone/pipe semantics don't have a transfer
  * list), so `transfer()` is safe to use in transport-agnostic code that may run over either.
  */
 export const transfer = <T>(value: T, transferables: unknown[]): T => {

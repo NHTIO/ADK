@@ -189,7 +189,7 @@ export const BUNDLED_SUMMARIES: Record<string, EngineSummary> = {
     mutates: [
       {
         over: ['image/*'],
-        ops: ['resize', 'rotate', 'flip', 'strip_metadata'],
+        ops: ['resize', 'rotate', 'flip', 'strip_metadata', 'annotate'],
         encodes: ['png', 'jpg', 'jpeg', 'webp', 'tiff', 'avif', 'gif'],
       },
     ],

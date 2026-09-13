@@ -6,16 +6,14 @@
  * against the {@link PlanStore} interface only — never against in-memory internals — so a passing
  * suite proves the backend honours the same contract the shipped reference implementation does.
  *
- * Public, deep-import-only (`@nhtio/adk/batteries/orchestration/conformance`). It imports
- * `vitest`, an optional peer you install to run the suite; it is never pulled in by the battery
- * barrel.
+ * Public, deep-import-only (`@nhtio/adk/batteries/orchestration/conformance`). The suite has no
+ * test-runner dependency: callers invoke and await it from any test framework.
  *
  * @module @nhtio/adk/batteries/orchestration/conformance
  */
 
 import { foldOps } from './ops'
 import { isObject } from '@nhtio/adk/guards'
-import { describe, expect, it } from 'vitest'
 import type { PlanStore, TransitionRequest } from './store'
 import type {
   ApprovalRecord,
@@ -34,10 +32,74 @@ import type {
  * @param makeStore - A factory returning a FRESH store for each case, so no case shares state with
  *   another. May be async.
  */
-export const runPlanStoreConformance = (
+const equal = (actual: unknown, expected: unknown): boolean => {
+  if (actual === expected) return true
+  if (
+    actual === null ||
+    expected === null ||
+    typeof actual !== 'object' ||
+    typeof expected !== 'object'
+  )
+    return false
+  if (Array.isArray(actual) !== Array.isArray(expected)) return false
+  const keysA = Object.keys(actual)
+  const keysB = Object.keys(expected)
+  if (keysA.length !== keysB.length) return false
+  return keysA.every((k) => keysB.includes(k) && equal((actual as any)[k], (expected as any)[k]))
+}
+const match = (actual: unknown, expected: unknown): boolean => {
+  if (expected === null || typeof expected !== 'object') return equal(actual, expected)
+  if (actual === null || typeof actual !== 'object') return false
+  return Object.entries(expected).every(([key, value]) =>
+    match((actual as Record<string, unknown>)[key], value)
+  )
+}
+const expectValue = (actual: unknown) => ({
+  toBe: (expected: unknown) => assert(equal(actual, expected), 'values were not equal'),
+  toEqual: (expected: unknown) => assert(equal(actual, expected), 'values were not equal'),
+  toMatchObject: (expected: unknown) =>
+    assert(match(actual, expected), 'value did not match expected object'),
+  toBeDefined: () => assert(actual !== undefined, 'value was undefined'),
+  toBeUndefined: () => assert(actual === undefined, 'value was defined'),
+  toHaveLength: (length: number) =>
+    assert((actual as { length: number }).length === length, 'unexpected length'),
+  toBeGreaterThan: (value: number) =>
+    assert((actual as number) > value, 'value was not greater than expected'),
+  rejects: {
+    toThrow: async () => {
+      try {
+        await (actual as Promise<unknown>)
+      } catch {
+        return
+      }
+      throw new Error('expected promise to reject')
+    },
+  },
+})
+const assert: (condition: boolean, message: string) => asserts condition = (condition, message) => {
+  if (!condition) throw new Error(message)
+}
+
+/**
+ * Run the framework-free PlanStore conformance suite against a consumer implementation.
+ *
+ * Each check creates a fresh store through `makeStore`, and the returned promise rejects when any
+ * contract assertion fails. Consumers can await this function from Vitest, node:test, Jest, Mocha,
+ * or another runner without importing a test framework from the conformance module.
+ *
+ * @param label - Human-readable name used to identify the implementation under test.
+ * @param makeStore - Factory returning a fresh PlanStore for each conformance check; it may be async.
+ */
+export const runPlanStoreConformance = async (
   label: string,
   makeStore: () => PlanStore | Promise<PlanStore>
-): void => {
+): Promise<void> => {
+  const pending: Array<() => Promise<void>> = []
+  const it = (_name: string, test: () => Promise<void>) => {
+    pending.push(test)
+  }
+  const describe = (_name: string, suite: () => void) => suite()
+  const expect = expectValue
   describe(`PlanStore conformance: ${label}`, () => {
     // ── helpers ────────────────────────────────────────────────────────────────
     /** A minimal, well-shaped `entry` node for authoring ops. */
@@ -486,4 +548,7 @@ export const runPlanStoreConformance = (
       expect(isObject(entry)).toBe(true)
     })
   })
+  for (const fn of pending) {
+    await fn()
+  }
 }

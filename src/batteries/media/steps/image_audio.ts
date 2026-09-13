@@ -16,13 +16,14 @@
  */
 
 import { argOf } from '../runtime'
+import { isObject } from '@nhtio/adk/guards'
 import { E_MEDIA_STEP_FAILED } from '../exceptions'
 // Accepted-shared-runtime tier (see CONTRIBUTING.md → Design Decisions → #13 Battery design):
 // pure, class-free resample primitive shared with the specialists `_shared` battery — no core
 // class coupling, so this deep relative reach is accepted as-is, not re-exported through a shim.
 import { resampleTo } from '../../../lib/utils/audio'
 import { PCM_MIME, pcmToBytes, bytesToPcm } from '../contracts'
-import type { MutateRequest } from '../contracts'
+import type { ImageAnnotation, MutateRequest } from '../contracts'
 import type { StepImpl, StepContext, StepResult } from '../runtime'
 
 // Re-exported for existing importers (`resampleTo` used to be defined locally in this module).
@@ -42,6 +43,7 @@ const IMAGE_VERBS = new Set([
   'image.rotate',
   'image.flip',
   'image.strip_metadata',
+  'image.annotate',
 ])
 
 const requireImage = (ctx: StepContext, verb: string): void => {
@@ -87,6 +89,58 @@ const foldImageStep = (ctx: StepContext, fused: FusedImageOps): FusedImageOps =>
     }
     case 'image.strip_metadata':
       return { ...fused, stripMetadata: true }
+    case 'image.annotate': {
+      const shapes: unknown = args.shapes
+      if (!Array.isArray(shapes)) fail('image annotate', 'shapes must be an array')
+      const shapeList = shapes as unknown[]
+      for (const value of shapeList) {
+        if (!isObject(value) || typeof value.type !== 'string') {
+          fail('image annotate', 'each shape must have a type')
+        }
+        const shape = value as Record<string, unknown>
+        const type = shape.type as string
+        if (!['rect', 'line', 'arrow', 'ellipse', 'text'].includes(type)) {
+          fail('image annotate', `unsupported shape type "${type}"`)
+        }
+        const required =
+          type === 'rect'
+            ? ['x', 'y', 'width', 'height']
+            : type === 'line' || type === 'arrow'
+              ? ['x1', 'y1', 'x2', 'y2']
+              : type === 'ellipse'
+                ? ['cx', 'cy', 'rx', 'ry']
+                : ['x', 'y', 'text']
+        for (const key of required) {
+          if (
+            !(key in shape) ||
+            (key !== 'text' && typeof shape[key] !== 'number') ||
+            (key === 'text' && typeof shape[key] !== 'string')
+          )
+            fail('image annotate', `shape ${type} requires ${key}`)
+          if (key !== 'text' && !Number.isFinite(shape[key] as number))
+            fail('image annotate', `${type}.${key} must be finite`)
+          if (['width', 'height', 'rx', 'ry'].includes(key) && (shape[key] as number) <= 0)
+            fail('image annotate', `${type}.${key} must be positive`)
+        }
+        for (const key of ['strokeWidth', 'size']) {
+          if (
+            key in shape &&
+            (typeof shape[key] !== 'number' ||
+              !Number.isFinite(shape[key] as number) ||
+              (shape[key] as number) <= 0)
+          )
+            fail('image annotate', `${type}.${key} must be a positive finite number`)
+        }
+        for (const key of ['color', 'fill', 'font']) {
+          if (key in shape && typeof shape[key] !== 'string')
+            fail('image annotate', `${type}.${key} must be text`)
+        }
+      }
+      return {
+        ...fused,
+        annotate: [...(fused.annotate ?? []), ...(shapeList as ImageAnnotation[])],
+      }
+    }
     default:
       return fused
   }
@@ -198,5 +252,6 @@ export const IMAGE_AUDIO_STEPS: ReadonlyArray<[string, StepImpl]> = [
   ['image.rotate', imageStep],
   ['image.flip', imageStep],
   ['image.strip_metadata', imageStep],
+  ['image.annotate', imageStep],
   ['audio.transcribe', audioTranscribeStep],
 ]

@@ -1,5 +1,5 @@
 /**
- * Web Worker {@link IsolationTransport} + `spawnIsolated` convenience — WP2 of the isolation battery.
+ * Web Worker {@link IsolationTransport} + `spawnIsolated` convenience for browser isolation.
  *
  * @remarks
  * Implements the `IsolationTransport`/`PortLike` ducks declared (and treated as a read-only contract) in

@@ -307,8 +307,8 @@ export type IsolatedEventListener<S extends IsolatedServiceSpec, K extends keyof
  * The minimal message-passing duck the wire protocol (`protocol.ts`) is built over. A `Worker` /
  * `MessagePort` (`post` = `postMessage`, `onMessage` wraps `addEventListener('message', ...)`) and a
  * Node `ChildProcess` / `process` (`post` = `.send`, `onMessage` wraps `.on('message', ...)`) both
- * satisfy this structurally — WP1 exercises it only against linked in-memory fake ports; WP2/WP3 wire
- * it to the real transports.
+ * satisfy this structurally — the shared protocol is exercised against linked in-memory fake ports; the
+ * browser and Node transports wire it to the real transports.
  */
 export interface PortLike {
   /** Send a message across the port. Fire-and-forget — no delivery confirmation at this layer. */
@@ -328,8 +328,8 @@ export interface CrashInfo {
 }
 
 /**
- * The environment-specific spawn/lifecycle duck a host-side transport implements — WP2 (Web Worker)
- * and WP3 (node child_process) each provide one; `createIsolatedService` (host.ts) drives only this
+ * The environment-specific spawn/lifecycle duck a host-side transport implements — the Web Worker
+ * and Node child_process transports each provide one; `createIsolatedService` (host.ts) drives only this
  * interface, never a concrete Worker/ChildProcess type.
  */
 export interface IsolationTransport {

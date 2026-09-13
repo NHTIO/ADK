@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { VespaVectorStore } from '@nhtio/adk/batteries/vector/vespa'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -32,5 +32,7 @@ d('VespaVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('VespaVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('VespaVectorStore', makeStore)
+  })
 })

@@ -1,4 +1,4 @@
-import { describe, beforeAll, afterAll } from 'vitest'
+import { it, describe, beforeAll, afterAll } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { CloudflareVectorizeVectorStore } from '@nhtio/adk/batteries/vector/cloudflare'
 import {
@@ -80,8 +80,10 @@ d('CloudflareVectorizeVectorStore (integration)', () => {
   // still race the flap. `retry` re-runs a flaked attempt (re-clearing via makeStore) against a
   // more-settled index — turning transient-consistency flake into deterministic green without
   // weakening assertions. Generous per-test timeout because each attempt clears + settles.
-  runVectorStoreConformance('CloudflareVectorizeVectorStore', makeStore, DIM, {
-    retry: 4,
-    timeout: 90_000,
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('CloudflareVectorizeVectorStore', makeStore, DIM, {
+      retry: 4,
+      timeout: 90_000,
+    })
   })
 })

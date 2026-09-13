@@ -32,7 +32,6 @@ import {
   Media,
   ArtifactTool,
   SpooledArtifact,
-  TokenEncoding,
 } from '@nhtio/adk/common'
 import {
   E_CLAUDE_CODE_CLI_WRAPPER_SPAWN_ERROR,
@@ -70,6 +69,7 @@ import {
 import type { Tool } from '@nhtio/adk/common'
 import type { SpoolStore } from '@nhtio/adk/common'
 import type { DispatchContext } from '@nhtio/adk/types'
+import type { TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
 import type { WrapperEvent, WrapperCommand, WrapperBridgedTool } from './wire'
 import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
 import type {
@@ -212,8 +212,8 @@ const resolveHelpers = (
 
 const estimateTokensOf = async (
   value: { estimateTokens: (encoding: TokenEncoding) => number | Promise<number> },
-  encoding: TokenEncoding
-): Promise<number> => Promise.resolve(value.estimateTokens(encoding))
+  encoding: TokenEncodingId
+): Promise<number> => Promise.resolve(value.estimateTokens(encoding as TokenEncoding))
 
 // ─── time / checksum helpers ────────────────────────────────────────────────
 
@@ -474,7 +474,7 @@ export class ClaudeCodeCliAdapter {
 
       // ── Step 8: context window enforcement ────────────────────────────────
       if (merged.tokenEncoding !== null && merged.contextWindow !== undefined) {
-        const encoding = merged.tokenEncoding as TokenEncoding
+        const encoding = merged.tokenEncoding as TokenEncodingId
         // The rendered prompt is the actual `-p` wire value. Measure it directly rather than
         // re-summing its source buckets: renderers add envelopes, provenance, and ordering.
         const promptTokens = await estimateTokensOf(new Tokenizable(prompt), encoding)
@@ -497,7 +497,7 @@ export class ClaudeCodeCliAdapter {
             !r.inline && SpooledArtifact.isSpooledArtifact(r.content) && r.content.hasSizeHints()
               ? r.content.estimateHandleTokens(
                   r.id,
-                  encoding,
+                  encoding as TokenEncoding,
                   resolvedHelpers.renderRetrievableHandleBody
                 )
               : await estimateTokensOf(r.content, encoding)

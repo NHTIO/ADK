@@ -29,11 +29,14 @@ const reasoningFieldPrecedenceSchema = validator
 
 const tokenEncodingSchema = validator
   .alternatives(
-    // Derive the allowed set from the canonical TokenEncoding array (the single source of truth) so a
-    // newly-added encoding (e.g. 'gemma') is accepted here automatically — no drift between the counter
-    // and the validators.
-    validator.string().valid(...TokenEncoding),
-    // OPTIONAL: a valid encoding string, explicit null, or absent (undefined = "no token counting").
+    // Known values are suggestions from the canonical list, not a whitelist: consumers may provide
+    // a custom or newer tokenizer name. The field accepts any non-empty string, explicit null, or
+    // absent (undefined = "no token counting"). `.optional()` preserves the null/undefined
+    // disposition required by adk/require-validator-any-required.
+    validator
+      .string()
+      .min(1)
+      .description(`Known encodings: ${TokenEncoding.join(', ')}`),
     validator.any().valid(null).optional()
   )
   .default(null)

@@ -1,5 +1,9 @@
 import { isError, isInstanceOf } from '@nhtio/adk/guards'
-import { E_SES_LOCKDOWN_REQUIRED, E_SES_EVALUATION_TIMEOUT } from './exceptions'
+import {
+  E_SES_HOST_LOCKDOWN_REQUIRED,
+  E_SES_LOCKDOWN_REQUIRED,
+  E_SES_EVALUATION_TIMEOUT,
+} from './exceptions'
 import type { GuestOutcome, GuestLimits } from '../types'
 
 const cut = (text: string, bytes: number): { text: string; truncated: boolean } => {
@@ -20,11 +24,17 @@ const render = (value: unknown): { value: unknown; encoding: 'encoder' | 'partia
     return { value: `[unrepresentable ${typeof value}]`, encoding: 'partial' }
   }
 }
-/** Construct a minimal SES-backed in-process guest. The runtime boundary is intentionally explicit. */
+/**
+ * Construct a minimal SES-backed in-process guest.
+ *
+ * @remarks In Node, SES lockdown is process-global: this hardens the whole host realm, not
+ * only the guest. Guest-scoped isolation requires a worker or child runtime.
+ */
 export const createCompartmentRuntime = async (
   globals: Record<string, (...args: unknown[]) => unknown>,
   limits: GuestLimits,
-  modules: Record<string, unknown> = {}
+  modules: Record<string, unknown> = {},
+  hostLockdown = true
 ) => {
   await import('ses')
   const realm = globalThis as typeof globalThis & {
@@ -38,6 +48,10 @@ export const createCompartmentRuntime = async (
   }
   if (typeof realm.lockdown !== 'function' || typeof realm.Compartment !== 'function')
     throw new E_SES_LOCKDOWN_REQUIRED(['SES lockdown() and Compartment are required'])
+  if (!hostLockdown)
+    throw new E_SES_HOST_LOCKDOWN_REQUIRED([
+      'In-process SES evaluation requires host-realm lockdown; supply a worker or child guest for guest-only isolation',
+    ])
   // SES is process-global in Node. The first guest bootstrap hardens this realm; subsequent
   // in-process evaluations must verify the already-hardened realm rather than invoking lockdown()
   // a second time (SES deliberately throws SES_ALREADY_LOCKED_DOWN).

@@ -11,7 +11,7 @@
  * installed `.d.ts` when upgrading — the dependency is young and volatile.
  */
 
-import type { TokenEncoding } from '@nhtio/adk'
+import type { TokenEncodingId } from '@nhtio/adk/types'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { SpoolStore, ToolRegistry } from '@nhtio/adk/common'
 import type {
@@ -225,7 +225,7 @@ export interface LiteRtLmAdapterOptions extends BatteryLifecycleHooks {
   /** Which thoughts are surfaced into history. */
   thoughtSurfacing?: 'all-self' | 'latest-self' | 'all'
   /** Token encoding used for context-window accounting, or `null` to disable accounting (default `null`). */
-  tokenEncoding?: TokenEncoding | null
+  tokenEncoding?: TokenEncodingId | null
   /** Replay-compatibility tags whose opaque reasoning payloads may be replayed. */
   replayCompatibility?: ReadonlyArray<string>
   /** Precedence order for reasoning/thought fields. */

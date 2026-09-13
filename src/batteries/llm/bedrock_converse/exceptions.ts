@@ -20,6 +20,15 @@ export const E_INVALID_BEDROCK_CONVERSE_OPTIONS = createException<[string]>(
   true
 )
 
+/** Context token weight exceeded the configured window. */
+export const E_BEDROCK_CONVERSE_CONTEXT_OVERFLOW = createException<[number, number, string]>(
+  'E_BEDROCK_CONVERSE_CONTEXT_OVERFLOW',
+  'Bedrock Converse request token weight (%d) exceeds context window (%d) under encoding %s',
+  'E_BEDROCK_CONVERSE_CONTEXT_OVERFLOW',
+  529,
+  true
+)
+
 /** The provider returned a non-2xx status. */
 export const E_CONVERSE_REQUEST_FAILED = createException<[number, string]>(
   'E_CONVERSE_REQUEST_FAILED',

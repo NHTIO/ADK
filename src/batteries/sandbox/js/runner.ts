@@ -7,7 +7,8 @@ import type { GuestGlobal, GuestRuntimeLike } from './ses_contracts'
 export const createGuestRunner = async (
   globals: Record<string, GuestGlobal>,
   limits = resolveGuestLimits(),
-  modules: Record<string, unknown> = {}
+  modules: Record<string, unknown> = {},
+  hostLockdown = true
 ): Promise<GuestRuntimeLike> => {
   return {
     async spawn(options): Promise<Awaited<ReturnType<GuestRuntimeLike['spawn']>>> {
@@ -15,7 +16,7 @@ export const createGuestRunner = async (
       for (const [name, declaration] of Object.entries(globals))
         implementations[name] = (...args: unknown[]) =>
           declaration.fn(args, options.signal ?? new AbortController().signal)
-      const runtime = await createGuestRuntime(implementations, limits, modules)
+      const runtime = await createGuestRuntime(implementations, limits, modules, hostLockdown)
       return runtime.spawn(options)
     },
   }

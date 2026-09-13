@@ -22,6 +22,15 @@ export const E_INVALID_GEMINI_GENERATE_CONTENT_OPTIONS = createException<[string
   true
 )
 
+/** Context token weight exceeded the configured window. */
+export const E_GEMINI_GENERATE_CONTENT_CONTEXT_OVERFLOW = createException<[number, number, string]>(
+  'E_GEMINI_GENERATE_CONTENT_CONTEXT_OVERFLOW',
+  'Gemini generateContent request token weight (%d) exceeds context window (%d) under encoding %s',
+  'E_GEMINI_GENERATE_CONTENT_CONTEXT_OVERFLOW',
+  529,
+  true
+)
+
 /** The provider returned a non-2xx status. */
 export const E_GEMINI_REQUEST_FAILED = createException<[number, string]>(
   'E_GEMINI_REQUEST_FAILED',

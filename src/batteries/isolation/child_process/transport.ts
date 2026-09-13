@@ -7,7 +7,7 @@
  * This module is NODE-ONLY: it imports `node:child_process` directly (unlike `serve.ts`'s guest-side
  * duck detection, which never imports `node:*` so it stays loadable in a Worker/browser bundle). See
  * this subpath's `index.ts` for why a real process — rather than a `worker_threads` `Worker` — is the
- * right host-side primitive for WP3.
+ * right host-side primitive for the Node transport.
  *
  * Two ways to obtain the child:
  *
@@ -30,7 +30,7 @@
  *   type's doc for the exact surface this module was empirically verified against, including execa≥9.
  *
  * These two forms are mutually exclusive and validated eagerly (this subpath's own local joi schema —
- * WP1's `validation.ts` is not touched).
+ * the shared `validation.ts` is not touched).
  *
  * `terminate()` sends `SIGTERM` (or the caller's configured signal) and does NOT itself wait for exit
  * or run any grace period of its own — `host.ts`'s `dispose()` already sends a `shutdown` envelope and
@@ -185,7 +185,7 @@ const isValidationError = (value: unknown): value is ValidationError =>
 const formatValidationDetails = (err: ValidationError): string =>
   err.details.map((d) => d.message).join(' and ')
 
-/** Local (this-subpath-only) validator for the spawn-shape half of {@link ForkIsolatedOptions} — WP1's
+/** Local (this-subpath-only) validator for the spawn-shape half of {@link ForkIsolatedOptions} — the
  *  shared `validation.ts` is not modified; this schema only covers the fields this module adds. */
 const forkIsolatedSpawnShapeSchema = validator
   .object<{ modulePath?: string | URL; forkOptions?: object; spawn?: unknown }>({
@@ -382,10 +382,10 @@ export const forkIsolated = <S extends IsolatedServiceSpec>(
 ): IsolatedService<S> => {
   const transport = createChildProcessTransport(spec, options)
   // `options` also carries this subpath's own spawn-shape fields (`modulePath`/`forkOptions`/`spawn`),
-  // which `createIsolatedService` must never see — `host.ts` validates its options bag against WP1's
+  // which `createIsolatedService` must never see — `host.ts` validates its options bag against the shared
   // `isolatedServiceOptionsSchema` with `.unknown(false)`, so passing the raw bag through would fail
   // eager validation on fields that schema (correctly) doesn't know about. Strip them here rather than
-  // loosen WP1's shared schema.
+  // loosen the shared schema.
   const spawnShapeKeys = new Set(['modulePath', 'forkOptions', 'spawn'])
   const hostOptions = Object.fromEntries(
     Object.entries(options).filter(([key]) => !spawnShapeKeys.has(key))

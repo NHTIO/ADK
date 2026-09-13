@@ -26,7 +26,9 @@ d('PgVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('PgVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('PgVectorStore', makeStore)
+  })
 
   it('reports transactions capability true', async () => {
     const vs = await makeStore()

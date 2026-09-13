@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { ChromaVectorStore } from '@nhtio/adk/batteries/vector/chroma'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -28,5 +28,7 @@ d('ChromaVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('ChromaVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('ChromaVectorStore', makeStore)
+  })
 })

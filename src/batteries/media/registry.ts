@@ -182,6 +182,7 @@ const requestedOps = (request: MutateRequest): string[] => {
   if (request.rotate !== undefined) ops.push('rotate')
   if (request.flip) ops.push('flip')
   if (request.stripMetadata) ops.push('strip_metadata')
+  if (request.annotate) ops.push('annotate')
   return ops
 }
 

@@ -29,7 +29,9 @@ d('QdrantVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('QdrantVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('QdrantVectorStore', makeStore)
+  })
 
   it('closes without throwing', async () => {
     const vs = await makeStore()

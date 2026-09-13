@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { MariaDBVectorStore } from '@nhtio/adk/batteries/vector/mariadb'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -38,5 +38,7 @@ d('MariaDBVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('MariaDBVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('MariaDBVectorStore', makeStore)
+  })
 })

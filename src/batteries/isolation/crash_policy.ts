@@ -6,7 +6,7 @@
  * (`docs/.vitepress/theme/components/agent/gpu_loss_policy.ts`) — a 2-rung ladder specific to WebGPU
  * device loss — into a domain-neutral N-rung decider any `IsolationTransport` crash can consult. Pure
  * (no DOM/process access beyond the injected clock), so it is unit-testable in isolation and reusable
- * across the Worker (WP2) and child_process (WP3) transports without either depending on the other's
+ * across the Web Worker and child_process transports without either depending on the other's
  * crash semantics.
  *
  * This module has zero imports beyond the language itself.

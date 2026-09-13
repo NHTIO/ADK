@@ -1,4 +1,4 @@
-import { describe } from 'vitest'
+import { it, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { ArangoDBVectorStore } from '@nhtio/adk/batteries/vector/arangodb'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -33,5 +33,7 @@ d('ArangoDBVectorStore (integration)', () => {
     return vs
   }
 
-  runVectorStoreConformance('ArangoDBVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('ArangoDBVectorStore', makeStore)
+  })
 })

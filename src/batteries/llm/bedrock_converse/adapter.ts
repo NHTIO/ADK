@@ -41,6 +41,8 @@ import {
   toolsToConverseTools,
 } from './helpers'
 import {
+  E_BEDROCK_CONVERSE_CONTEXT_OVERFLOW,
+  E_INVALID_BEDROCK_CONVERSE_OPTIONS,
   E_CONVERSE_ALTERNATION_VIOLATION,
   E_CONVERSE_INVALID_TOOL_INPUT,
   E_CONVERSE_MISSING_TOOL_CONFIG,
@@ -63,8 +65,9 @@ import {
   renderUntrustedContent,
 } from '../chat_common/helpers'
 import type { DispatchContext } from '@nhtio/adk/types'
-import type { ArtifactTool, SpooledArtifact, Tool } from '@nhtio/adk/common'
+import type { TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
 import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/types'
+import type { ArtifactTool, Memory, SpooledArtifact, Tool } from '@nhtio/adk/common'
 import type {
   BedrockConverseAdapterOptions,
   BedrockConverseHelpers,
@@ -74,6 +77,11 @@ import type {
 const nowIso = (): string => DateTime.now().toISO() ?? new Date().toISOString()
 
 const DEFAULT_REGION = 'us-east-1'
+
+const estimateTokensOf = async (
+  value: { estimateTokens: (encoding: TokenEncoding) => number | Promise<number> },
+  encoding: TokenEncodingId
+): Promise<number> => Promise.resolve(value.estimateTokens(encoding as TokenEncoding))
 
 const computeChecksum = (tool: string, args: Record<string, unknown>): string =>
   sha256(`${tool}:${canonicalStringify(args)}`)
@@ -184,6 +192,15 @@ export class BedrockConverseAdapter {
         ? (stashRaw as Partial<BedrockConverseAdapterOptions>)
         : {}
       const merged = validateOptions(mergeOptions(baseline, overrides, stashOverrides))
+      if (
+        merged.tokenEncoding !== undefined &&
+        merged.tokenEncoding !== null &&
+        merged.contextWindow === undefined
+      ) {
+        throw new E_INVALID_BEDROCK_CONVERSE_OPTIONS([
+          'tokenEncoding is non-null but contextWindow is undefined',
+        ])
+      }
       const resolved = resolveHelpers(merged.helpers)
       const selfIdentity = 'assistant'
       const dispatchStreamId = uuidv6()
@@ -206,6 +223,54 @@ export class BedrockConverseAdapter {
             warn,
           })
         )
+      }
+
+      if (
+        merged.tokenEncoding !== undefined &&
+        merged.tokenEncoding !== null &&
+        merged.contextWindow !== undefined
+      ) {
+        const encoding = merged.tokenEncoding
+        let total = await estimateTokensOf(ctx.systemPrompt, encoding)
+        for (const value of ctx.standingInstructions)
+          total += await estimateTokensOf(value, encoding)
+        for (const memory of ctx.turnMemories as Set<Memory>)
+          total += await estimateTokensOf(memory.content, encoding)
+        for (const retrievable of ctx.turnRetrievables)
+          total += await estimateTokensOf(
+            retrievable.inline
+              ? (retrievable.content as any)
+              : new Tokenizable(`[Reference available: ${retrievable.id}]`),
+            encoding
+          )
+        for (const message of ctx.turnMessages) {
+          if (message.content !== undefined)
+            total += await estimateTokensOf(message.content, encoding)
+        }
+        for (const thought of ctx.turnThoughts)
+          total += await estimateTokensOf(thought.content, encoding)
+        for (const result of renderedToolCallResults.values()) {
+          total += await estimateTokensOf(new Tokenizable(JSON.stringify(result)), encoding)
+        }
+        const tools = ctx.tools.visible()
+        if (tools.length > 0) {
+          // Tool DECLARATIONS: the Bedrock wire ships tools as an array, which the PROVIDER
+          // serializes server-side into the model's own format. Tally the tokens of the wire
+          // tools JSON (`JSON.stringify`) as an honest FLOOR — a truthful lower bound. We add
+          // a safe 10% margin to cover JSON structural overhead and nested formatting.
+          const toolTokens = await estimateTokensOf(
+            new Tokenizable(JSON.stringify(resolved.toolsToConverseTools(tools))),
+            encoding
+          )
+          total += Math.ceil(toolTokens * 1.1)
+        }
+        if (total + (merged.maxTokens ?? 0) > merged.contextWindow) {
+          throw new E_BEDROCK_CONVERSE_CONTEXT_OVERFLOW([
+            total + (merged.maxTokens ?? 0),
+            merged.contextWindow,
+            encoding,
+          ])
+        }
       }
 
       const request = await resolved.buildConverseRequest({
@@ -370,7 +435,7 @@ export class BedrockConverseAdapter {
           message: `generation ended with stopReason=${stopReason ?? 'unknown'} and no tool use`,
           payload: { stopReason: stopReason ?? 'unknown' },
         })
-        ctx.ack()
+        if (merged.autoAck) ctx.ack()
         return
       }
 

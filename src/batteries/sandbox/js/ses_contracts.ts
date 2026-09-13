@@ -67,11 +67,12 @@ export interface EvaluateJavascriptConfig {
    */
   readonly hostcallQuotas?: Partial<HostcallQuotas>
   /**
-   * Whether to apply lockdown to the host realm.
+   * Whether to apply lockdown to the host realm for the default in-process SES runtime.
    *
    * @remarks
-   * This governs only the host realm and is process-global and irreversible. The guest's own
-   * `lockdown()` always runs; that guest lockdown is the security guarantee.
+   * In Node, `lockdown()` is process-global and irreversible: it hardens the whole host realm,
+   * not only this guest. `false` is an explicit opt-out that refuses in-process evaluation;
+   * supply a worker or child runtime for guest-only isolation.
    */
   readonly hostLockdown?: boolean
   /** Runtime seam used instead of the default SES runtime, typically by an adapter. */

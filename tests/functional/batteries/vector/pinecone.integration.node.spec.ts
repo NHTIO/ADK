@@ -1,4 +1,4 @@
-import { afterAll, describe } from 'vitest'
+import { it, afterAll, describe } from 'vitest'
 import { createVectorStore } from '@nhtio/adk/batteries/vector'
 import { PineconeVectorStore } from '@nhtio/adk/batteries/vector/pinecone'
 import { runVectorStoreConformance, stubEncoder } from '@nhtio/adk/batteries/vector/conformance'
@@ -77,5 +77,7 @@ d('PineconeVectorStore (integration)', () => {
     }
   })
 
-  runVectorStoreConformance('PineconeVectorStore', makeStore)
+  it('vector conformance', async () => {
+    await runVectorStoreConformance('PineconeVectorStore', makeStore)
+  })
 })

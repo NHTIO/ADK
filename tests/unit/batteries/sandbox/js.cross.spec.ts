@@ -3,12 +3,15 @@ import { guestLimitFloors } from '../../../../src/batteries/sandbox/types'
 import { createGuestRunner } from '../../../../src/batteries/sandbox/js/runner'
 import { E_INVALID_SANDBOX_CONFIG } from '../../../../src/batteries/sandbox/exceptions'
 import { createEvaluateJavascriptTool } from '../../../../src/batteries/sandbox/js/tool'
-import { E_SES_EVALUATION_TIMEOUT } from '../../../../src/batteries/sandbox/js/exceptions'
 import { createCompartmentRuntime } from '../../../../src/batteries/sandbox/js/compartment'
 import {
   resolveGuestLimits,
   resolveHostcallQuotas,
 } from '../../../../src/batteries/sandbox/js/validation'
+import {
+  E_SES_EVALUATION_TIMEOUT,
+  E_SES_HOST_LOCKDOWN_REQUIRED,
+} from '../../../../src/batteries/sandbox/js/exceptions'
 
 const gate = async () => {}
 
@@ -107,11 +110,46 @@ describe('SES guest realm', () => {
         require: 'undefined',
       })
   })
-  it('runs lockdown before evaluation and returns typed guest throws', async () => {
-    const runtime = await createCompartmentRuntime({}, resolveGuestLimits())
-    const out = await runtime.evaluate('throw undefined', { timeoutMs: 1000 })
-    expect(out.ok).toBe(false)
-    if (!out.ok) expect(out.thrown.kind).toBe('error')
+  it('refuses in-process evaluation when host lockdown is disabled', async () => {
+    await expect(
+      createCompartmentRuntime({}, resolveGuestLimits(), {}, false)
+    ).rejects.toBeInstanceOf(E_SES_HOST_LOCKDOWN_REQUIRED)
+    await expect(createCompartmentRuntime({}, resolveGuestLimits(), {}, false)).rejects.toThrow(
+      /host-realm lockdown.*worker or child guest/i
+    )
+  })
+  it('threads hostLockdown false through the tool and refuses in-process evaluation', async () => {
+    const tool = createEvaluateJavascriptTool({ gate, hostLockdown: false })
+    const ctx = {
+      abortSignal: new AbortController().signal,
+      id: 'host-lockdown-test',
+      emitToolExecutionStart: () => {},
+      emitToolExecutionEnd: () => {},
+    } as never
+    await expect(tool.executor(ctx)({ source: '1', timeout_seconds: 1 })).rejects.toMatchObject({
+      cause: expect.objectContaining({ code: E_SES_HOST_LOCKDOWN_REQUIRED.code }),
+    })
+  })
+  it('runs default host lockdown before evaluation and preserves the idempotency marker', async () => {
+    const realm = globalThis as typeof globalThis & {
+      lockdown?: () => void
+      __adkSesLocked?: boolean
+    }
+    const originalLockdown = realm.lockdown
+    expect(originalLockdown).toEqual(expect.any(Function))
+    delete realm.__adkSesLocked
+    const lockdown = vi.fn(originalLockdown)
+    realm.lockdown = lockdown
+    try {
+      const runtime = await createCompartmentRuntime({}, resolveGuestLimits(), {}, true)
+      expect(lockdown).toHaveBeenCalledTimes(1)
+      expect(realm.__adkSesLocked).toBe(true)
+      const out = await runtime.evaluate('throw undefined', { timeoutMs: 1000 })
+      expect(out.ok).toBe(false)
+      if (!out.ok) expect(out.thrown.kind).toBe('error')
+    } finally {
+      realm.lockdown = originalLockdown
+    }
   })
   it('logs before a throw and retains the authoritative thrown result', async () => {
     const runtime = await createCompartmentRuntime({}, resolveGuestLimits())

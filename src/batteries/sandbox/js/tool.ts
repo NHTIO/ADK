@@ -28,7 +28,12 @@ export const createEvaluateJavascriptTool = (config: EvaluateJavascriptConfig): 
       await runToolGate(config.gate, ctx, 'evaluate_javascript', args)
       const runtime =
         config.runtime ??
-        (await createGuestRunner(config.globals ?? {}, limits, config.modules ?? {}))
+        (await createGuestRunner(
+          config.globals ?? {},
+          limits,
+          config.modules ?? {},
+          config.hostLockdown ?? true
+        ))
       const guest = await runtime.spawn({
         modules: Object.keys(config.modules ?? {}),
         globals: Object.keys(config.globals ?? {}).map((name) => ({
