@@ -15,6 +15,34 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-09-13
+
+### Fixed
+
+- **LLM batteries — token accounting opt-out is typed and honoured.** Every adapter's
+  `tokenEncoding` option now accepts `TokenEncodingId | null`, matching the runtime schema
+  (which already defaulted to `null` to opt out of tiktoken accounting) so the public TypeScript
+  surface no longer rejects the documented opt-out. Unregistered encodings fall back to a
+  `text.length` heuristic instead of the previous fixed divisor. Bedrock Converse and Gemini
+  Generate Content additionally gained parity fixes: null-safe token accounting, corrected
+  preflight tool-overhead margins, and validation that mirrors the shared contract.
+
+- **`@nhtio/adk/batteries/media` — repeated `image.annotate()` steps compose instead of
+  overwriting.** Fusing an image pipeline now concatenates the shape lists of every `annotate`
+  step in chronological order rather than keeping only the last, so
+  `.image.annotate(a).image.annotate(b)` marks the frame with `a` then `b`. Animated inputs are
+  annotated on every frame (the sharp `animated` option is applied on the source), and SVG
+  overlay geometry is validated.
+
+- **`@nhtio/adk/batteries/sandbox` — abort listeners are released on every terminal path.**
+  The caller-signal forwarding listener is now removed idempotently on both child `error` and
+  `close`, so a failed spawn or a completed run no longer retains its `AbortController` (which
+  could kill a recycled PID). The run-abort listener is likewise released when the run settles.
+
+- **`@nhtio/adk/batteries/vector` conformance — decoupled and sequential.** The shared
+  conformance suite runs its checks sequentially to avoid backend constraint races, clears its
+  timeout timers on every settlement path, and no longer depends on a test framework.
+
 ## 2026-09-12
 
 ### Added
