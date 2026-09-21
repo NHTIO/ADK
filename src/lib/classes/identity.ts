@@ -1,7 +1,7 @@
 import { Tokenizable } from './tokenizable'
 import { validator } from '@nhtio/validation'
 import { validateOrThrow } from '../utils/validation'
-import { isInstanceOf, isError } from '../utils/guards'
+import { isInstanceOf, isError, isObject } from '../utils/guards'
 import { ENCODE_METHOD, DECODE_METHOD } from '../utils/encoder_symbols'
 import { E_INVALID_INITIAL_IDENTITY_VALUE } from '../exceptions/runtime'
 import type { AdkEncodableSnapshot } from './encodable'
@@ -61,6 +61,62 @@ const rawIdentitySchema = validator.object<RawIdentity>({
 })
 
 /**
+ * Registry of every {@link Identity} genuinely constructed by this module, in this realm.
+ *
+ * @remarks
+ * The brand that {@link identityOrRawIdentitySchema} trusts to bypass raw-object validation. A
+ * {@link WeakSet} keyed by the instance is unforgeable (unlike {@link Identity.isIdentity}, which
+ * falls back to a `constructor.name` comparison for cross-realm reach and therefore also accepts a
+ * hand-rolled look-alike) and holds no strong reference. Every instance adds itself in the
+ * constructor; membership means the instance carries real, intact private fields.
+ */
+const liveIdentities = new WeakSet<object>()
+
+/**
+ * Public schema fragment that accepts either a plain {@link RawIdentity} object or an existing
+ * {@link Identity} instance.
+ *
+ * @remarks
+ * A genuinely-constructed live {@link Identity} passes through the custom branch UNCHANGED — mirroring
+ * {@link @nhtio/adk!Tokenizable.schema}. This matters because Joi's object schema *clones* any value it
+ * validates, and cloning an `Identity` produces a look-alike with the right prototype but no private
+ * `#identifier` / `#representation` fields (the constructor never ran), which then throws on
+ * `[ENCODE_METHOD]`. Returning the live instance verbatim keeps its private state intact so it encodes
+ * and re-wraps losslessly.
+ *
+ * Only a **branded** instance (one this module actually constructed — see {@link liveIdentities})
+ * bypasses validation. A bare `constructor.name === 'Identity'` is NOT enough: a look-alike or a
+ * cross-realm instance is not in the brand set, so it falls through to {@link rawIdentitySchema},
+ * which validates its fields (rejecting a malformed `representation`) rather than retaining an
+ * unvalidated husk that would later produce invalid serialized state. Plain {@link RawIdentity}
+ * objects fall through the same way.
+ */
+const identityOrRawIdentitySchema = validator
+  .alternatives(
+    validator.custom((value, helpers) => {
+      if (isObject(value) && liveIdentities.has(value)) {
+        return value
+      }
+      return helpers.error('any.invalid')
+    }),
+    rawIdentitySchema
+  )
+  .custom((value) => {
+    // A genuinely-branded live instance passes through the first alternative untouched. Anything
+    // else — a plain RawIdentity, a hand-rolled look-alike, or a FOREIGN/cross-realm `Identity`
+    // (a second copy of the package in the dependency tree) — arrives here as the field-validated
+    // output of `rawIdentitySchema`. Joi cloned it, so a foreign instance is now a husk that still
+    // carries an `Identity`-named prototype but has NO private fields; `Identity.isIdentity` accepts
+    // it (name/prototype fallback) yet `[ENCODE_METHOD]` throws reading the missing privates.
+    // Rebuild any non-branded value into a genuine LOCAL Identity so every consumer stores real,
+    // encodable private state regardless of where the value originated.
+    if (isObject(value) && liveIdentities.has(value)) {
+      return value
+    }
+    return new Identity(value as RawIdentity)
+  })
+
+/**
  * An immutable, validated participant identity attached to a {@link @nhtio/adk!Message}.
  *
  * @remarks
@@ -72,13 +128,16 @@ const rawIdentitySchema = validator.object<RawIdentity>({
  */
 export class Identity {
   /**
-   * Validator schema that accepts a {@link RawIdentity} object.
+   * Validator schema that accepts a {@link RawIdentity} object OR an existing {@link Identity} instance.
    *
    * @remarks
    * Reusable fragment for any schema that needs to validate or nest an identity — for example,
-   * as a required field inside a message schema.
+   * as a required field inside a message schema. A locally branded {@link Identity} passes through
+   * unchanged (its private state is preserved, so it still encodes losslessly); foreign/cross-realm
+   * identities and plain {@link RawIdentity} values are validated field-by-field and rebuilt locally.
+   * See {@link identityOrRawIdentitySchema}.
    */
-  public static schema = rawIdentitySchema
+  public static schema = identityOrRawIdentitySchema
 
   /**
    * Returns `true` if `value` is an {@link Identity} instance.
@@ -136,6 +195,10 @@ export class Identity {
         configurable: false,
       },
     })
+
+    // Brand this genuinely-constructed instance so `identityOrRawIdentitySchema` can trust it to
+    // bypass raw-object validation. A look-alike or cross-realm object is never in this set.
+    liveIdentities.add(this)
   }
 
   /**

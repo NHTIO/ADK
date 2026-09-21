@@ -47,6 +47,62 @@ describe('encoding round-trip — Tier A value objects', () => {
     expect(decoded.representation.toString()).toBe('Agent Smith')
   })
 
+  it('Thought built from a LIVE Identity instance encodes losslessly (issue #38)', () => {
+    // A live Identity handed off the runtime (e.g. to a storage callback) and re-wrapped into a new
+    // primitive used to throw E_ENCODING_FAILED: the Joi object schema cloned the Identity into a
+    // look-alike with the right prototype but no private fields, so [ENCODE_METHOD] threw. The custom
+    // passthrough branch on Identity.schema keeps the live instance intact.
+    const ts = '2024-01-01T00:00:00.000Z'
+    const live = new Thought({
+      id: 'src',
+      content: 'c',
+      identity: 'assistant',
+      createdAt: ts,
+      updatedAt: ts,
+    }).identity
+    expect(Identity.isIdentity(live)).toBe(true)
+    const decoded = roundTrip(
+      new Thought({
+        id: 'th-live',
+        content: 'reasoning',
+        identity: live,
+        createdAt: ts,
+        updatedAt: ts,
+      })
+    )
+    expect(Thought.isThought(decoded)).toBe(true)
+    expect(Identity.isIdentity(decoded.identity)).toBe(true)
+    expect(decoded.identity.identifier).toBe('assistant')
+    expect(decoded.identity.representation.toString()).toBe('assistant')
+  })
+
+  it('Message built from a LIVE Identity instance encodes losslessly (issue #38)', () => {
+    const ts = '2024-01-01T00:00:00.000Z'
+    const live = new Message({
+      id: 'src',
+      role: 'assistant',
+      content: 'hi',
+      identity: { identifier: 7, representation: 'Agent Smith' },
+      createdAt: ts,
+      updatedAt: ts,
+    }).identity
+    const decoded = roundTrip(
+      new Message({
+        id: 'm-live',
+        role: 'assistant',
+        content: 'hi',
+        identity: live,
+        createdAt: ts,
+        updatedAt: ts,
+      })
+    )
+    expect(Message.isMessage(decoded)).toBe(true)
+    expect(Identity.isIdentity(decoded.identity)).toBe(true)
+    expect(decoded.identity.identifier).toBe(7)
+    expect(Tokenizable.isTokenizable(decoded.identity.representation)).toBe(true)
+    expect(decoded.identity.representation.toString()).toBe('Agent Smith')
+  })
+
   it('Memory round-trips with Luxon DateTime fields preserved', () => {
     const created = '2024-01-01T00:00:00.000Z'
     const decoded = roundTrip(

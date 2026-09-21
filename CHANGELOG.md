@@ -15,6 +15,40 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-09-21
+
+### Fixed
+
+- **`@nhtio/adk/batteries/encoding` — a live `Identity` instance now encodes losslessly** (closes
+  issue #38). Constructing an ADK primitive (e.g. `Thought`/`Message`) from a live `Identity`
+  instance — as the runtime hands to storage callbacks — and then calling `encode()` threw
+  `E_ENCODING_FAILED`. Root cause: `Identity.schema` was a bare `validator.object` fragment, and a
+  Joi object schema *clones* whatever it validates; cloning an `Identity` produced a look-alike with
+  the right prototype but no private fields (the constructor never ran), so `[ENCODE_METHOD]` threw
+  reading them. `Identity.schema` is now an `alternatives(customPassthrough, rawObjectSchema)` that
+  returns a live instance unchanged — mirroring `Tokenizable.schema` — so string, `RawIdentity`, and
+  live-`Identity` inputs all encode and round-trip identically. The passthrough trusts an
+  unforgeable per-instance brand (a module-private `WeakSet` populated in the constructor), not a
+  `constructor.name` match, so a hand-rolled look-alike cannot bypass validation. Any non-branded
+  value — a plain `RawIdentity`, a hand-rolled look-alike, or a **foreign/cross-realm `Identity`**
+  (a second copy of the package in the dependency tree, which Joi clones into a prototype-only husk
+  with no private fields) — is rebuilt into a genuine local `Identity` after field validation, so
+  every consumer stores real, encodable state and a malformed value is rejected rather than retained
+  as a husk. An audit of the whole encodable surface (Tokenizable, Memory, Message, Thought,
+  Retrievable, ToolCall, Registry, Media, Tool, ToolRegistry) confirmed `Identity` was the only
+  affected schema; the rest already nest live instances through custom passthroughs or store them
+  without a validating clone.
+
+### Internal
+
+- **CI — the Node smoke sandbox installs the optional `@toon-format/toon` peer.** The TOON artifact
+  battery declares `@toon-format/toon` as an optional peer, but it was missing from the smoke job's
+  peer-install list, so the published-package smoke check exercised the TOON converter without its
+  parser present and the round-trip spec failed on master. Added it to `smoketester add`.
+- **Tests — the orchestration end-to-end smoke spec imports from `@nhtio/adk`, not `src/`.** The spec
+  imported via relative `../../../../src/*` paths, which do not exist in the installed-package smoke
+  sandbox; it now imports the public subpaths like every other functional spec.
+
 ## 2026-09-13
 
 ### Fixed

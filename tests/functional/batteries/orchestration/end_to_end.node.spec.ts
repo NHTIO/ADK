@@ -1,13 +1,13 @@
+import { SpooledArtifact } from '@nhtio/adk'
 import { describe, it, expect } from 'vitest'
-import { SpooledArtifact } from '../../../../src/index'
-import { InMemorySpoolStore } from '../../../../src/batteries/storage/in_memory/index'
+import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import {
   NodeRef,
   InMemoryPlanStore,
   createStructuredCell,
   createOrchestration,
   registerOrchestrationEncodables,
-} from '../../../../src/batteries/orchestration/index'
+} from '@nhtio/adk/batteries/orchestration'
 import type {
   PlanOp,
   PlanNode,
@@ -15,7 +15,7 @@ import type {
   RunOptions,
   ApprovalRecord,
   Orchestration,
-} from '../../../../src/batteries/orchestration/index'
+} from '@nhtio/adk/batteries/orchestration'
 
 registerOrchestrationEncodables()
 
