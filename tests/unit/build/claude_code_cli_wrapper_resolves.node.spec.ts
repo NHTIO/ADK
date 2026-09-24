@@ -9,8 +9,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
  * First-of-its-kind regression: no other battery has ever needed to resolve a sibling
  * spawned-executable relative to its own compiled `dist/` location (see Decision C in the
  * design notes). Gated to only run once a real build has produced `dist/` — `pnpm run
- * test:node` executes before `Build Library` in CI, so this test is a local/late-stage check,
- * not part of the gate that gets exercised before a build exists.
+ * test:node` executes before `Build Library` in CI, so this test is normally a local/late-stage
+ * check, not part of the gate that gets exercised before a build exists.
  *
  * `resolveDefaultWrapperPath()` must be exercised inside a REAL, PLAIN Node ESM module context —
  * not vitest's own SSR-transformed `import()`, which does not reproduce the built module's actual
@@ -18,11 +18,18 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
  * process, spawned via `execa` and fed the real built `dist/batteries/llm/claude_code_cli/adapter.mjs`
  * path as a dynamic import, is what actually proves the resolution logic works against the real
  * built output.
+ *
+ * `TEST_REQUIRE_DIST=1` (set by `Publishable Import Boundary Enforcement` in .gitlab-ci.yml, run
+ * right after `pnpm generate`) turns a missing `dist/` into a hard failure instead of a quiet
+ * skip — see `cjs_entries_load.node.spec.ts`'s header for why: this same skip-if-unbuilt pattern
+ * is exactly what let a real published-package CJS defect ship for multiple releases with no MR job
+ * ever catching it.
  */
 const distDir = resolve(__dirname, '../../../dist')
 const adapterMjsPath = resolve(distDir, 'batteries/llm/claude_code_cli/adapter.mjs')
 const wrapperMjsPath = resolve(distDir, 'claude-code-cli-wrapper.mjs')
 const distBuilt = existsSync(adapterMjsPath) && existsSync(wrapperMjsPath)
+const shouldSkip = !distBuilt && process.env.TEST_REQUIRE_DIST !== '1'
 
 /** Runs `resolveDefaultWrapperPath()` inside a genuinely separate, plain Node ESM process. */
 const resolveInRealNodeProcess = async (): Promise<string> => {
@@ -55,7 +62,7 @@ describe('resolveDefaultWrapperPath() percent-encoding regression', () => {
   })
 })
 
-describe.skipIf(!distBuilt)(
+describe.skipIf(shouldSkip)(
   'resolveDefaultWrapperPath() against the real built dist/ output',
   () => {
     it('resolves to an EXISTING, READABLE wrapper module file (never checking the executable bit)', async () => {

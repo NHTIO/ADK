@@ -161,6 +161,7 @@ export const claudeCodeCliOptionsSchema = validator
     maxBudgetUsd: validator.number().min(0).optional(),
     fallbackModel: validator.array().items(validator.string().min(1)).optional(),
     selfIdentity: validator.string().min(1).default('assistant'),
+    toolCallIdFilter: validator.function().optional(),
     autoAck: validator.boolean().default(false),
     forwardSubagentText: validator.boolean().default(false),
     bucketOrder: bucketOrderSchema,

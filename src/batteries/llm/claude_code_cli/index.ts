@@ -23,6 +23,7 @@
  */
 
 export { ClaudeCodeCliAdapter, resolveDefaultWrapperPath } from './adapter'
+export { deCollideToolCallIds } from '../chat_common'
 
 export {
   descriptionToChatCompletionsJsonSchema,
@@ -80,6 +81,7 @@ export type {
   UnsupportedMediaPolicy,
   ChatCompletionsRetryConfig,
   ChatHelpersCommon,
+  ToolCallIdFilterFn,
   ClaudeCodeCliHelpers,
   ClaudeCodeCliAdapterOptions,
   ExecaLike,
@@ -110,6 +112,7 @@ export { claudeCodeCliOptionsSchema, validateOptions } from './validation'
 export {
   E_INVALID_CLAUDE_CODE_CLI_OPTIONS,
   E_CLAUDE_CODE_CLI_BINARY_NOT_FOUND,
+  E_CLAUDE_CODE_CLI_WRAPPER_NOT_FOUND,
   E_CLAUDE_CODE_CLI_WRAPPER_SPAWN_ERROR,
   E_CLAUDE_CODE_CLI_WRAPPER_CRASHED,
   E_CLAUDE_CODE_CLI_PROCESS_EXITED_NONZERO,

@@ -207,7 +207,9 @@ export default defineConfig(async ({ mode }) => {
           'claude-code-cli-wrapper': resolve(SRC_DIR, 'batteries/llm/claude_code_cli/wrapper.ts'),
         },
         name: LIB_NAME,
-        formats: ['es', 'cjs'],
+        // NOTE: the two formats are declared as `rolldownOptions.output` entries below (not
+        // `lib.formats`) — see the comment there for why. Declaring both here as well would make
+        // Vite emit a "`lib.formats` will be ignored" warning once it sees an array `output`.
         fileName: (format: string, entry: string) => {
           switch (format) {
             case 'es':
@@ -221,9 +223,44 @@ export default defineConfig(async ({ mode }) => {
       },
       rolldownOptions: {
         external,
-        output: {
-          exports: 'named',
-        },
+        // Per-format output configs (an ARRAY, not a single object) so each format can force its
+        // own `chunkFileNames` extension. This is the fix for a real published-package bug: every
+        // `.cjs` entry in `@nhtio/adk` failed `require()` with `Cannot find module
+        // './exceptions-HASH.js'` / `createException is not a function`.
+        //
+        // Root cause: `lib.fileName` above only controls ENTRY file names. Vite/rolldown's lib-mode
+        // pipeline picks the extension for SHARED CHUNKS itself, via `resolveOutputJsExtension(format,
+        // packageJson.type)`, which returns `.js` for the "cjs" format whenever the source
+        // `package.json` does not declare `"type": "module"` — true here, since only the PUBLISHED
+        // `dist/package.json` (written by `bin/package.ts`) sets `"type": "module"`, precisely so the
+        // `.mjs` entries resolve as ESM. That mismatch is invisible until the two files meet at
+        // runtime: `dist/package.json` says `"type": "module"`, so Node treats every bare `.js` file
+        // in `dist/` as ESM — including the chunk a `.cjs` entry `require()`s. Node then either throws
+        // `require is not defined in ES module scope` (if the chunk's top-level code calls `require`
+        // itself) or loads it as an ESM module with no CJS `exports` binding at all (silently yielding
+        // `undefined` members, e.g. `createException is not a function`), depending on the chunk's own
+        // contents. Forcing `.cjs` on every chunk emitted by the "cjs" format output makes Node treat
+        // it as CommonJS regardless of the package-level `"type"` field, matching the extension the
+        // ENTRY files already get from `lib.fileName`. The "es" output is given the matching `.mjs`
+        // override for symmetry (rolldown already defaults "es" chunks to `.mjs` here, since that
+        // branch of `resolveOutputJsExtension` isn't gated on `package.json.type`) and so this
+        // mapping can't silently drift if that default ever changes upstream.
+        //
+        // This also prevents the ES and CJS builds' emitted chunk files from EVER colliding on the
+        // same bare `.js` basename+hash even if their contents happened to hash the same — each
+        // format's chunks now live in their own extension namespace.
+        output: [
+          {
+            format: 'es',
+            exports: 'named',
+            chunkFileNames: '[name]-[hash].mjs',
+          },
+          {
+            format: 'cjs',
+            exports: 'named',
+            chunkFileNames: '[name]-[hash].cjs',
+          },
+        ],
         treeshake: {
           annotations: true,
           moduleSideEffects: true,

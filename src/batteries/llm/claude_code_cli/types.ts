@@ -19,6 +19,7 @@ import type {
   ChatCompletionsBucketOrder,
   UnsupportedMediaPolicy,
   ChatHelpersCommon,
+  ToolCallIdFilterFn,
 } from '../chat_common/types'
 import type {
   Tokenizable,
@@ -51,6 +52,7 @@ export type {
   ChatCompletionsRetryConfig,
   ChatHelpersCommon,
 } from '../chat_common/types'
+export type { ToolCallIdFilterFn } from '../chat_common/types'
 
 // ─── Re-exported wire protocol types ───────────────────────────────────────────
 export type {
@@ -198,7 +200,13 @@ export interface ClaudeCodeCliAdapterOptions {
   // ADK control
   /** The `execa` function or an async resolver for it. Defaults to a lazy dynamic import of the `execa` package (optional peer). */
   execa?: ExecaResolver
-  /** Overridable path to the built wrapper asset. Defaults to `resolveDefaultWrapperPath()`. */
+  /**
+   * Overridable path to the built wrapper asset. Defaults to `resolveDefaultWrapperPath()`,
+   * falling back to a package-self-reference lookup if that path does not exist on disk (e.g.
+   * this adapter was bundled by a consumer, relocating it outside `@nhtio/adk`'s own directory
+   * tree). Set this explicitly if both of those fail — surfaced as
+   * {@link @nhtio/adk/batteries/llm/claude_code_cli!E_CLAUDE_CODE_CLI_WRAPPER_NOT_FOUND}.
+   */
   wrapperPath?: string
   /** Path to the `claude` binary. Defaults to `'claude'` (resolved via `PATH`). */
   claudeBin?: string
@@ -258,6 +266,33 @@ export interface ClaudeCodeCliAdapterOptions {
   disableNonessentialTraffic?: boolean
   /** Unique identity label for the assistant instance. */
   selfIdentity?: string
+  /**
+   * Ingress hook for adapting the wrapper's per-spawn `requestId` into the ADK-facing tool-call
+   * id.
+   *
+   * @remarks
+   * Unlike every other Chat-family battery (where this hook is opt-in and its absence means
+   * pass-through), this battery's wrapper protocol resets its `requestId` counter to `"0"` on
+   * EVERY spawn (see `mcp_bridge.ts`), and a fresh wrapper is spawned per dispatch ITERATION —
+   * so a multi-iteration turn structurally guarantees a same-id collision the moment a second
+   * tool-calling iteration occurs, not merely as a vendor/model quirk. Concretely, a same-id
+   * collision trips one of two DIFFERENT id-tracking structures depending on the shape of the
+   * turn: `DispatchExecutorHelpers.reportToolCall`'s own internal per-dispatch bookkeeping (an
+   * id -> stream-state map local to `dispatch_runner.ts`'s `#buildHelpers`, which throws `tool
+   * call "<id>" is already complete` on a duplicate) if the earlier call with that id already
+   * completed within the SAME dispatch's helpers instance; or `ctx.turnToolCalls` (the
+   * `Set<ToolCall>` `deCollideToolCallIds` itself inspects to pick a fresh id) if the collision is
+   * against a call recorded in an EARLIER iteration of the same turn. These are two distinct
+   * pieces of state, not one — this option's default only needs to satisfy the second, since
+   * {@link @nhtio/adk!deCollideToolCallIds} renames the id BEFORE it ever reaches
+   * `reportToolCall`, which is what prevents both. Left unset, this defaults to
+   * {@link @nhtio/adk!deCollideToolCallIds} — NOT identity pass-through — so the crash this option
+   * exists to prevent cannot happen by omission; set an explicit filter (or `(id) => id` to opt
+   * back into raw pass-through) only if a different id strategy is required. The wrapper's OWN
+   * `requestId` (used to correlate the `tool_call_response` written back over the wire) is never
+   * affected by this hook — only the ADK-facing `ToolCall.id`/`callId` are renamed.
+   */
+  toolCallIdFilter?: ToolCallIdFilterFn
   /** Whether the executor acks automatically on a tool-call-free terminal answer. */
   autoAck?: boolean
   /** Forwarded to `--forward-subagent-text` when true. Default false — subagent text is invisible by default (documented v1 limitation). */

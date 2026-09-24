@@ -21,6 +21,7 @@ import {
   E_CLAUDE_CODE_CLI_WRAPPER_SPAWN_ERROR,
   E_CLAUDE_CODE_CLI_WRAPPER_CRASHED,
   E_CLAUDE_CODE_CLI_PROCESS_EXITED_NONZERO,
+  E_CLAUDE_CODE_CLI_STREAM_ERROR,
   E_CLAUDE_CODE_CLI_STREAM_STALLED,
   E_CLAUDE_CODE_CLI_TURN_FAILED,
   E_CLAUDE_CODE_CLI_CONTEXT_OVERFLOW,
@@ -767,6 +768,47 @@ describe('ClaudeCodeCliAdapter — timeouts and abnormal termination', () => {
     }
   })
 
+  it('a sustained sequence of non-progress "retry"/"log" events does NOT reset the stream-idle timer (issue #39, fix C)', async () => {
+    // Reproduces the "also observed" hang from the issue: with a per-chunk unconditional re-arm,
+    // a `retry`/`log` event arriving on the SAME stdout stream that carries progress events would
+    // reset the idle clock even though no actual model progress occurred, letting a sustained
+    // sequence of such events suppress `E_CLAUDE_CODE_CLI_STREAM_STALLED` indefinitely. Each
+    // `retry` here arrives well inside `streamIdleTimeoutMs` of the last, mirroring closely-spaced
+    // exponential-backoff retries — if the timer were still armed on every chunk (the pre-fix
+    // behavior), this stall would never fire within the 10 fake-timer ticks below.
+    vi.useFakeTimers()
+    try {
+      const fake = new FakeWrapperChild()
+      const { execaFn } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(
+        baseOptions({
+          execa: execaFn,
+          streamIdleTimeoutMs: 50,
+          disposeGraceMs: 10,
+        })
+      )
+      const ctx = makeCtx()
+      const promise = adapter.executor()(ctx, makeHelpers())
+      await vi.advanceTimersByTimeAsync(0)
+      fake.emit({ type: 'ready' })
+      await vi.advanceTimersByTimeAsync(0)
+      fake.emit({ type: 'init' })
+      await vi.advanceTimersByTimeAsync(0)
+      // 10 retry/log events, 20ms apart (well under the 50ms streamIdleTimeoutMs), spanning 200ms
+      // total — comfortably past the idle threshold IF these events do not reset it.
+      for (let i = 0; i < 10; i++) {
+        fake.emit({ type: 'retry', attempt: i + 1 })
+        await vi.advanceTimersByTimeAsync(10)
+        fake.emit({ type: 'log', level: 'warn', kind: 'test-diagnostic', message: 'noise' })
+        await vi.advanceTimersByTimeAsync(10)
+      }
+      await promise
+      expect(ctx.nack).toHaveBeenCalledWith(expect.any(E_CLAUDE_CODE_CLI_STREAM_STALLED))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('exit-without-result: wrapper process exits with no terminal event observed -> E_CLAUDE_CODE_CLI_PROCESS_EXITED_NONZERO', async () => {
     const fake = new FakeWrapperChild()
     const { execaFn } = makeExecaFn(fake)
@@ -1236,6 +1278,281 @@ describe('ClaudeCodeCliAdapter — context-window pre-flight guard', () => {
   })
 })
 
+describe('ClaudeCodeCliAdapter — tool-call id de-collision across wrapper spawns (issue #39, fix A)', () => {
+  it('two dispatch iterations, each a fresh wrapper spawn whose first tool call is requestId "0", get DISTINCT ADK tool-call ids, both complete, and each wrapper still receives its OWN "0" back in tool_call_response', async () => {
+    const tool = new Tool({
+      name: 'echo_tool',
+      description: 'echoes',
+      inputSchema: validator.object({ text: validator.string().required() }),
+      handler: (async (args: unknown) => `echoed:${JSON.stringify(args)}`) as never,
+    })
+    const tools = new ToolRegistry([tool])
+
+    // A single shared `ctx` standing in for the ONE dispatch that spans both iterations — real
+    // `DispatchRunner` accumulates completed tool calls into `ctx.turnToolCalls` as a side effect
+    // of `storeToolCall` (see `dispatch_runner.ts`'s `#applyMutation`, `op === 'store'` branch on
+    // `toolCall`), which is exactly what `deCollideToolCallIds` inspects to decide whether an
+    // incoming id already collides — the default `makeCtx()` mock's `storeToolCall` does NOT
+    // mutate `turnToolCalls`, so it must be wired here to mirror that real behavior for this test
+    // to exercise the actual collision path.
+    const stored: StoredState = { messages: [], thoughts: [], toolCalls: [] }
+    const turnToolCalls = new Set<ToolCall>()
+    const ctx = makeCtx({ tools })
+    ;(ctx as unknown as { storeToolCall: unknown }).storeToolCall = vi.fn(async (tc: ToolCall) => {
+      stored.toolCalls.push(tc)
+      turnToolCalls.add(tc)
+    })
+    ;(ctx as unknown as { turnToolCalls: Set<ToolCall> }).turnToolCalls = turnToolCalls
+    ctx._stored.toolCalls = stored.toolCalls
+
+    // ── Iteration 1: fresh wrapper spawn #1, first tool call is requestId "0" ──
+    const fake1 = new FakeWrapperChild()
+    const { execaFn: execaFn1 } = makeExecaFn(fake1)
+    const adapter1 = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn1 }))
+    const helpers1 = makeHelpers()
+    const promise1 = adapter1.executor()(ctx, helpers1)
+    await nextTurn()
+    fake1.emit({ type: 'ready' })
+    await nextTurn()
+    fake1.emit({ type: 'init' })
+    await nextTurn()
+    fake1.emit({
+      type: 'tool_call_request',
+      requestId: '0',
+      tool: 'echo_tool',
+      args: { text: 'first' },
+    })
+    await nextTurn()
+    await nextTurn()
+    fake1.emit({ type: 'result', isError: false, resultText: 'iter1 done' })
+    fake1.exit(0)
+    await promise1
+
+    expect(turnToolCalls.size).toBe(1)
+    const firstCallId = [...turnToolCalls][0]!.id
+
+    // ── Iteration 2: a BRAND NEW wrapper spawn (mcp_bridge.ts resets its own `nextRequestId` to
+    // 0 on every spawn — see `mcp_bridge.ts:88-113`), whose first tool call ALSO arrives as
+    // requestId "0", against the SAME `ctx` (so `turnToolCalls` already holds iteration 1's
+    // completed call under whatever id it was renamed to).
+    const fake2 = new FakeWrapperChild()
+    const { execaFn: execaFn2 } = makeExecaFn(fake2)
+    const adapter2 = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn2 }))
+    const helpers2 = makeHelpers()
+    const promise2 = adapter2.executor()(ctx, helpers2)
+    await nextTurn()
+    fake2.emit({ type: 'ready' })
+    await nextTurn()
+    fake2.emit({ type: 'init' })
+    await nextTurn()
+    fake2.emit({
+      type: 'tool_call_request',
+      requestId: '0',
+      tool: 'echo_tool',
+      args: { text: 'second' },
+    })
+    await nextTurn()
+    await nextTurn()
+    fake2.emit({ type: 'result', isError: false, resultText: 'iter2 done' })
+    fake2.exit(0)
+    await promise2
+
+    // Both iterations' tool calls were recorded, with DISTINCT ADK ids, and both complete.
+    expect(turnToolCalls.size).toBe(2)
+    const allCalls = [...turnToolCalls]
+    expect(allCalls.every((tc) => tc.isComplete)).toBe(true)
+    const ids = allCalls.map((tc) => tc.id)
+    expect(new Set(ids).size).toBe(2)
+    expect(ids).toContain(firstCallId)
+
+    // Both dispatches themselves succeeded (no nack on either helpers/ctx interaction path).
+    expect(ctx.nack).not.toHaveBeenCalled()
+
+    // Each wrapper's own `tool_call_response` still carries ITS wrapper-local requestId "0" —
+    // the id rename must never leak into the wire round-trip back to the bridge, since the
+    // bridge correlates responses by its OWN `pending` map key, not the ADK-facing id.
+    const response1 = parsedWrites(fake1).find((w) => w.type === 'tool_call_response')
+    const response2 = parsedWrites(fake2).find((w) => w.type === 'tool_call_response')
+    expect(response1).toBeDefined()
+    expect(response2).toBeDefined()
+    expect(response1!.requestId).toBe('0')
+    expect(response2!.requestId).toBe('0')
+  })
+})
+
+describe('ClaudeCodeCliAdapter — no handler error escapes as an unhandled rejection (issue #39, fix B)', () => {
+  it('an error thrown while handling a wrapper event is caught, never becomes an unhandled promise rejection, and settles the dispatch via nack with E_CLAUDE_CODE_CLI_STREAM_ERROR', async () => {
+    // Install the spy BEFORE anything runs, and remove it in `finally` regardless of outcome —
+    // this is a real Node-level global listener, not a mock scoped to this test.
+    const unhandledRejections: unknown[] = []
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      const tool = new Tool({
+        name: 'boom_tool',
+        description: 'a tool whose call is never reached — reportToolCall itself throws first',
+        inputSchema: validator.object({}).unknown(true),
+        handler: (async () => 'unreachable') as never,
+      })
+      const fake = new FakeWrapperChild()
+      const { execaFn } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn }))
+      const ctx = makeCtx({ tools: new ToolRegistry([tool]) })
+      const helpers = makeHelpers()
+      // Reproduces the class of bug in the issue: a handler invoked synchronously from inside
+      // `onEvent`'s `tool_call_request` branch (here, `helpers.reportToolCall`, called at the top
+      // of `handleToolCallRequest` before any tool execution) throws instead of returning
+      // normally — previously this propagated out of the `child.stdout.on('data', ...)` listener's
+      // bare `void onEvent(event)` with no attached `.catch`, becoming an unhandled promise
+      // rejection that crashes the host process by Node's default (>= 15).
+      ;(helpers as unknown as { reportToolCall: unknown }).reportToolCall = vi.fn(() => {
+        throw new Error('reportToolCall exploded')
+      })
+      const promise = adapter.executor()(ctx, helpers)
+      await nextTurn()
+      fake.emit({ type: 'ready' })
+      await nextTurn()
+      fake.emit({ type: 'init' })
+      await nextTurn()
+      fake.emit({
+        type: 'tool_call_request',
+        requestId: '0',
+        tool: 'boom_tool',
+        args: {},
+      })
+      await nextTurn()
+      await nextTurn()
+      // The executor must still resolve (settle the dispatch), not hang or reject.
+      await promise
+
+      // No unhandled rejection occurred anywhere during this run.
+      expect(unhandledRejections).toEqual([])
+
+      // The dispatch settled via nack, carrying the chosen typed exception with the original
+      // error preserved as `.cause`.
+      expect(ctx.nack).toHaveBeenCalledTimes(1)
+      expect(ctx.nack).toHaveBeenCalledWith(expect.any(E_CLAUDE_CODE_CLI_STREAM_ERROR))
+      const nackedError = (ctx.nack as unknown as { mock: { calls: unknown[][] } }).mock
+        .calls[0]![0] as InstanceType<typeof E_CLAUDE_CODE_CLI_STREAM_ERROR>
+      expect(nackedError.message).toContain('reportToolCall exploded')
+      expect((nackedError.cause as Error).message).toBe('reportToolCall exploded')
+
+      // The wrapper was told to shut down (gracefulShutdown ran as part of settlement).
+      expect(fake.writes.some((w) => (JSON.parse(w) as { type: string }).type === 'shutdown')).toBe(
+        true
+      )
+
+      // A LATER event arriving after settlement must not throw again or double-nack.
+      fake.emit({ type: 'result', isError: false, resultText: 'too late' })
+      await nextTurn()
+      expect(ctx.nack).toHaveBeenCalledTimes(1)
+      expect(unhandledRejections).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
+  })
+
+  // A thrown value that defeats BOTH `JSON.stringify` and `String` — a `Proxy` whose every trap
+  // throws. Normalising it into an `Error` inside the last-line-of-defence handlers must not itself
+  // throw, or it recreates the very unhandled-rejection / uncaught-exception it guards against.
+  const makeUnserialisableThrowable = (): unknown =>
+    new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('hostile get trap')
+        },
+        getPrototypeOf() {
+          throw new Error('hostile getPrototypeOf trap')
+        },
+      }
+    )
+
+  it('an unserialisable value thrown from an async event handler is still caught and nacked, never an unhandled rejection', async () => {
+    const unhandledRejections: unknown[] = []
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      const tool = new Tool({
+        name: 'boom_tool',
+        description: 'a tool whose call is never reached — reportToolCall itself throws first',
+        inputSchema: validator.object({}).unknown(true),
+        handler: (async () => 'unreachable') as never,
+      })
+      const fake = new FakeWrapperChild()
+      const { execaFn } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn }))
+      const ctx = makeCtx({ tools: new ToolRegistry([tool]) })
+      const helpers = makeHelpers()
+      // A PLAIN function, deliberately NOT `vi.fn`: vitest's mock wrapper does not rethrow a
+      // thrown Proxy by identity (the caught value no longer defeats JSON.stringify), which would
+      // make this test pass against the old, unguarded normaliser and prove nothing.
+      ;(helpers as unknown as { reportToolCall: unknown }).reportToolCall = (): never => {
+        throw makeUnserialisableThrowable()
+      }
+      const promise = adapter.executor()(ctx, helpers)
+      await nextTurn()
+      fake.emit({ type: 'ready' })
+      await nextTurn()
+      fake.emit({ type: 'init' })
+      await nextTurn()
+      fake.emit({ type: 'tool_call_request', requestId: '0', tool: 'boom_tool', args: {} })
+      await nextTurn()
+      await nextTurn()
+      await promise
+      await nextTurn()
+
+      expect(unhandledRejections).toEqual([])
+      expect(ctx.nack).toHaveBeenCalledTimes(1)
+      expect(ctx.nack).toHaveBeenCalledWith(expect.any(E_CLAUDE_CODE_CLI_STREAM_ERROR))
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
+  })
+
+  it('an unserialisable value thrown synchronously from the stdout line reader is caught and nacked, never an uncaught exception', async () => {
+    const uncaught: unknown[] = []
+    const onUncaught = (err: unknown): void => {
+      uncaught.push(err)
+    }
+    process.on('uncaughtException', onUncaught)
+    try {
+      const fake = new FakeWrapperChild()
+      const { execaFn } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn }))
+      const ctx = makeCtx()
+      const helpers = makeHelpers()
+      // The malformed-line path logs at trace from inside `eventReader.push` — synchronously,
+      // inside the stdout 'data' listener.
+      // A PLAIN function, not `vi.fn` — see the note in the async-handler test above.
+      ;(helpers.log as unknown as { trace: unknown }).trace = (): never => {
+        throw makeUnserialisableThrowable()
+      }
+      const promise = adapter.executor()(ctx, helpers)
+      await nextTurn()
+      fake.emit({ type: 'ready' })
+      await nextTurn()
+      fake.emit({ type: 'init' })
+      await nextTurn()
+      fake.emitRaw('this line is not json')
+      await nextTurn()
+      await nextTurn()
+      await promise
+      await nextTurn()
+
+      expect(uncaught).toEqual([])
+      expect(ctx.nack).toHaveBeenCalledTimes(1)
+      expect(ctx.nack).toHaveBeenCalledWith(expect.any(E_CLAUDE_CODE_CLI_STREAM_ERROR))
+    } finally {
+      process.off('uncaughtException', onUncaught)
+    }
+  })
+})
+
 describe('ClaudeCodeCliAdapter — MCP bridge startup failure', () => {
   it('an init event naming an mcpServerErrors entry for the bridge nacks E_CLAUDE_CODE_CLI_MCP_BRIDGE_STARTUP_FAILED', async () => {
     const fake = new FakeWrapperChild()
@@ -1253,5 +1570,383 @@ describe('ClaudeCodeCliAdapter — MCP bridge startup failure', () => {
     const { E_CLAUDE_CODE_CLI_MCP_BRIDGE_STARTUP_FAILED } =
       await import('../../../../../src/batteries/llm/claude_code_cli/exceptions')
     expect(ctx.nack).toHaveBeenCalledWith(expect.any(E_CLAUDE_CODE_CLI_MCP_BRIDGE_STARTUP_FAILED))
+  })
+})
+
+// A bounded "did this hang" guard: races the executor's own promise against a short real-time
+// timeout. Per project doctrine (no pathological MAX_ITERATIONS/timeout-bail patterns), this is
+// used ONLY to make a genuine hang FAIL the assertion below (`timedOut` inspected explicitly), not
+// to silently treat a slow-but-real completion as success — it is not a substitute for asserting
+// on the executor's actual outcome, which every test below still does after the race.
+const raceAgainstHang = async (
+  promise: void | Promise<void>,
+  hangTimeoutMs = 2000
+): Promise<boolean> => {
+  let timedOut = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      timedOut = true
+      resolve()
+    }, hangTimeoutMs)
+  })
+  try {
+    await Promise.race([Promise.resolve(promise), timeout])
+    return timedOut
+  } finally {
+    // A fast, successful `promise` otherwise leaves this timer pending for the full
+    // `hangTimeoutMs` (a real, un-refed-by-default Node timer) — harmless individually, but this
+    // helper is called from several tests in this file, and vitest does not tear down pending
+    // real timers between tests, so it leaks one per call. Clearing it here does not change
+    // `timedOut`'s value (already captured) or the resolved race outcome.
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+describe('ClaudeCodeCliAdapter — a settlement handler throwing does not hang the executor (issue #39 AI-review defect #1)', () => {
+  it('reportGenerationStats throwing on the terminal result event still resolves the executor (bounded wait), nacks once, and never becomes an unhandled rejection', async () => {
+    const unhandledRejections: unknown[] = []
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      const fake = new FakeWrapperChild()
+      const { execaFn } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn, autoAck: true }))
+      const ctx = makeCtx()
+      const helpers = makeHelpers()
+      // Reproduces AI-review defect #1: `settleOnce`'s callback in the `result` branch calls
+      // `helpers.reportGenerationStats(...)` before `ctx.ack()`; on the pre-fix code, a throw here
+      // propagates out of `settleOnce` itself AFTER `settled` was already flipped true, so the
+      // Fix-B `onEvent(...).catch(...)` handler's own `settleOnce(...)` call is a silent no-op
+      // (the `if (settled) return` guard) and `resolveIteration`/`finish` is never called — the
+      // executor hangs forever, never resolving and never nacking.
+      ;(helpers as unknown as { reportGenerationStats: unknown }).reportGenerationStats = vi.fn(
+        () => {
+          throw new Error('reportGenerationStats exploded')
+        }
+      )
+      const promise = adapter.executor()(ctx, helpers)
+      await nextTurn()
+      fake.emit({ type: 'ready' })
+      await nextTurn()
+      fake.emit({ type: 'init' })
+      await nextTurn()
+      fake.emit({ type: 'result', isError: false, resultText: 'done' })
+      fake.exit(0)
+
+      const timedOut = await raceAgainstHang(promise)
+      expect(timedOut).toBe(false)
+
+      expect(unhandledRejections).toEqual([])
+      // Nacked exactly once via the guaranteed-resolution path, never double-signalled.
+      expect(ctx.nack).toHaveBeenCalledTimes(1)
+      expect(ctx.nack).toHaveBeenCalledWith(expect.any(E_CLAUDE_CODE_CLI_STREAM_ERROR))
+      const nackedError = (ctx.nack as unknown as { mock: { calls: unknown[][] } }).mock
+        .calls[0]![0] as InstanceType<typeof E_CLAUDE_CODE_CLI_STREAM_ERROR>
+      expect(nackedError.message).toContain('reportGenerationStats exploded')
+      // `ctx.ack()` sits AFTER `reportGenerationStats(...)` in the same callback — it must never
+      // have been reached.
+      expect(ctx.ack).not.toHaveBeenCalled()
+
+      // A later event must not throw again or double-nack.
+      fake.emit({ type: 'result', isError: false, resultText: 'too late' })
+      await nextTurn()
+      expect(ctx.nack).toHaveBeenCalledTimes(1)
+      expect(unhandledRejections).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
+  })
+
+  it('ctx.ack() itself throwing (already signalled by a lost race) is still caught and resolves the executor', async () => {
+    const unhandledRejections: unknown[] = []
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      const fake = new FakeWrapperChild()
+      const { execaFn } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn, autoAck: true }))
+      const ctx = makeCtx()
+      // On the REAL DispatchContext, `ack()`/`nack()` only throw `E_LLM_EXECUTION_ALREADY_SIGNALLED`
+      // when `#signalled` is ALREADY set — i.e. `ctx.isSignalled` is already `true` at the moment of
+      // the throw (see `dispatch_context.ts`: both guards check `#signalled !== undefined` and throw
+      // BEFORE assigning anything new). A faithful mock of "ctx.ack() throws because a concurrent
+      // caller already signalled" must reflect that same invariant, or this test would validate the
+      // fix's `!ctx.isSignalled` guard against a race shape the real object could never produce.
+      ;(ctx as unknown as { ack: unknown }).ack = vi.fn(() => {
+        throw new Error('E_LLM_EXECUTION_ALREADY_SIGNALLED (simulated race)')
+      })
+      Object.defineProperty(ctx, 'isSignalled', { get: () => true, configurable: true })
+      const helpers = makeHelpers()
+      const promise = adapter.executor()(ctx, helpers)
+      await nextTurn()
+      fake.emit({ type: 'ready' })
+      await nextTurn()
+      fake.emit({ type: 'init' })
+      await nextTurn()
+      fake.emit({ type: 'result', isError: false, resultText: 'done' })
+      fake.exit(0)
+
+      const timedOut = await raceAgainstHang(promise)
+      expect(timedOut).toBe(false)
+      expect(unhandledRejections).toEqual([])
+      // reportGenerationStats already ran successfully before ctx.ack() threw.
+      expect(helpers._stats).toHaveLength(1)
+      // ctx.ack() itself threw as-if-already-signalled — the guard must not call ctx.nack() on top
+      // of an already-signalled context (no double-signal attempt).
+      expect(ctx.nack).not.toHaveBeenCalled()
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
+  })
+})
+
+describe('ClaudeCodeCliAdapter — the stream-idle timer is suspended during ADK tool execution (issue #39 AI-review defect #2)', () => {
+  it('a tool executor that outlives streamIdleTimeoutMs does not get falsely nacked STREAM_STALLED, and completes; genuine silence AFTER it finishes still trips STREAM_STALLED', async () => {
+    vi.useFakeTimers()
+    try {
+      let resolveTool: (() => void) | undefined
+      const tool = new Tool({
+        name: 'slow_tool',
+        description: 'a tool whose executor outlives streamIdleTimeoutMs',
+        inputSchema: validator.object({}).unknown(true),
+        handler: (async () => {
+          await new Promise<void>((resolve) => {
+            resolveTool = resolve
+          })
+          return 'slow result'
+        }) as never,
+      })
+      const fake = new FakeWrapperChild()
+      const { execaFn } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(
+        baseOptions({ execa: execaFn, streamIdleTimeoutMs: 50, disposeGraceMs: 10 })
+      )
+      const ctx = makeCtx({ tools: new ToolRegistry([tool]) })
+      const helpers = makeHelpers()
+      const promise = adapter.executor()(ctx, helpers)
+      await vi.advanceTimersByTimeAsync(0)
+      fake.emit({ type: 'ready' })
+      await vi.advanceTimersByTimeAsync(0)
+      fake.emit({ type: 'init' })
+      await vi.advanceTimersByTimeAsync(0)
+      fake.emit({ type: 'tool_call_request', requestId: '0', tool: 'slow_tool', args: {} })
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(0)
+
+      // Advance well past streamIdleTimeoutMs while the tool executor is STILL pending and no
+      // wrapper stdout has arrived — this must not falsely stall the dispatch.
+      await vi.advanceTimersByTimeAsync(500)
+      expect(ctx.nack).not.toHaveBeenCalled()
+      expect(resolveTool).toBeDefined()
+
+      // Now let the tool finish; the round trip completes and the idle timer resumes.
+      resolveTool?.()
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(ctx.nack).not.toHaveBeenCalled()
+      const response = parsedWrites(fake).find((w) => w.type === 'tool_call_response')
+      expect(response).toBeDefined()
+
+      // Genuine silence AFTER the tool answered must still trip the stall timeout.
+      await vi.advanceTimersByTimeAsync(200)
+      await promise
+      expect(ctx.nack).toHaveBeenCalledWith(expect.any(E_CLAUDE_CODE_CLI_STREAM_STALLED))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('ClaudeCodeCliAdapter — a synchronous throw while logging a malformed line does not escape or hang the executor (issue #39 AI-review defect #3)', () => {
+  it('helpers.log.trace throwing on a malformed NDJSON line is caught and settles the dispatch via nack, not an unhandled/uncaught error', async () => {
+    const unhandledRejections: unknown[] = []
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      const fake = new FakeWrapperChild()
+      const { execaFn } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn }))
+      const ctx = makeCtx()
+      const helpers = makeHelpers()
+      // Reproduces AI-review defect #3: the `JSON.parse`-failure callback runs synchronously
+      // inside `createNdjsonLineReader`'s `onLine`, which is itself called synchronously from
+      // `eventReader.push(chunk)` — a throw here (previously unguarded) escapes directly from the
+      // `child.stdout.on('data', ...)` listener, bypassing the Fix-B `onEvent(...).catch(...)`
+      // chain entirely, since it never even reaches `onEvent`.
+      ;(helpers.log as unknown as { trace: unknown }).trace = vi.fn(() => {
+        throw new Error('log.trace exploded')
+      })
+      const promise = adapter.executor()(ctx, helpers)
+      await nextTurn()
+      fake.emit({ type: 'ready' })
+      await nextTurn()
+      fake.emit({ type: 'init' })
+      await nextTurn()
+      // Malformed NDJSON — triggers the JSON.parse catch block's helpers.log.trace(...) call.
+      fake.emitRaw('{not valid json')
+
+      const timedOut = await raceAgainstHang(promise)
+      expect(timedOut).toBe(false)
+
+      expect(unhandledRejections).toEqual([])
+      expect(ctx.nack).toHaveBeenCalledTimes(1)
+      expect(ctx.nack).toHaveBeenCalledWith(expect.any(E_CLAUDE_CODE_CLI_STREAM_ERROR))
+      const nackedError = (ctx.nack as unknown as { mock: { calls: unknown[][] } }).mock
+        .calls[0]![0] as InstanceType<typeof E_CLAUDE_CODE_CLI_STREAM_ERROR>
+      expect(nackedError.message).toContain('log.trace exploded')
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
+  })
+})
+
+describe('ClaudeCodeCliAdapter — settleOnce guarantees resolution even when its OWN failure-path steps throw (issue #39 AI-review round 2, defect #1)', () => {
+  it('helpers.log.error itself throwing while handling a settlement-callback failure still resolves the executor, nacks exactly once, and produces neither an unhandled rejection nor an uncaught exception', async () => {
+    const unhandledRejections: unknown[] = []
+    const uncaughtExceptions: unknown[] = []
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections.push(reason)
+    }
+    const onUncaughtException = (err: unknown): void => {
+      uncaughtExceptions.push(err)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    process.on('uncaughtException', onUncaughtException)
+    try {
+      const fake = new FakeWrapperChild()
+      const { execaFn } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn, autoAck: true }))
+      const ctx = makeCtx()
+      const helpers = makeHelpers()
+      // Reproduces round-2 defect #1: on af7d0b4, `settleOnce`'s catch block called
+      // `helpers.log.error(...)` (itself capable of throwing) BEFORE `resolveIteration?.()`. If the
+      // logger throws, resolution never runs even though `settled` is already `true` — every LATER
+      // `settleOnce` call anywhere in the file becomes a silent no-op (its own `if (settled) return`
+      // guard fires first), hanging the executor forever, and the throw itself escapes whichever
+      // caller invoked `settleOnce` (here, an async `onEvent(...).catch(...)` handler, becoming an
+      // unhandled rejection; the stdout `'data'` listener's own catch site — a synchronous caller —
+      // would instead surface it as an uncaught exception, which is why both are spied on here).
+      ;(helpers as unknown as { reportGenerationStats: unknown }).reportGenerationStats = vi.fn(
+        () => {
+          throw new Error('reportGenerationStats exploded')
+        }
+      )
+      ;(helpers.log as unknown as { error: unknown }).error = vi.fn(() => {
+        throw new Error('log.error exploded too')
+      })
+      const promise = adapter.executor()(ctx, helpers)
+      await nextTurn()
+      fake.emit({ type: 'ready' })
+      await nextTurn()
+      fake.emit({ type: 'init' })
+      await nextTurn()
+      fake.emit({ type: 'result', isError: false, resultText: 'done' })
+      fake.exit(0)
+
+      const timedOut = await raceAgainstHang(promise)
+      expect(timedOut).toBe(false)
+
+      expect(unhandledRejections).toEqual([])
+      expect(uncaughtExceptions).toEqual([])
+      expect(ctx.nack).toHaveBeenCalledTimes(1)
+      expect(ctx.nack).toHaveBeenCalledWith(expect.any(E_CLAUDE_CODE_CLI_STREAM_ERROR))
+      const nackedError = (ctx.nack as unknown as { mock: { calls: unknown[][] } }).mock
+        .calls[0]![0] as InstanceType<typeof E_CLAUDE_CODE_CLI_STREAM_ERROR>
+      expect(nackedError.message).toContain('reportGenerationStats exploded')
+      expect(ctx.ack).not.toHaveBeenCalled()
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+      process.off('uncaughtException', onUncaughtException)
+    }
+  })
+})
+
+describe('ClaudeCodeCliAdapter — fire-and-forget gracefulShutdown() never becomes an unhandled rejection (issue #39 AI-review round 2, defect #2)', () => {
+  it('the wrapper/child promise rejecting while an abort-triggered shutdown awaits it does not produce an unhandled rejection', async () => {
+    const unhandledRejections: unknown[] = []
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      const stdout = new EventEmitter()
+      const kills: Array<string | undefined> = []
+      let rejectChild!: (err: unknown) => void
+      // A thenable shaped like execa's own return value, mirroring the existing "a rejected
+      // wrapper promise" fixture above, but with the rejection deferred under our control instead
+      // of firing immediately — so the test can drive the wrapper through `ready`/`init`, trigger
+      // an ABORT (which starts `gracefulShutdown()` racing this same child promise internally via
+      // `Promise.resolve(child).finally(...)`), and only THEN reject it, landing squarely inside
+      // that in-flight internal await.
+      const childPromise = new Promise<never>((_resolve, reject) => {
+        rejectChild = reject
+      })
+      // Every OTHER holder of this same underlying rejection (the adapter's own bottom-of-file
+      // `void Promise.resolve(child).then(...).catch(...)`, and `gracefulShutdown`'s internal
+      // chain) attaches its own handler independently — each `Promise.resolve(child)` call adopts
+      // the thenable's state into a genuinely separate promise object. This fixture-level `.catch`
+      // exists only so the raw `childPromise` variable itself is never flagged, and does not
+      // substitute for either of the adapter's own handlers being correct.
+      childPromise.catch(() => undefined)
+      const child = {
+        stdin: { write: vi.fn(), end: vi.fn() },
+        stdout,
+        kill: (signal?: string): boolean => {
+          kills.push(signal)
+          return true
+        },
+        then: (
+          onFulfilled: (v: unknown) => unknown,
+          onRejected: (e: unknown) => unknown
+        ): Promise<unknown> => childPromise.then(onFulfilled, onRejected),
+        catch: (onRejected: (e: unknown) => unknown): Promise<unknown> =>
+          childPromise.catch(onRejected),
+      }
+      const execaFn = (..._args: unknown[]): typeof child => child
+      ;(execaFn as unknown as { exec: unknown }).exec = true
+      const controller = new AbortController()
+      const adapter = new ClaudeCodeCliAdapter(
+        baseOptions({ execa: execaFn as never, disposeGraceMs: 20 })
+      )
+      const ctx = makeCtx({ abortSignal: controller.signal })
+      const helpers = makeHelpers()
+      const promise = adapter.executor()(ctx, helpers)
+      await nextTurn()
+      stdout.emit('data', new TextEncoder().encode(`${JSON.stringify({ type: 'ready' })}\n`))
+      await nextTurn()
+      stdout.emit('data', new TextEncoder().encode(`${JSON.stringify({ type: 'init' })}\n`))
+      await nextTurn()
+
+      controller.abort()
+      await nextTurn()
+      // Reject the child promise while `gracefulShutdown()`'s internal
+      // `Promise.resolve(child).finally(...)` chain (started by the abort listener above) is
+      // still in flight racing `disposeGraceMs` — this is the exact unguarded chain AI-review
+      // round 2 named.
+      rejectChild(new Error('wrapper process rejected during abort-triggered shutdown'))
+
+      const timedOut = await raceAgainstHang(promise, 1000)
+      expect(timedOut).toBe(false)
+      // Node's `unhandledRejection` detection fires on a LATER turn of the event loop than the
+      // microtask that settles `promise` itself (it waits to see whether a `.catch` is attached
+      // "eventually", not merely "not yet") — `nextTurn()`'s real 10ms `setTimeout` gives that
+      // detection a full turn to fire before the listener below is torn down and the assertion is
+      // made, so a genuine leak here is not silently missed by unsubscribing too early.
+      await nextTurn()
+      expect(unhandledRejections).toEqual([])
+      // The adapter's own bottom-of-file wrapper-process handler observes the same rejection and
+      // settles the turn as a crash — this test's focus is solely that NEITHER path leaks an
+      // unhandled rejection, not the specific exception nacked.
+      expect(ctx.nack).toHaveBeenCalledTimes(1)
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
   })
 })

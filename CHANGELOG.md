@@ -15,6 +15,50 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-09-24
+
+### Fixed
+
+- **CommonJS consumers can load the package again.** Every `.cjs` entry in the published package
+  failed on `require()` — `Cannot find module './exceptions-….js'`, `createException is not a
+  function`, or `exports is not defined in ES module scope` — while ESM `import()` worked. This
+  affected multiple releases, including at least `1.20260901.0`, `1.20260902.0`, `1.20260913.0`
+  and `1.20260921.0`. Root cause: `build.lib.fileName` named only entry files; Vite picked shared
+  chunks' extension from the source `package.json` (no `"type"`), giving CJS-format chunks a bare
+  `.js` extension, while the published `package.json` declares `"type": "module"` — so Node loaded
+  those CJS chunks as ESM. Each output format now names its own chunks (`.cjs` / `.mjs`). The
+  `claude-code-cli-wrapper.cjs` asset, which crashed on start for the same reason, now starts.
+- **`@nhtio/adk/batteries/llm/claude_code_cli` — a multi-iteration dispatch no longer kills the
+  host process** (closes issue #39). The wrapper numbers tool calls from `"0"` on every spawn, so a
+  second dispatch iteration reused id `"0"`, core rejected it as already complete, and the throw
+  escaped a stream listener as an unhandled rejection. Tool-call ids are now de-collided within the
+  turn (new `toolCallIdFilter` option, defaulting to `deCollideToolCallIds`; the wrapper-facing
+  response still carries the wrapper's own id). Errors while handling wrapper events — including
+  synchronous throws and unserialisable thrown values — now settle the dispatch through
+  `E_CLAUDE_CODE_CLI_STREAM_ERROR` instead of escaping or hanging the executor, and fire-and-forget
+  shutdowns can no longer produce an unhandled rejection. The stream-idle timer now re-arms only on
+  genuine progress (not on `retry`/`log` diagnostics, a plausible cause of the reported
+  never-settling dispatch) and is suspended while an ADK tool executes, so a slow tool is not
+  falsely nacked as stalled.
+- **`@nhtio/adk/batteries/llm/claude_code_cli` — the default wrapper path survives bundling**
+  (closes issue #40). The wrapper was resolved relative to the adapter module's own compiled file,
+  which breaks once a consumer bundles the adapter (e.g. an Electron main process). A fallback now
+  locates the wrapper through the package's own self-reference, in both ESM and CJS bundles. When
+  nothing resolves, the new `E_CLAUDE_CODE_CLI_WRAPPER_NOT_FOUND` lists every path it tried and
+  names the `wrapperPath` option. A bundle only finds the wrapper while `node_modules/@nhtio/adk` is
+  still resolvable from it at runtime; a bundle moved outside the project, or an Electron app that
+  prunes or asar-packs the package, must set `wrapperPath`.
+
+### Internal
+
+- **CI — dist-backed build specs now run on merge requests.** Specs that need a real `dist/`
+  (`tests/unit/build/*`) skipped silently on every MR because the unit-test job never builds;
+  that silent skip is how the CJS defect went unnoticed. The MR-gated `Publishable Import Boundary
+  Enforcement` job, which already runs `pnpm generate`, now also runs them with
+  `TEST_REQUIRE_DIST=1`, which turns a missing `dist/` into a failure instead of a skip. New specs
+  load every `.cjs` entry under plain Node and bundle a consumer with esbuild in both formats to
+  prove the wrapper resolves.
+
 ## 2026-09-21
 
 ### Fixed

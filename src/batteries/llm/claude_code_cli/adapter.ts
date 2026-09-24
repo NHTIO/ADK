@@ -20,6 +20,7 @@
 
 import { sha256 } from 'js-sha256'
 import { validateOptions } from './validation'
+import { deCollideToolCallIds } from '../chat_common'
 import { isError, isObject, isInstanceOf } from '@nhtio/adk/guards'
 import { createNdjsonLineReader, encodeWrapperCommand } from './wire'
 import { canonicalStringify } from '../../../lib/utils/canonical_json'
@@ -37,12 +38,14 @@ import {
   E_CLAUDE_CODE_CLI_WRAPPER_SPAWN_ERROR,
   E_CLAUDE_CODE_CLI_WRAPPER_CRASHED,
   E_CLAUDE_CODE_CLI_PROCESS_EXITED_NONZERO,
+  E_CLAUDE_CODE_CLI_STREAM_ERROR,
   E_CLAUDE_CODE_CLI_STREAM_STALLED,
   E_CLAUDE_CODE_CLI_STARTUP_TIMEOUT,
   E_CLAUDE_CODE_CLI_MCP_BRIDGE_STARTUP_FAILED,
   E_CLAUDE_CODE_CLI_TURN_FAILED,
   E_INVALID_CLAUDE_CODE_CLI_OPTIONS,
   E_CLAUDE_CODE_CLI_CONTEXT_OVERFLOW,
+  E_CLAUDE_CODE_CLI_WRAPPER_NOT_FOUND,
 } from './exceptions'
 import {
   defaultDescriptionToChatCompletionsJsonSchema,
@@ -115,6 +118,270 @@ export const resolveDefaultWrapperPath = (): string => {
     new URL('../../../claude-code-cli-wrapper.mjs', import.meta.url).pathname
   )
 }
+
+/**
+ * Existence-check a candidate wrapper path, lazily acquiring `node:fs`'s `existsSync` — never
+ * imported at module scope for the same reason `resolveDefaultWrapperPath` avoids `node:url`
+ * above: this file is transitively pulled into the browser test project via `src/batteries`'s
+ * barrel, and a module-scope Node-builtin import would throw at import time there. Any failure to
+ * even acquire `node:fs` (e.g. a hostile/exotic runtime) is treated as "does not exist" rather
+ * than propagating, since this is only ever used to pick between fallback candidates.
+ */
+const existsOnDisk = async (path: string): Promise<boolean> => {
+  try {
+    const fs = (await import('node:fs')) as { existsSync?: (p: string) => boolean }
+    return typeof fs.existsSync === 'function' && fs.existsSync(path)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Result of a self-reference resolution attempt: the resolved, existence-checked sibling path when
+ * found, plus a full log of every candidate/reason tried — reported to the caller so
+ * {@link E_CLAUDE_CODE_CLI_WRAPPER_NOT_FOUND} can name everything actually checked, not just the
+ * relative resolver's own error.
+ */
+interface SelfReferenceResolution {
+  path?: string
+  tried: string[]
+}
+
+/**
+ * Injectable seams for {@link resolveWrapperPathViaSelfReference}'s two internal self-reference
+ * routes — internal, non-breaking test hooks (mirrors {@link WrapperPathResolutionSeams} below,
+ * one layer deeper). A real ambient `require` is module-scoped per compiled file, so a test file
+ * patching its OWN `require.resolve` has no effect on `adapter.ts`'s ambient `require` (verified
+ * directly — each ES module/CJS wrapper gets its own `require` binding, even within the same
+ * vitest worker/module graph), and this repo's own `@nhtio/adk` package genuinely self-resolves
+ * successfully inside the test environment (this worktree's own `package.json` is itself named
+ * `@nhtio/adk`), so route 1 can't be made to fail deterministically without a seam either. These
+ * two knobs let a unit test drive both "ambient require resolution failed" and "import.meta.url
+ * unavailable" without needing a real bundled/stripped module environment. Both default to the
+ * real ambient behavior when omitted.
+ */
+interface SelfReferenceResolutionSeams {
+  ambientRequireResolve?: (specifier: string) => string
+  importMetaUrl?: string | undefined
+}
+
+/**
+ * Resolve the wrapper asset's sibling path relative to THIS PACKAGE's own already-published main
+ * entry, rather than relative to the (possibly relocated-by-bundling) adapter module. Node's
+ * package self-reference feature — a package resolving its own name as a bare specifier — is
+ * depth-independent within `@nhtio/adk`'s own tree, so this survives the adapter code being moved
+ * around WITHIN the package by a bundler. It only breaks once the calling code has been physically
+ * bundled OUTSIDE `@nhtio/adk`'s own directory tree (e.g. into a consumer's Electron main-process
+ * bundle) — at that point self-reference falls back to ordinary node_modules bare-specifier
+ * resolution, which succeeds exactly when `@nhtio/adk` is still installed as a resolvable
+ * dependency from the bundled code's new location. That is the same "normal case" the published
+ * `wrapperPath` override already exists for, so this fallback is a strict improvement with no new
+ * failure mode: when it can't resolve, behavior degrades to the pre-existing "throw a clear error"
+ * path below rather than a worse outcome.
+ *
+ * Deliberately resolves this package's `exports['.']` main entry (already published, no `exports`
+ * map change needed) and derives the wrapper's path as a sibling of that entry's directory — every
+ * `vite.config.mts` `build.lib.entry` key (including the un-tagged wrapper) emits to a flat
+ * `dist/` directory, so `dirname(mainEntry) === dirname(wrapperAsset)`.
+ *
+ * Two independent ways to reach a `require`-like resolver are tried, in this order, because a
+ * bundled consumer may land in either shape and each leaves the OTHER unusable:
+ *
+ * 1. A real ambient `require` — present when THIS MODULE has itself been bundled into a CJS
+ *    output (e.g. `esbuild --platform=node --format=cjs`, which is common for an Electron
+ *    main-process bundle, the issue's reported scenario). Reused verbatim is the exact same
+ *    discriminator `resolveDefaultWrapperPath` above already documents:
+ *    `typeof require === 'function' && typeof require.resolve === 'function'` — because a bundled
+ *    ESM output can ALSO leave a truthy `require` behind as a dynamic-require shim/Proxy (rolldown
+ *    and esbuild both do this) whose `.resolve` is not itself a function, and calling it would
+ *    throw rather than genuinely resolving anything. In a genuine CJS bundle this ambient
+ *    `require.resolve('@nhtio/adk')` works directly with no `createRequire` bridge needed.
+ * 2. `createRequire(import.meta.url)` — the ESM path, used only when step 1 didn't yield a usable
+ *    resolver. Verified empirically that esbuild's `--format=cjs` output rewrites every
+ *    `import.meta` reference in bundled source to a plain `var import_meta = {}`, so
+ *    `import.meta.url` is `undefined` there — `createRequire(undefined)` throws
+ *    `ERR_INVALID_ARG_VALUE` outright, so this branch is skipped by checking
+ *    `typeof import.meta.url === 'string'` first rather than letting that throw surface as an
+ *    opaque, unrelated-looking error. `createRequire` (rather than `import.meta.resolve`) is used
+ *    here because — unlike `import.meta.resolve` — its `.resolve` performs a real filesystem
+ *    existence check (verified directly: `import.meta.resolve` happily returns a URL for a target
+ *    file that does not exist, since it only resolves the `exports` map syntactically;
+ *    `require.resolve`, including through `createRequire`, throws `MODULE_NOT_FOUND` for a missing
+ *    target), so a resolved path here is already known to exist and only the derived wrapper
+ *    sibling still needs its own explicit check below.
+ *
+ * `tried` always accounts for BOTH routes once step 1 has not already produced a `mainEntry`: step
+ * 2 either resolves, records its own failure, or — when `import.meta.url` isn't even a string —
+ * records an explicit "skipped: import.meta.url unavailable" entry, so the thrown error's "Tried:"
+ * list never silently omits a route just because it was never attempted.
+ *
+ * A `process.cwd()`-anchored resolution attempt is deliberately NOT included as a further
+ * fallback: resolution should stay anchored to the bundle's own module identity, not to a mutable,
+ * launch-directory-dependent value that has no necessary relationship to where the bundle — or
+ * `@nhtio/adk` — actually live. Failing clearly and pointing at `wrapperPath` is a better outcome
+ * than a resolution that silently varies with the process's current working directory.
+ */
+const resolveWrapperPathViaSelfReference = async (
+  wrapperBasename: string,
+  seams: SelfReferenceResolutionSeams = {}
+): Promise<SelfReferenceResolution> => {
+  const tried: string[] = []
+  let mainEntry: string | undefined
+
+  const hasAmbientRequire =
+    seams.ambientRequireResolve !== undefined ||
+    (typeof require === 'function' && typeof require.resolve === 'function')
+  if (hasAmbientRequire) {
+    try {
+      mainEntry = (seams.ambientRequireResolve ?? require.resolve)('@nhtio/adk')
+    } catch (err) {
+      tried.push(
+        `self-reference via ambient require('@nhtio/adk') failed: ${isError(err) ? err.message : String(err)}`
+      )
+    }
+  }
+
+  // Every branch below either resolves `mainEntry` or pushes a `tried` entry explaining why not —
+  // so by the time we reach the `mainEntry === undefined` check further down, `tried` can no longer
+  // be empty (a prior review round's "no usable ambient require and no import.meta.url" catch-all
+  // for a silently-empty `tried` is gone because it is now unreachable: the branch below records
+  // its OWN skip reason instead of leaving nothing behind).
+  if (mainEntry === undefined) {
+    const importMetaUrl = 'importMetaUrl' in seams ? seams.importMetaUrl : import.meta.url
+    if (typeof importMetaUrl === 'string') {
+      try {
+        const { createRequire } = await import('node:module')
+        mainEntry = createRequire(importMetaUrl).resolve('@nhtio/adk')
+      } catch (err) {
+        tried.push(
+          `self-reference via createRequire(import.meta.url).resolve('@nhtio/adk') failed: ${isError(err) ? err.message : String(err)}`
+        )
+      }
+    } else {
+      // Regression for the AI-review finding: this route being unavailable used to leave no trace
+      // at all whenever the ambient-`require` route above HAD recorded something (e.g. it existed
+      // but failed) — the "Tried:" list would then name the ambient failure but silently omit that
+      // the createRequire route was never even attempted. Recording the skip explicitly means every
+      // self-reference route is always accounted for in the thrown error.
+      tried.push(
+        'self-reference via createRequire(import.meta.url) skipped: import.meta.url unavailable in this module context'
+      )
+    }
+  }
+
+  if (mainEntry === undefined) {
+    return { tried }
+  }
+
+  const lastSlash = mainEntry.lastIndexOf('/')
+  if (lastSlash < 0) {
+    tried.push(
+      `self-reference resolved '@nhtio/adk' to an unexpected path with no directory separator: ${mainEntry}`
+    )
+    return { tried }
+  }
+  const candidate = `${mainEntry.slice(0, lastSlash + 1)}${wrapperBasename}`
+  tried.push(candidate)
+  return (await existsOnDisk(candidate)) ? { path: candidate, tried } : { tried }
+}
+
+/**
+ * Injectable seams for {@link resolveWrapperPathWithFallback}'s three collaborators — internal,
+ * non-breaking test hooks (never new `ClaudeCodeCliAdapterOptions` fields): swapping these lets
+ * unit tests exercise the bundled-fallback and unresolvable branches deterministically, without a
+ * real `dist/` build or filesystem mocking. Each defaults to the real implementation above.
+ */
+interface WrapperPathResolutionSeams {
+  resolveRelative?: () => string
+  resolveSelfRef?: (wrapperBasename: string) => Promise<SelfReferenceResolution>
+  checkExists?: (path: string) => Promise<boolean>
+}
+
+/**
+ * Internal, non-public resolver used by the executor call site (never `resolveDefaultWrapperPath`
+ * itself, which stays synchronous and unchanged for backwards compatibility with any caller that
+ * already imports it directly). Tries the existing relative-to-module resolution FIRST — zero
+ * behavior change for the common unbundled case — and only falls back to the self-reference
+ * lookup when that candidate does not exist on disk (bundling relocated the adapter). Throws
+ * {@link E_CLAUDE_CODE_CLI_WRAPPER_NOT_FOUND} naming every path tried — the relative candidate (or
+ * its resolution error) AND every self-reference candidate/reason from
+ * {@link resolveWrapperPathViaSelfReference} — when neither resolves, rather than letting a bundled
+ * consumer hit an opaque `MODULE_NOT_FOUND`/ENOENT deep inside `execa`, or a truncated error that
+ * hides what the self-reference fallback actually attempted.
+ *
+ * @remarks
+ * Electron/asar note: an app packaged into an `asar` archive can still `readFileSync`/`existsSync`
+ * transparently-unpacked paths through Electron's patched `fs`, so this existence-check strategy
+ * keeps working there without special-casing — but a wrapper asset that ships unpacked (outside
+ * `asar`) is still the consumer's responsibility to arrange, same as any other spawned-executable
+ * asset; `wrapperPath` remains the escape hatch when that layout doesn't line up.
+ *
+ * @remarks
+ * Coverage note — deployment shapes: this resolver (both branches) only ever finds the wrapper
+ * asset when `@nhtio/adk` itself (with `dist/claude-code-cli-wrapper.{cjs,mjs}` inside it) remains
+ * an ordinarily-resolvable dependency from wherever the bundle ends up running — the bundle never
+ * carries the wrapper asset itself. A bundle relocated outside its original project (so
+ * `node_modules/@nhtio/adk` is no longer reachable), or an Electron app that prunes/asar-packs
+ * `@nhtio/adk` out of its final package, is NOT covered by either branch and needs the explicit
+ * `wrapperPath` option — which is exactly what the thrown error's message directs the caller to.
+ */
+const resolveWrapperPathWithFallback = async (
+  seams: WrapperPathResolutionSeams = {}
+): Promise<string> => {
+  const resolveRelative = seams.resolveRelative ?? resolveDefaultWrapperPath
+  const resolveSelfRef = seams.resolveSelfRef ?? resolveWrapperPathViaSelfReference
+  const checkExists = seams.checkExists ?? existsOnDisk
+
+  const tried: string[] = []
+
+  let relative: string | undefined
+  try {
+    relative = resolveRelative()
+  } catch (err) {
+    tried.push(isError(err) ? err.message : String(err))
+  }
+  if (relative !== undefined) {
+    tried.push(relative)
+    if (await checkExists(relative)) return relative
+  }
+
+  // Bundled-CJS wrinkle, made explicit here: in a real esbuild `--format=cjs` bundle,
+  // `resolveDefaultWrapperPath`'s ambient-`require.resolve` branch throws `MODULE_NOT_FOUND` for
+  // the RELATIVE `../../../claude-code-cli-wrapper.cjs` specifier (that relative path no longer
+  // exists once bundling has relocated this module outside `@nhtio/adk`'s own tree), so `relative`
+  // stays `undefined` and `isCjsWrapper` defaults `false` — `wrapperBasename` picks the `.mjs`
+  // variant even though the CALLING bundle is CJS. This is harmless: the wrapper asset is never
+  // imported/required in-process, only spawned as a completely separate `node` child process (see
+  // `execaFn(process.execPath, [wrapperPath, ...])` at the call site below), and Node runs a
+  // `.mjs`-suffixed file as ESM regardless of the PARENT process's own module format. Picking `.cjs`
+  // here would be no more correct — either extension resolves to a real, runnable file once
+  // self-reference finds `@nhtio/adk`'s own `dist/` directory.
+  const isCjsWrapper = relative !== undefined && relative.endsWith('.cjs')
+  const wrapperBasename = isCjsWrapper
+    ? 'claude-code-cli-wrapper.cjs'
+    : 'claude-code-cli-wrapper.mjs'
+  const selfRef = await resolveSelfRef(wrapperBasename)
+  tried.push(...selfRef.tried)
+  if (selfRef.path !== undefined) return selfRef.path
+
+  throw new E_CLAUDE_CODE_CLI_WRAPPER_NOT_FOUND([tried.join(', ') || '(no candidates)'])
+}
+
+// Test-only aliases, following `transformers_js/adapter.ts`'s `__extractGeneratedText` precedent.
+// They are NOT re-exported from `index.ts` or any barrel, but because this file carries its own
+// `@module` tag they ARE reachable at runtime through the published
+// `@nhtio/adk/batteries/llm/claude_code_cli/adapter` subpath — and that reachability is load-bearing:
+// `tests/unit/build/claude_code_cli_wrapper_resolves_bundled.node.spec.ts` imports
+// `__resolveWrapperPathWithFallback` from that subpath to prove resolution inside a real bundle.
+// They carry no stability guarantee and are not part of the supported API; do not depend on them.
+// They are deliberately NOT marked `@internal`: `tsconfig.build.json` sets `stripInternal`, which
+// would drop them from the published `.d.ts` and break that bundled test's typed import.
+// `__resolveWrapperPathViaSelfReference` is exported one layer deeper than
+// `__resolveWrapperPathWithFallback` so a unit test can drive its `SelfReferenceResolutionSeams`
+// directly — see that interface's doc comment for why the outer seam (`resolveSelfRef`) can't
+// itself deterministically exercise route 1 vs. route 2.
+export { resolveWrapperPathWithFallback as __resolveWrapperPathWithFallback }
+export { resolveWrapperPathViaSelfReference as __resolveWrapperPathViaSelfReference }
 
 // ─── execa resolution (mirrors execa_executor.ts's lazy-resolver pattern) ──────
 
@@ -218,6 +485,44 @@ const estimateTokensOf = async (
 // ─── time / checksum helpers ────────────────────────────────────────────────
 
 const nowIso = (): string => new Date().toISOString()
+
+/**
+ * Normalise a thrown/rejected value into a real `Error` suitable as an exception `.cause`. Mirrors
+ * `dispatch_runner.ts`'s internal (non-exported) `toErrorCause` convention: a genuine `Error` (per
+ * the cross-realm-safe {@link isError} guard) passes through unchanged; anything else — a string,
+ * a plain object, a cross-realm error whose `instanceof Error` is false — is wrapped in a real
+ * `Error` whose message is the value's best string form, with the original preserved on `.cause`.
+ *
+ * Never throws. It runs inside the adapter's last-line-of-defence catch handlers (the `onEvent`
+ * rejection handler, the stdout `'data'` listener, the background-shutdown rejection handler), so a
+ * throw here would recreate the exact unhandled-rejection / uncaught-exception class it exists to
+ * prevent. A hostile thrown value can defeat BOTH `JSON.stringify` and `String` (a `Proxy` with a
+ * throwing trap, or an object whose `toJSON` and `toString` both throw) and can even make the
+ * `isError` guard itself throw, so each step is guarded and the last resort is a fixed string.
+ */
+const toErrorCause = (value: unknown): Error => {
+  try {
+    if (isError(value)) return value
+  } catch {
+    /* a hostile value can throw from the guard's own property reads; treat it as a non-Error */
+  }
+  let text: string
+  try {
+    text =
+      typeof value === 'string'
+        ? value
+        : value === undefined
+          ? 'undefined'
+          : (JSON.stringify(value) ?? String(value))
+  } catch {
+    try {
+      text = String(value)
+    } catch {
+      text = '[unserialisable thrown value]'
+    }
+  }
+  return new Error(`non-Error thrown while handling a wrapper event: ${text}`, { cause: value })
+}
 
 /**
  * Integrity checksum over `tool`/`args` — matches every other LLM battery's convention
@@ -378,7 +683,13 @@ export class ClaudeCodeCliAdapter {
         ctx.nack(isError(err) ? err : new Error(String(err)))
         return
       }
-      const wrapperPath = merged.wrapperPath ?? resolveDefaultWrapperPath()
+      let wrapperPath: string
+      try {
+        wrapperPath = merged.wrapperPath ?? (await resolveWrapperPathWithFallback())
+      } catch (err) {
+        ctx.nack(isError(err) ? err : new Error(String(err)))
+        return
+      }
       const claudeBin = merged.claudeBin ?? 'claude'
 
       // ── Step 5: pre-render inbound tool-call results (for history) ────────
@@ -580,6 +891,17 @@ export class ClaudeCodeCliAdapter {
       let currentMessageId: string | undefined
       let currentMessageBuffer = ''
       let sealedMessage = false
+      // Count of `tool_call_request`s currently executing (accepted but not yet answered with a
+      // `tool_call_response`). `streamIdleTimeoutMs` measures MODEL-stream idleness — the wrapper
+      // waiting on Claude — not ADK tool-execution latency; a real tool (a web search, a sandboxed
+      // run) can legitimately take longer than a short idle timeout with zero model-stream activity
+      // in between, which would otherwise be falsely nacked as `STREAM_STALLED`. While this is
+      // positive, the idle timer is suspended entirely; it re-arms only once EVERY in-flight call
+      // has answered, using a counter (not a boolean) because the wrapper's MCP bridge hands out a
+      // fresh id per JSON-RPC CallTool request and can in principle have more than one call in
+      // flight before the first is answered. This intentionally does NOT add a separate
+      // tool-execution timeout — that is a different feature, out of scope here.
+      let inFlightToolCalls = 0
 
       const clearStartupTimer = (): void => {
         if (startupTimer) clearTimeout(startupTimer)
@@ -605,10 +927,23 @@ export class ClaudeCodeCliAdapter {
         writeCommand({ type: 'shutdown' })
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, disposeGraceMs)
-          void Promise.resolve(child).finally(() => {
-            clearTimeout(timer)
-            resolve()
-          })
+          // This inner chain is its own, independently-floating promise (the surrounding `new
+          // Promise<void>` executor above never calls `reject`, so `gracefulShutdown()`'s own
+          // returned promise cannot reject from this step) — `.finally()` runs its callback on
+          // EITHER outcome but still re-raises the original rejection on its OWN returned promise
+          // afterwards, and that returned promise is not otherwise referenced. If `child` rejects
+          // (e.g. an execa spawn failure), this becomes an unhandled rejection entirely on its own,
+          // regardless of whether callers of `gracefulShutdown()` attach a `.catch()` — the `.catch`
+          // below is what actually closes that off.
+          void Promise.resolve(child)
+            .finally(() => {
+              clearTimeout(timer)
+              resolve()
+            })
+            .catch(() => {
+              /* already handled above by resolving the outer promise; nothing else to do with a
+                 rejected child here */
+            })
         })
         try {
           child.kill('SIGTERM')
@@ -617,37 +952,147 @@ export class ClaudeCodeCliAdapter {
         }
       }
 
+      // Fire-and-forget `gracefulShutdown()` at every non-awaited call site below: it is async and
+      // CAN reject (e.g. the `child` promise it awaits inside a `.finally` can itself reject, and
+      // `child.kill('SIGTERM')`'s own try/catch only guards the synchronous call, not any of the
+      // awaited steps before it) — a bare `void gracefulShutdown()` leaves that rejection with no
+      // attached handler, becoming an unhandled promise rejection that crashes the host process by
+      // default (Node >= 15). That is exactly the class of bug issue #39 is about; best-effort
+      // teardown must never surface as one. `settleOnce`'s own resolution must also never wait on
+      // this — shutdown is a courtesy to the wrapper process, not a precondition for the executor
+      // settling.
+      const shutdownInBackground = (): void => {
+        gracefulShutdown().catch((err: unknown) => {
+          const cause = toErrorCause(err)
+          try {
+            helpers.log.debug({
+              kind: 'graceful-shutdown-rejected',
+              message: `Best-effort wrapper shutdown failed; ignoring (the turn has already settled or is settling independently): ${cause.message}`,
+              payload: { cause: cause.message },
+            })
+          } catch {
+            /* logging itself must never escape a fire-and-forget cleanup path */
+          }
+        })
+      }
+
       const abortListener = (): void => {
-        void gracefulShutdown()
+        shutdownInBackground()
       }
       ctx.abortSignal.addEventListener('abort', abortListener, { once: true })
       const detachAbortListener = (): void =>
         ctx.abortSignal.removeEventListener('abort', abortListener)
 
+      // `fn` used to run with no try/catch: a throw inside a settlement callback (e.g.
+      // `helpers.reportGenerationStats(...)` or `ctx.ack()`/`ctx.nack()` throwing
+      // `E_LLM_EXECUTION_ALREADY_SIGNALLED` on a lost race) propagated out of `settleOnce` itself
+      // AFTER `settled` had already flipped true. Every OTHER settlement call site resolves the
+      // iteration promise from WITHIN its own `fn` (the startup/idle timers, the `error` branch, the
+      // Fix-B `onEvent(...).catch(...)` handler, the stdout `'end'` handler, the wrapper-process
+      // `.then/.catch`) — a throw meant that code never ran. The `result` branch is the one
+      // exception: it deliberately calls `finish()` AFTER `settleOnce(...)` returns (to await the
+      // wrapper's real exit first, see the comment at that call site) rather than inside `fn`, so a
+      // throw there aborted the branch before `finish()` was ever reached. Either way, nothing else
+      // in the file resolves the promise, and the executor hangs forever.
+      //
+      // The catch below guarantees resolution ONLY on that failure path — nacking (unless something
+      // already signalled) and force-resolving the iteration promise — without changing the timing
+      // of the NORMAL, non-throwing path for any caller (in particular, the `result` branch above
+      // still resolves only after awaiting the wrapper's exit when `fn` does not throw).
+      //
+      // Every step inside the `catch` is individually try/catch-guarded, and `resolveIteration?.()`
+      // runs in a `finally` gated on a local `threw` flag — NOT sequentially after the log/nack/
+      // shutdown calls — because review round 2 found that the original version called
+      // `helpers.log.error(...)` (itself capable of throwing, e.g. a caller-supplied logger) BEFORE
+      // `resolveIteration?.()`: if the logger threw, resolution was skipped entirely even though
+      // `settled` was already `true`, so every LATER `settleOnce` call anywhere in the file becomes
+      // a silent no-op (its own `if (settled) return` guard fires first) — hanging the executor with
+      // no remaining path to resolve it, and the throw itself would escape whichever caller invoked
+      // `settleOnce` (e.g. the stdout `'data'` listener's own catch block, becoming an uncaught
+      // exception). Guaranteeing `resolveIteration?.()` via `finally` makes `settleOnce` itself
+      // incapable of throwing or skipping resolution, regardless of which best-effort step fails.
       const settleOnce = (fn: () => void): void => {
         if (settled) return
         settled = true
         clearStartupTimer()
         clearIdleTimer()
         detachAbortListener()
-        fn()
+        let threw = false
+        try {
+          fn()
+        } catch (err) {
+          threw = true
+          try {
+            const cause = toErrorCause(err)
+            try {
+              helpers.log.error({
+                kind: 'settlement-handler-threw',
+                message: `A dispatch settlement handler threw while finalising the turn; nacking (if not already signalled) instead of leaving the executor hung: ${cause.message}`,
+                payload: { cause: cause.message },
+              })
+            } catch {
+              /* a throwing logger must not itself prevent nacking/resolving below */
+            }
+            // `ctx.ack()`/`ctx.nack()` are single-shot and throw `E_LLM_EXECUTION_ALREADY_SIGNALLED`
+            // on a second call — `fn` may have already signalled successfully before a LATER
+            // statement in the same callback threw (e.g. `reportGenerationStats` throwing before
+            // `ctx.ack()` runs is safe to nack; `ctx.ack()` itself throwing means it was already
+            // signalled by a race, and nacking again would itself throw). Only nack if nothing has
+            // signalled yet, and never let a lost race here escape as a second thrown error.
+            if (!ctx.isSignalled) {
+              try {
+                ctx.nack(new E_CLAUDE_CODE_CLI_STREAM_ERROR([cause.message], { cause }))
+              } catch {
+                /* lost a race with a concurrent signal between the check above and this call */
+              }
+            }
+          } catch {
+            /* toErrorCause itself is not expected to throw, but this is the last line of defence */
+          }
+        } finally {
+          if (threw) {
+            // Best-effort teardown; never lets a rejection or a synchronous throw from starting it
+            // stop resolution below.
+            try {
+              shutdownInBackground()
+            } catch {
+              /* starting shutdown must never prevent forced resolution */
+            }
+            // `fn` threw partway through, so whatever branch called `settleOnce` never reached its
+            // own `resolveIteration?.()`/`finish()` call (whether that call lived inside `fn` or,
+            // like the `result` branch, was deferred until after `settleOnce` returned) — force it
+            // here, unconditionally, regardless of what failed above. Calling an already-resolved
+            // `resolve()` again is a safe no-op. The NORMAL (non-throwing) path is untouched: this
+            // branch only runs when `fn` threw, so the `result` branch's deliberate "resolve only
+            // after awaiting the wrapper's exit" timing is unaffected when `fn` succeeds.
+            try {
+              resolveIteration?.()
+            } catch {
+              /* resolveIteration is a bare Promise executor's resolve(); it cannot throw, but this
+                 call must never be what makes settleOnce itself throw */
+            }
+          }
+        }
       }
 
       startupTimer = setTimeout(() => {
         settleOnce(() => {
           resolveIteration?.()
-          void gracefulShutdown()
+          shutdownInBackground()
           ctx.nack(new E_CLAUDE_CODE_CLI_STARTUP_TIMEOUT([startupTimeoutMs]))
         })
       }, startupTimeoutMs)
 
       const armIdleTimer = (): void => {
         if (!sawReady || !sawInit) return
+        // Suspended while any ADK tool call is executing — see `inFlightToolCalls`. Re-armed by
+        // `handleToolCallRequest`'s own completion path once the counter returns to zero.
+        if (inFlightToolCalls > 0) return
         clearIdleTimer()
         idleTimer = setTimeout(() => {
           settleOnce(() => {
             resolveIteration?.()
-            void gracefulShutdown()
+            shutdownInBackground()
             ctx.nack(new E_CLAUDE_CODE_CLI_STREAM_STALLED([streamIdleTimeoutMs]))
           })
         }, streamIdleTimeoutMs)
@@ -689,7 +1134,15 @@ export class ClaudeCodeCliAdapter {
         // here would indicate a malformed request from the bridge, not a legitimate call — defend
         // the same way the Ollama battery does for its own non-object case.
         const args: string | Record<string, unknown> = isObject(rawArgs) ? rawArgs : {}
-        helpers.reportToolCall(requestId, { tool: tool.name, args })
+        // Rename the wrapper's per-spawn `requestId` into a turn-unique ADK id BEFORE it touches
+        // any internal bookkeeping (reportToolCall/ToolCall/spoolStore/renderOutboundResult) —
+        // every wrapper spawn resets its own counter to "0" (see mcp_bridge.ts), so a
+        // multi-iteration dispatch would otherwise hand the SAME id to `ctx.storeToolCall`/
+        // `helpers.reportToolCall` twice and collide with the first (already-complete) call. The
+        // literal wrapper `requestId` is preserved untouched for both `tool_call_response`
+        // `writeCommand` calls below — the bridge correlates those by ITS OWN id, not this one.
+        const callId = (merged.toolCallIdFilter ?? deCollideToolCallIds)(requestId, ctx)
+        helpers.reportToolCall(callId, { tool: tool.name, args })
         const isArtifactTool = ArtifactTool.isArtifactTool(tool)
         let results: Tokenizable | SpooledArtifact | SpooledArtifact[] | Media | Media[] =
           new Tokenizable('')
@@ -713,11 +1166,11 @@ export class ClaudeCodeCliAdapter {
           } else if (looksLikeSpooledArtifact(raw)) {
             results = raw as SpooledArtifact
           } else if (typeof raw === 'string' || isInstanceOf(raw, 'Uint8Array', Uint8Array)) {
-            const reader = await spoolStore.write(requestId, raw)
+            const reader = await spoolStore.write(callId, raw)
             const ArtifactCtor = (tool as Tool).artifactConstructor?.() ?? SpooledArtifact
             results = new ArtifactCtor(reader)
           } else {
-            const reader = await spoolStore.write(requestId, String(raw))
+            const reader = await spoolStore.write(callId, String(raw))
             const ArtifactCtor = (tool as Tool).artifactConstructor?.() ?? SpooledArtifact
             results = new ArtifactCtor(reader)
           }
@@ -725,11 +1178,11 @@ export class ClaudeCodeCliAdapter {
           toolHadError = true
           results = new Tokenizable(isError(err) ? err.message : String(err))
         }
-        helpers.reportToolCall(requestId, { results, isError: toolHadError, isComplete: true })
+        helpers.reportToolCall(callId, { results, isError: toolHadError, isComplete: true })
         const completedAt = nowIso()
         await ctx.storeToolCall(
           new ToolCall({
-            id: requestId,
+            id: callId,
             tool: tool.name,
             args,
             checksum: computeChecksum(tool.name, args),
@@ -748,7 +1201,7 @@ export class ClaudeCodeCliAdapter {
         try {
           rendered = await renderOutboundResult({
             raw: results as string | Uint8Array | SpooledArtifact | Media | Media[],
-            callId: requestId,
+            callId,
             inline: isArtifactTool,
             spoolStore,
             unsupportedResultMediaPolicy:
@@ -803,7 +1256,10 @@ export class ClaudeCodeCliAdapter {
               extraArgs: merged.extraArgs,
             }
             writeCommand(runCommand)
-            armIdleTimer()
+            // No `armIdleTimer()` call here: its own `sawReady && sawInit` gate always returns
+            // immediately at this point, since `init` (per the wrapper protocol) always arrives
+            // strictly after `ready` — verified by the full existing test suite passing unchanged
+            // with this call removed. The `init` branch below is what actually starts the clock.
             return
           }
           if (event.type === 'init') {
@@ -817,17 +1273,40 @@ export class ClaudeCodeCliAdapter {
             if (event.mcpServerErrors && event.mcpServerErrors.length > 0) {
               settleOnce(() => {
                 finish()
-                void gracefulShutdown()
+                shutdownInBackground()
                 ctx.nack(
                   new E_CLAUDE_CODE_CLI_MCP_BRIDGE_STARTUP_FAILED([
                     event.mcpServerErrors!.join(', '),
                   ])
                 )
               })
+              return
             }
+            // Genuine progress: the handshake completed cleanly, so this is what actually starts
+            // the stream-idle clock (armIdleTimer's own `sawReady && sawInit` gate makes every
+            // earlier call, e.g. the one in the `ready` branch above, a no-op) — NOT merely "a
+            // stdout chunk arrived" (see the `'data'` listener below for why that distinction
+            // matters).
+            armIdleTimer()
             return
           }
           if (event.type === 'retry') {
+            // Deliberately does NOT re-arm the idle timer. This is a diagnostic passthrough of
+            // Claude's own `system/api_retry` line, not evidence that the model is making
+            // progress — it fires precisely WHILE the model is stalled waiting on a retryable
+            // upstream error. Under exponential backoff, retries commonly land well under
+            // `streamIdleTimeoutMs` apart (e.g. 1s/2s/4s/8s/16s/32s), so treating them as
+            // idle-resetting activity (as an unconditional per-chunk re-arm would) lets a
+            // sustained retry storm suppress the stall timeout indefinitely. Issue #39 itself does
+            // not establish what actually caused its "dispatch hangs for 11+ minutes despite a 60s
+            // streamIdleTimeoutMs" report — this is a PLAUSIBLE mechanism, not a confirmed root
+            // cause: `wrapper.ts` genuinely emits `retry` (api_retry passthrough, ~L369) and `log`
+            // (e.g. `malformed-command` ~L275, `duplicate-run-command` ~L253,
+            // malformed-stream-json inside `dispatchReader` ~L331) on the SAME stdout stream that
+            // carries progress events, with no periodic heartbeat gating their cadence, so the
+            // shape of the bug is real and reproducible (see the fix-C test below) — it is fixed
+            // for THIS scenario regardless of whether it was the exact mechanism behind the
+            // original report.
             helpers.log.warn({
               kind: 'claude-retry',
               message: `Claude API retry, attempt ${event.attempt}`,
@@ -842,14 +1321,34 @@ export class ClaudeCodeCliAdapter {
             if (event.isComplete) {
               await sealCurrentMessage()
             }
+            armIdleTimer()
             return
           }
           if (event.type === 'thought_delta') {
             helpers.reportThought(event.id, event.delta, { isComplete: event.isComplete })
+            armIdleTimer()
             return
           }
           if (event.type === 'tool_call_request') {
-            await handleToolCallRequest(event.requestId, event.tool, event.args)
+            // Suspend the model-stream idle clock for the duration of ADK tool EXECUTION, not just
+            // the round trip's arrival/departure: `streamIdleTimeoutMs` exists to catch the wrapper
+            // going silent while waiting on Claude, and a slow-but-healthy tool (a web search, a
+            // sandboxed run) produces no wrapper stdout of its own while it runs. Track with a
+            // counter, not a boolean, since more than one `tool_call_request` can be in flight
+            // before the first is answered (the MCP bridge assigns each JSON-RPC CallTool its own
+            // id independently of completion order).
+            inFlightToolCalls += 1
+            clearIdleTimer()
+            try {
+              await handleToolCallRequest(event.requestId, event.tool, event.args)
+            } finally {
+              inFlightToolCalls = Math.max(0, inFlightToolCalls - 1)
+            }
+            // Re-arm on completion, not arrival — a genuine round trip (request handled, response
+            // written back to the wrapper's stdin) is progress. `armIdleTimer`'s own
+            // `inFlightToolCalls > 0` gate means this is a no-op while any OTHER concurrent call is
+            // still executing; the timer resumes only once the last one has answered.
+            armIdleTimer()
             return
           }
           if (event.type === 'result') {
@@ -892,7 +1391,7 @@ export class ClaudeCodeCliAdapter {
           if (event.type === 'error') {
             settleOnce(() => {
               finish()
-              void gracefulShutdown()
+              shutdownInBackground()
               ctx.nack(new E_CLAUDE_CODE_CLI_WRAPPER_CRASHED([event.message]))
             })
             return
@@ -920,17 +1419,58 @@ export class ClaudeCodeCliAdapter {
             })
             return undefined
           }
-          void onEvent(event)
+          // `onEvent` is async and this callback is itself invoked synchronously from
+          // `child.stdout.on('data', ...)` (below): a bare `void onEvent(event)` would leave any
+          // rejection with no attached `.catch`, becoming an unhandled promise rejection that
+          // crashes the host process by default (Node >= 15) — a single malformed/erroring
+          // wrapper event or tool handler must fail only THIS candidate's dispatch, never the
+          // host. `settleOnce`'s own idempotency guard makes this safe even when `onEvent` already
+          // settled normally along another path before throwing/rejecting further down its body.
+          onEvent(event).catch((err: unknown) => {
+            const cause = toErrorCause(err)
+            settleOnce(() => {
+              resolveIteration?.()
+              shutdownInBackground()
+              ctx.nack(new E_CLAUDE_CODE_CLI_STREAM_ERROR([cause.message], { cause }))
+            })
+          })
           return event
         })
 
         child.stdout?.on('data', (chunk: Uint8Array) => {
-          // Parse BEFORE arming: `armIdleTimer()` is gated on `sawReady && sawInit`, and the very
-          // chunk that carries the `init` event is what flips `sawInit` — parsing first lets that
-          // same chunk's processing arm the timer immediately, rather than requiring a chunk AFTER
-          // init to ever arrive (which, on a genuinely idle stream, never happens).
-          eventReader.push(chunk)
-          armIdleTimer()
+          // Deliberately does NOT re-arm the idle timer unconditionally here (as an earlier
+          // version of this listener did) — that treated ANY stdout chunk as "progress", but
+          // `log`/`retry` `WrapperEvent`s (diagnostic passthroughs the wrapper emits on the same
+          // stdout stream — see `wrapper.ts`'s `log()` helper and its `system/api_retry`
+          // translation) carry no evidence the model is actually advancing, and a sustained
+          // sequence of them (e.g. exponential-backoff API retries a few seconds apart) could
+          // suppress the stall timeout indefinitely — this is a plausible mechanism for the
+          // "dispatch hangs for 11+ minutes despite a 60s streamIdleTimeoutMs" report (see issue
+          // #39), now fixed for that scenario. Each `onEvent` branch below now re-arms
+          // individually, only for event types that constitute genuine progress (`init`,
+          // `message_delta`, `thought_delta`, a completed `tool_call_request` round trip);
+          // `ready`/`retry`/`log` do not. `init`'s own branch handles the "very first chunk after
+          // the handshake" case that this comment used to describe, since `armIdleTimer()`'s
+          // `sawReady && sawInit` gate means no earlier call in this turn could have armed it
+          // anyway.
+          //
+          // `eventReader.push` calls `onLine` (below) SYNCHRONOUSLY, all the way down to the
+          // `JSON.parse`-failure `helpers.log.trace(...)` call — a throw from either escapes this
+          // listener directly, bypassing the Fix-B `onEvent(event).catch(...)` chain entirely
+          // (that chain only guards `onEvent`'s own async rejection, not a synchronous throw that
+          // happens before `onEvent` is even reached). An uncaught throw from inside a
+          // `'data'` listener is exactly as fatal to the host process as the unhandled rejection
+          // Fix B closed off, so route it through the same reliable settlement path.
+          try {
+            eventReader.push(chunk)
+          } catch (err) {
+            const cause = toErrorCause(err)
+            settleOnce(() => {
+              resolveIteration?.()
+              shutdownInBackground()
+              ctx.nack(new E_CLAUDE_CODE_CLI_STREAM_ERROR([cause.message], { cause }))
+            })
+          }
         })
         child.stdout?.on('end', () => {
           // A terminal `result`/`error` event was already observed and its own handler is (or will

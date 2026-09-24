@@ -34,6 +34,23 @@ export const E_CLAUDE_CODE_CLI_BINARY_NOT_FOUND = createException<[string]>(
   true
 )
 
+/**
+ * Thrown when no wrapper asset could be located on disk — neither the path resolved relative to
+ * the adapter module's own compiled location, nor the fallback resolved via this package's own
+ * bare-specifier self-reference, pointed at an existing file. The most common cause is a consumer
+ * bundling this adapter (e.g. Vite/Electron Forge bundling an Electron main process): the adapter
+ * module no longer lives inside `@nhtio/adk`'s own directory tree, and `@nhtio/adk` is not
+ * reachable as an ordinary dependency from the bundled code's new location either. Set the
+ * `wrapperPath` option to the built wrapper asset's absolute path to fix this.
+ */
+export const E_CLAUDE_CODE_CLI_WRAPPER_NOT_FOUND = createException<[string]>(
+  'E_CLAUDE_CODE_CLI_WRAPPER_NOT_FOUND',
+  'Could not locate the Claude Code CLI wrapper asset. Tried: %s. Set the wrapperPath option to the built wrapper asset absolute path to fix this.',
+  'E_CLAUDE_CODE_CLI_WRAPPER_NOT_FOUND',
+  500,
+  true
+)
+
 /** Thrown when the wrapper process itself fails to spawn. */
 export const E_CLAUDE_CODE_CLI_WRAPPER_SPAWN_ERROR = createException<[string]>(
   'E_CLAUDE_CODE_CLI_WRAPPER_SPAWN_ERROR',
