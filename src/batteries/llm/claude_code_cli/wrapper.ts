@@ -6,10 +6,11 @@
  *
  * @remarks
  * Self-contained with respect to `@nhtio/adk/*` — no such imports anywhere in this file or its
- * three siblings (`wire.ts`, `cli_protocol.ts`, `mcp_bridge.ts`). Only `node:*` builtins,
- * `@modelcontextprotocol/sdk`, and those three battery-local modules. Ships as a sibling dist
- * asset (see Decision C in the design notes) — never imported as a library, only ever spawned by
- * file path via `execa(process.execPath, [wrapperPath])` from `adapter.ts`.
+ * five siblings (`wire.ts`, `cli_protocol.ts`, `mcp_bridge.ts`, `message_id_state.ts`,
+ * `line_queue.ts`). Only `node:*` builtins, `@modelcontextprotocol/sdk`, and those five
+ * battery-local modules. Ships as a sibling dist asset (see Decision C in the design notes) —
+ * never imported as a library, only ever spawned by file path via
+ * `execa(process.execPath, [wrapperPath])` from `adapter.ts`.
  *
  * Carries no `@module` JSDoc tag: it is invisible to the `@module`-tag scraper that builds the
  * public `exports` map, and is added to `vite.config.mts`'s `build.lib.entry` as an explicit extra
@@ -19,7 +20,13 @@
 
 import { spawn } from 'node:child_process'
 import { startMcpBridge } from './mcp_bridge'
+import { createSerialQueue } from './line_queue'
 import { createNdjsonLineReader, encodeWrapperEvent } from './wire'
+import {
+  createMessageIdState,
+  claimPartialDeltaId,
+  claimCompleteMessageId,
+} from './message_id_state'
 import {
   parseClaudeStreamJsonLine,
   extractStreamEventTextDelta,
@@ -31,10 +38,63 @@ import type { WrapperCommand, WrapperRunCommand, WrapperEvent, ClaudeCodeCliExtr
 
 // ─── stdout writer (every emit is an awaited, flush-confirmed write) ───────────
 
-const writeEvent = (event: WrapperEvent): Promise<void> =>
-  new Promise<void>((resolve, reject) => {
-    process.stdout.write(encodeWrapperEvent(event), (err) => (err ? reject(err) : resolve()))
+// Every stdout write this process makes — including `log()`'s fire-and-forget ones below — is
+// counted while in flight. The normal-completion exit path (`shutdownNormally`, ~L220) awaits this
+// counter reaching zero before calling `process.exit(0)`: Node's Writable stream ordering already
+// guarantees any write ENQUEUED before the terminal `shutdown_complete` write has its callback fire
+// no later than that write's own callback (same underlying fd, same queue, strictly FIFO), but a
+// `log()` call is fire-and-forget by design and nothing stops one from being *enqueued* by a
+// still-settling async step (e.g. inside `bridge.closeTransport()`/`closeHttpServer()`, whose
+// internals this file does not control) concurrently with or after the terminal write — a counter
+// is the only mechanism that also covers a write that hasn't been enqueued yet at the moment we
+// check. `waitForPendingWrites()` resolves once every write outstanding AT THE TIME IT IS CALLED
+// has settled, which is the correct instant to poll it: called synchronously right before
+// `process.exit(0)`, with nothing awaited in between, so nothing new can slip in after the check.
+let pendingWriteCount = 0
+let pendingWritesSettled: (() => void) | undefined
+const trackPendingWrite = (promise: Promise<void>): Promise<void> => {
+  pendingWriteCount += 1
+  const settle = (): void => {
+    pendingWriteCount -= 1
+    if (pendingWriteCount === 0) pendingWritesSettled?.()
+  }
+  // Both branches must decrement — a rejected write (e.g. EPIPE on a closed stdout) is still a
+  // settled write for drain-tracking purposes; the rejection itself is handled by each write's own
+  // caller (writeEvent's caller, or log()'s own `.catch(() => {})`).
+  promise.then(settle, settle)
+  return promise
+}
+const waitForPendingWrites = (): Promise<void> => {
+  if (pendingWriteCount === 0) return Promise.resolve()
+  return new Promise<void>((resolve) => {
+    pendingWritesSettled = resolve
   })
+}
+
+const writeEvent = (event: WrapperEvent): Promise<void> =>
+  trackPendingWrite(
+    new Promise<void>((resolve) => {
+      process.stdout.write(encodeWrapperEvent(event), (err) => {
+        // issue #42 defect #2: writeEvent itself must never reject. The stream-level
+        // `process.stdout.on('error', ...)` handler installed in `main()` only covers the
+        // STREAM's own 'error' event — it does nothing to protect the many call sites throughout
+        // this file that `await`/`void` a `writeEvent(...)` call without their own `.catch()`
+        // (e.g. `ready`, `init`, `message_delta`, `result`, `grandchild_spawned`,
+        // `tool_call_request`). A rejected promise from one of those unguarded call sites is an
+        // unhandled rejection that crashes this process with exit code 1 — confirmed empirically
+        // against a real closed-stdout/EPIPE condition — precisely the ungraceful crash Part A
+        // (and this defect's stream-level handler) already exists to eliminate. Every caller
+        // that DOES branch on write success only ever does so via `waitForPendingWrites`'s
+        // settle-on-either-outcome tracking (see `trackPendingWrite` above), which is unaffected
+        // by resolving here instead of rejecting, so there is no behavioral loss in never
+        // rejecting.
+        if (err && (err as NodeJS.ErrnoException).code !== 'EPIPE') {
+          process.stderr.write(`[claude_code_cli wrapper] stdout write error: ${String(err)}\n`)
+        }
+        resolve()
+      })
+    })
+  )
 
 const log = (
   level: 'trace' | 'debug' | 'info' | 'warn' | 'error',
@@ -131,6 +191,19 @@ const buildClaudeArgv = (cmd: WrapperRunCommand, bridgeUrl: string): string[] =>
 /** Build the grandchild's env: start from the ambient env, then explicitly delete-then-set every credential/behavior variable this command controls. */
 const buildClaudeEnv = (cmd: WrapperRunCommand): Record<string, string | undefined> => {
   const env: Record<string, string | undefined> = { ...process.env }
+  // issue #42 defect #3: `ELECTRON_RUN_AS_NODE` in THIS wrapper's own env may have been injected
+  // by the adapter (Part C, issue #42) purely to make an Electron-host copy of the wrapper itself
+  // run as plain Node — that injection has nothing to do with the `claude` grandchild, which
+  // could itself be a Node/Electron-based binary whose behavior this stray var could unexpectedly
+  // change. The marker is set ONLY alongside the adapter's own injection (see adapter.ts's
+  // `wrapperEnv` construction), never by a consumer setting `ELECTRON_RUN_AS_NODE` in their own
+  // ambient environment for an unrelated reason — so stripping is conditional on the marker being
+  // present, not unconditional, to avoid surprising a consumer who relies on it being forwarded.
+  // Both the marker itself and the var it gates are removed; neither should reach `claude`.
+  if (env.ADK_CLAUDE_CODE_CLI_STRIP_RUN_AS_NODE_FROM_GRANDCHILD !== undefined) {
+    delete env.ELECTRON_RUN_AS_NODE
+  }
+  delete env.ADK_CLAUDE_CODE_CLI_STRIP_RUN_AS_NODE_FROM_GRANDCHILD
   delete env.ANTHROPIC_API_KEY
   delete env.ANTHROPIC_AUTH_TOKEN
   delete env.ANTHROPIC_BASE_URL
@@ -153,6 +226,21 @@ const buildClaudeEnv = (cmd: WrapperRunCommand): Record<string, string | undefin
 // ─── main ───────────────────────────────────────────────────────────────────
 
 const main = async (): Promise<void> => {
+  // issue #42 defect #2: a closed stdout (EPIPE — the reader on the other end of the pipe is
+  // gone) is a normal shutdown-adjacent condition here, not a bug. Without an explicit listener,
+  // Node's default behavior for an unhandled Writable 'error' event is to throw, crashing this
+  // process with exit code 1 — precisely the kind of ungraceful crash Part A exists to eliminate.
+  // Every write's own promise (see `trackPendingWrite`/`writeEvent` above) already settles via its
+  // callback's `err` branch regardless of this listener, so `waitForPendingWrites()` still
+  // resolves correctly on its own (nothing further to wait on once the reader is gone) — this
+  // listener's only job is to stop Node from treating a gone reader as fatal.
+  process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EPIPE') return
+    // Any other stdout stream error is unexpected; surface it to stderr for diagnosis (stdout
+    // itself may not be usable) rather than silently discarding it.
+    process.stderr.write(`[claude_code_cli wrapper] stdout stream error: ${String(err)}\n`)
+  })
+
   let bridge: McpBridge | undefined
   let grandchild: ChildProcess | undefined
   let shuttingDown = false
@@ -201,7 +289,11 @@ const main = async (): Promise<void> => {
 
   // A 5-second backstop, entirely separate from the normal-completion path: if the graceful
   // sequence above hangs, this fires, force-kills the grandchild's process group unconditionally,
-  // and calls process.exit(1) — the ONE and ONLY process.exit() call on the normal-completion path.
+  // and calls process.exit(1) — a SEPARATE, hang-recovery process.exit() call from the one
+  // `shutdownNormally` makes below on its own (non-hung) success path. The two can never both run
+  // for the same shutdown: `disarmBackstop()` always clears this timer before `shutdownNormally`'s
+  // own `process.exit(0)`, and this callback body itself exits before returning control, so at most
+  // one of the two `process.exit()` calls in this function's family actually executes.
   let backstopTimer: ReturnType<typeof setTimeout> | undefined
   const armBackstop = (): void => {
     backstopTimer = setTimeout(() => {
@@ -220,15 +312,56 @@ const main = async (): Promise<void> => {
     shuttingDown = true
     armBackstop()
     await runShutdownSequence(disposeGraceMs)
-    disarmBackstop()
     process.exitCode = 0
-    // Natural return — never process.exit() on this path, so a stdout write in flight is never
-    // truncated by an immediate process termination.
+    // Explicit process.exit(0) — this is the actual fix for the reported bug (issue #42): when the
+    // host process is an Electron main process (or any other host with a persistent, non-draining
+    // event loop — an open BrowserWindow, a live timer, an open server socket the host itself
+    // owns), a bare "fall off the end of main()" never terminates the process, because Node only
+    // exits on its own once the event loop has NOTHING left to do, and this wrapper does not own
+    // every handle that might be keeping that loop alive in an Electron host. A plain Node CLI host
+    // exits fine either way (its own loop drains once `main()`'s promise settles with nothing else
+    // pending), so this exit is safe and equivalent there — it is only ever OBSERVABLE as a fix in
+    // a host with something else keeping the loop alive.
+    //
+    // `runShutdownSequence` above already `await`s `writeEvent({ type: 'shutdown_complete' })`
+    // directly, so its OWN write's callback (and, by Node's strictly-FIFO per-stream write-callback
+    // ordering, every write enqueued to this same stdout stream BEFORE it) has already fired by
+    // this point. That does not cover every write, though: `log()` (used for diagnostics
+    // throughout this file, including possibly from something like a lingering 'close'/'error'
+    // handler on the MCP bridge's HTTP server) is fire-and-forget by design (`void writeEvent(...)`)
+    // and can be invoked from a callback that is not sequenced via any `await` in this function —
+    // such a call could still be IN FLIGHT (enqueued to stdout, callback not yet fired) at this
+    // exact point, arbitrarily AFTER `shutdown_complete`'s own write settled, which the FIFO
+    // guarantee above says nothing about. `waitForPendingWrites()` (see its definition and the
+    // `pendingWriteCount` machinery near the top of this file) is the flush barrier that actually
+    // accounts for that case: it tracks every `writeEvent(...)` call site (not just this one), and
+    // resolves only once every write outstanding at the moment it's called has actually settled —
+    // so a `log()` call racing the shutdown sequence is never truncated by this `process.exit(0)`.
+    //
+    // issue #42 defect #2: the backstop (armed above) MUST stay live through this await, not be
+    // disarmed before it — a stuck/backpressured stdout flush (e.g. a slow or paused reader on
+    // the other end of the pipe) is exactly the kind of hang Part A exists to recover from, and
+    // disarming here would leave this final await with no timeout protection at all. Disarm only
+    // now, immediately before the exit call that makes the backstop's own alternate exit path
+    // moot.
+    await waitForPendingWrites()
+    disarmBackstop()
+    process.exit(0)
   }
 
   // Idempotent SIGTERM/SIGINT handling. Registering a handler REPLACES Node's default
-  // terminate-on-signal behavior, so — unlike the normal-completion path — this path explicitly
-  // calls process.exit() itself once the shutdown sequence completes.
+  // terminate-on-signal behavior, so this path must explicitly call process.exit() itself once the
+  // shutdown sequence completes — same requirement `shutdownNormally` above now has for the same
+  // reason (a signal handler being registered at all is itself evidence of "something else may be
+  // keeping this event loop alive", exactly the condition that motivates `shutdownNormally`'s own
+  // explicit exit). This path does not thread through the `pendingWriteCount` flush barrier the
+  // way `shutdownNormally` does — a killed/interrupted process discarding its last `log()` line is
+  // an acceptable loss on a signal-driven shutdown, unlike the normal-completion path where
+  // preserving every diagnostic write matters more. Uses its own `handlingSignal` guard rather than
+  // the `shuttingDown` flag `shutdownNormally` sets, so the two CAN run concurrently if a signal
+  // arrives mid-shutdown — a pre-existing race, unaffected by this fix: whichever `process.exit()`
+  // call reaches the event loop first wins, and Node ignores a second one against an
+  // already-terminating process.
   let handlingSignal = false
   const onSignal = (): void => {
     if (handlingSignal) return
@@ -322,8 +455,38 @@ const main = async (): Promise<void> => {
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
+    // issue #42 defect #1: report the grandchild's pid (== pgid, since it's detached) so the
+    // adapter can escalate a SIGKILL to the whole process group, not just the wrapper itself.
+    if (typeof grandchild.pid === 'number') {
+      void writeEvent({ type: 'grandchild_spawned', pid: grandchild.pid })
+    }
 
-    let partialMessageId: string | undefined
+    // Per-spawn message-id claim/reset state (issue #43, fix B) — see `message_id_state.ts` for
+    // why this lives in its own synchronous, awaitless module rather than as loose locals mutated
+    // around an `await`.
+    const messageIdState = createMessageIdState()
+
+    // Every stdout `'data'` chunk can carry several NDJSON lines, and `createNdjsonLineReader`
+    // invokes its callback SYNCHRONOUSLY, once per complete line, in the order they appear in the
+    // chunk — but `handleClaudeLine` itself is `async` and `await`s (e.g. `writeEvent`), so firing
+    // it unawaited per line (the original shape here) let a SECOND line's handler start running,
+    // reach its own synchronous prefix, and even complete entirely, WHILE the first line's handler
+    // was still suspended at an `await`. That is exactly the race a verification pass caught
+    // against the initial fix-B patch: two `assistant`/`user` lines arriving in one chunk could
+    // have their `writeEvent(..., isComplete: true)` calls (and any state built on top of them)
+    // resolve out of order relative to the input. `createSerialQueue` (see `line_queue.ts`) chains
+    // every line's handling onto a single promise tail, so the processing of one line strictly
+    // happen-afters the full completion (including every `await` inside it) of the line before it
+    // — `messageIdState`'s claim/reset calls, and the `writeEvent`s they gate, always run in input
+    // order, with no window for a later line to observe stale state left over from an earlier one
+    // still in flight. A handler that throws/rejects is caught by the queue's `onError` so one bad
+    // line can never break the chain for every line after it.
+    const lineQueue = createSerialQueue((err: unknown) => {
+      log('error', 'stream-line-handler-error', 'Error handling a Claude stream-json line.', {
+        // eslint-disable-next-line adk/prefer-is-error -- self-contained wrt @nhtio/adk/* (Decision A)
+        detail: err instanceof Error ? err.message : String(err),
+      })
+    })
 
     const dispatchReader = createNdjsonLineReader((raw) => {
       const line = parseClaudeStreamJsonLine(raw)
@@ -338,7 +501,7 @@ const main = async (): Promise<void> => {
         )
         return undefined
       }
-      void handleClaudeLine(line)
+      lineQueue.enqueue(() => handleClaudeLine(line))
       return line
     })
     grandchild.stdout?.on('data', (chunk: Uint8Array) => {
@@ -379,8 +542,12 @@ const main = async (): Promise<void> => {
         if (line.parent_tool_use_id && command.forwardSubagentText !== true) return
         const delta = extractStreamEventTextDelta(line)
         if (delta !== undefined) {
-          const id = partialMessageId ?? 'message'
-          partialMessageId = id
+          // `claimPartialDeltaId` reads AND assigns `messageIdState.partialMessageId` in one
+          // synchronous call, with no `await` in between — see `message_id_state.ts`'s header for
+          // why this matters (the line-handling queue above already serializes calls into this
+          // function, but the claim itself staying synchronous is what keeps this function safe to
+          // call from anywhere, including a future caller that isn't behind that queue).
+          const id = claimPartialDeltaId(messageIdState)
           await writeEvent({ type: 'message_delta', id, delta })
         }
         return
@@ -389,14 +556,20 @@ const main = async (): Promise<void> => {
         if (line.parent_tool_use_id && command.forwardSubagentText !== true) return
         const text = extractMessageText(line)
         if (text.length > 0) {
-          const id = partialMessageId ?? 'message'
+          // Claim this message's id AND reset the state for whatever distinct message this SAME
+          // spawn may still emit next (text -> tool_use -> more text) in one synchronous call,
+          // strictly BEFORE the `await writeEvent(...)` below — the original fix-B patch mutated
+          // `partialMessageId`/`messageIndex` AFTER that `await`, which let a second message's
+          // handler (running concurrently, per the queue-serialization note above) read the
+          // stale, not-yet-reset id and collide with the one just sealed here (issue #43, fix B
+          // race, caught by a subsequent verification pass against f3d7fde).
+          const { id, hadPriorPartialDelta } = claimCompleteMessageId(messageIdState)
           // If no prior stream_event deltas arrived for this id, the complete message carries the
           // ONLY copy of the text — send it as the delta itself, not an empty seal, or the
           // adapter's per-id accumulator (which treats the first call's deltaText as the full
           // content) would create an empty message despite real text having arrived.
-          const delta = partialMessageId === undefined ? text : ''
+          const delta = hadPriorPartialDelta ? '' : text
           await writeEvent({ type: 'message_delta', id, delta, isComplete: true })
-          partialMessageId = id
         }
         return
       }
@@ -425,6 +598,15 @@ const main = async (): Promise<void> => {
       }).catch(() => {})
     })
     grandchild.on('exit', (code, signal) => {
+      // issue #42 round-2 defect #1: tell the adapter the grandchild is gone, unconditionally and
+      // regardless of the `sawResult`/`shuttingDown` guard below — this is what lets the adapter
+      // clear its own cached pid/pgid so a later SIGKILL escalation never signals a stale value
+      // that the OS may have already reused for an unrelated process group. This wrapper process
+      // itself may be mid-shutdown (or about to be) when this fires; Node still delivers the
+      // `ChildProcess` 'exit' event to this handler regardless, unless the wrapper is wedged badly
+      // enough to never run any JS at all — in which case no event this process could emit would
+      // help the adapter anyway (see the matching comment on `gracefulShutdown()` in adapter.ts).
+      void writeEvent({ type: 'grandchild_exited' }).catch(() => {})
       if (sawResult || shuttingDown) return
       void writeEvent({
         type: 'error',

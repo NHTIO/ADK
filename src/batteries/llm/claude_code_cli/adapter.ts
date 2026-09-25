@@ -19,6 +19,7 @@
  */
 
 import { sha256 } from 'js-sha256'
+import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
 import { deCollideToolCallIds } from '../chat_common'
 import { isError, isObject, isInstanceOf } from '@nhtio/adk/guards'
@@ -352,8 +353,10 @@ const resolveWrapperPathWithFallback = async (
   // stays `undefined` and `isCjsWrapper` defaults `false` — `wrapperBasename` picks the `.mjs`
   // variant even though the CALLING bundle is CJS. This is harmless: the wrapper asset is never
   // imported/required in-process, only spawned as a completely separate `node` child process (see
-  // `execaFn(process.execPath, [wrapperPath, ...])` at the call site below), and Node runs a
-  // `.mjs`-suffixed file as ESM regardless of the PARENT process's own module format. Picking `.cjs`
+  // `execaFn(wrapperExecPath, [wrapperPath, ...])` at the call site below — `wrapperExecPath`
+  // defaults to `process.execPath`, same as always, but is overridable per issue #42's part C),
+  // and Node runs a `.mjs`-suffixed file as ESM regardless of the PARENT process's own module
+  // format. Picking `.cjs`
   // here would be no more correct — either extension resolves to a real, runnable file once
   // self-reference finds `@nhtio/adk`'s own `dist/` directory.
   const isCjsWrapper = relative !== undefined && relative.endsWith('.cjs')
@@ -856,9 +859,76 @@ export class ClaudeCodeCliAdapter {
 
       // ── Step 9: spawn the wrapper ──────────────────────────────────────────
       const spoolStore = merged.spoolStore ?? new InMemorySpoolStore()
+      // `wrapperExecPath` lets a consumer override the executable entirely (e.g. a Node binary
+      // they bundle alongside their Electron app specifically to run this wrapper, the only
+      // evidence-backed mitigation for an Electron host with the `RunAsNode` Fuse disabled — see
+      // `autoDetectElectronHost`'s own doc comment in types.ts for the measured matrix behind that
+      // claim). Left unset, this defaults to `process.execPath`, today's plain-Node-host behavior,
+      // completely unchanged.
+      const wrapperExecPath = merged.wrapperExecPath ?? process.execPath
+      // Issue #42's part C: `process.versions.electron` is set only inside an Electron process
+      // (main OR renderer with Node integration) — never in a plain Node host, so this default is
+      // inert everywhere else. When true, `ELECTRON_RUN_AS_NODE: '1'` is merged into the spawned
+      // wrapper's env: this is Electron's own documented mechanism for making a spawned copy of
+      // the Electron binary run as plain Node instead of booting a second full Electron app with
+      // the wrapper script as its main script (the bug this env var is applied here specifically
+      // to fix). `wrapperEnv` (applied AFTER this default, so it always wins on a key collision)
+      // is the escape hatch for a consumer who wants to force it off (`{ ELECTRON_RUN_AS_NODE:
+      // undefined }`) or who is spawning a `wrapperExecPath` that doesn't need it at all.
+      const isElectronHost = process.versions.electron !== undefined
+      const wantsElectronRunAsNode = (merged.autoDetectElectronHost ?? true) && isElectronHost
+      // issue #42 round-2 defect #3: the marker below must reflect the env value the wrapper will
+      // ACTUALLY observe once `merged.wrapperEnv` (spread last, so it always wins on a key
+      // collision) is applied — not `wantsElectronRunAsNode` alone. Previously the marker was
+      // decided purely from `wantsElectronRunAsNode` and lived under a *different* key than
+      // `ELECTRON_RUN_AS_NODE` itself, so a consumer opting OUT via
+      // `wrapperEnv: { ELECTRON_RUN_AS_NODE: undefined }` removed our injected value but never
+      // touched the marker — the wrapper still stripped the grandchild's own ambient
+      // `ELECTRON_RUN_AS_NODE` even though the adapter no longer injected anything. A consumer who
+      // explicitly supplies their own `ELECTRON_RUN_AS_NODE` key in `wrapperEnv` — to turn it off,
+      // to force it on for their own unrelated reason, or anything else — has taken ownership of
+      // that variable, so the marker (which exists ONLY to let the wrapper distinguish "the
+      // adapter's own injection" from "the consumer's/host's ambient environment") must never be
+      // set in that case, regardless of what value they chose.
+      const consumerOverridesElectronRunAsNode =
+        merged.wrapperEnv !== undefined &&
+        Object.prototype.hasOwnProperty.call(merged.wrapperEnv, 'ELECTRON_RUN_AS_NODE')
+      const weInjectedElectronRunAsNode =
+        wantsElectronRunAsNode && !consumerOverridesElectronRunAsNode
+      const wrapperEnv: Record<string, string | undefined> | undefined =
+        wantsElectronRunAsNode || merged.wrapperEnv !== undefined
+          ? {
+              ...(wantsElectronRunAsNode ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
+              ...(weInjectedElectronRunAsNode
+                ? {
+                    // issue #42 defect #3: `buildClaudeEnv()` in the wrapper starts from a full
+                    // copy of ITS OWN `process.env` — which now includes the line above — and
+                    // forwards nearly all of it, unmodified, to the `claude` grandchild. `claude`
+                    // itself could be a Node/Electron-based binary, and this stray var could
+                    // unexpectedly change ITS behavior too, which this auto-detect option was
+                    // never meant to affect. This private marker (stripped by the wrapper itself,
+                    // see `buildClaudeEnv`, and never forwarded any further) tells the wrapper
+                    // "I am the one who injected ELECTRON_RUN_AS_NODE, not the consumer's own
+                    // ambient environment" — so the wrapper can distinguish the two and only strip
+                    // its OWN injection, leaving an ambient `ELECTRON_RUN_AS_NODE` the consumer set
+                    // themselves (e.g. for an unrelated reason, predating this option entirely)
+                    // untouched, preserving today's forwarding behavior for that case. Set ONLY
+                    // when the final env's `ELECTRON_RUN_AS_NODE` is truly ours (see
+                    // `weInjectedElectronRunAsNode` above) — never when the consumer's own
+                    // `wrapperEnv` takes ownership of that key, even to the same `'1'` value.
+                    ADK_CLAUDE_CODE_CLI_STRIP_RUN_AS_NODE_FROM_GRANDCHILD: '1',
+                  }
+                : {}),
+              ...merged.wrapperEnv,
+            }
+          : undefined
       let child: ReturnType<ExecaLike>
       try {
-        child = execaFn(process.execPath, [wrapperPath], { cleanup: true })
+        child = execaFn(
+          wrapperExecPath,
+          [wrapperPath],
+          wrapperEnv !== undefined ? { cleanup: true, env: wrapperEnv } : { cleanup: true }
+        )
       } catch (err) {
         ctx.nack(
           new E_CLAUDE_CODE_CLI_WRAPPER_SPAWN_ERROR([isError(err) ? err.message : String(err)])
@@ -888,9 +958,20 @@ export class ClaudeCodeCliAdapter {
       // this, a startup or stream-idle timeout would settle ctx (nack) but never resolve the outer
       // promise, hanging the executor forever.
       let resolveIteration: (() => void) | undefined
-      let currentMessageId: string | undefined
-      let currentMessageBuffer = ''
-      let sealedMessage = false
+      // A fresh wrapper spawns per dispatch iteration, but `helpers`/`ctx` (and their `messageStreams`/
+      // `thoughtStreams` completed-id bookkeeping) live for the WHOLE dispatch — so the wrapper's own
+      // ids (unique only WITHIN one spawn, e.g. "message-0") must be namespaced per iteration before
+      // they reach `helpers.reportMessage`/`reportThought` or `ctx.storeMessage`, or a second iteration
+      // reusing the same wrapper-local id collides with the first's already-sealed stream (issue #43,
+      // fix A). One nonce per executor invocation, mirroring `anthropic_messages`'s
+      // `dispatchStreamId`/`responseId` convention.
+      const dispatchNonce = uuidv6()
+      // Keyed by the (already-namespaced) ADK message id, not the wrapper-local one — a single spawn
+      // can legitimately emit more than one DISTINCT assistant message (text -> tool_use -> more
+      // text), each needing its own accumulator and seal-once guard; a single flat pair of variables
+      // would silently drop every message after the first, or concatenate their text together
+      // (issue #43, fix C).
+      const messageState = new Map<string, { buffer: string; sealed: boolean }>()
       // Count of `tool_call_request`s currently executing (accepted but not yet answered with a
       // `tool_call_response`). `streamIdleTimeoutMs` measures MODEL-stream idleness — the wrapper
       // waiting on Claude — not ADK tool-execution latency; a real tool (a web search, a sandboxed
@@ -902,6 +983,11 @@ export class ClaudeCodeCliAdapter {
       // flight before the first is answered. This intentionally does NOT add a separate
       // tool-execution timeout — that is a different feature, out of scope here.
       let inFlightToolCalls = 0
+      // issue #42 defect #1: the `claude` grandchild's pid (== its own process group id, since the
+      // wrapper spawns it with `detached: true`), reported via `grandchild_spawned`. Undefined
+      // until that event arrives (or if talking to a wrapper build that predates it) — the
+      // SIGKILL escalation below simply skips the group-kill in that case, unchanged from before.
+      let grandchildPid: number | undefined
 
       const clearStartupTimer = (): void => {
         if (startupTimer) clearTimeout(startupTimer)
@@ -925,30 +1011,92 @@ export class ClaudeCodeCliAdapter {
 
       const gracefulShutdown = async (): Promise<void> => {
         writeCommand({ type: 'shutdown' })
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, disposeGraceMs)
-          // This inner chain is its own, independently-floating promise (the surrounding `new
-          // Promise<void>` executor above never calls `reject`, so `gracefulShutdown()`'s own
-          // returned promise cannot reject from this step) — `.finally()` runs its callback on
-          // EITHER outcome but still re-raises the original rejection on its OWN returned promise
-          // afterwards, and that returned promise is not otherwise referenced. If `child` rejects
-          // (e.g. an execa spawn failure), this becomes an unhandled rejection entirely on its own,
-          // regardless of whether callers of `gracefulShutdown()` attach a `.catch()` — the `.catch`
-          // below is what actually closes that off.
-          void Promise.resolve(child)
-            .finally(() => {
-              clearTimeout(timer)
-              resolve()
-            })
-            .catch(() => {
-              /* already handled above by resolving the outer promise; nothing else to do with a
-                 rejected child here */
-            })
-        })
+        const waitForChildExit = (timeoutMs: number): Promise<void> =>
+          new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, timeoutMs)
+            // This inner chain is its own, independently-floating promise (the surrounding `new
+            // Promise<void>` executor above never calls `reject`, so this helper's own returned
+            // promise cannot reject from this step) — `.finally()` runs its callback on EITHER
+            // outcome but still re-raises the original rejection on its OWN returned promise
+            // afterwards, and that returned promise is not otherwise referenced. If `child` rejects
+            // (e.g. an execa spawn failure), this becomes an unhandled rejection entirely on its
+            // own, regardless of whether callers attach a `.catch()` — the `.catch` below is what
+            // actually closes that off.
+            void Promise.resolve(child)
+              .finally(() => {
+                clearTimeout(timer)
+                resolve()
+              })
+              .catch(() => {
+                /* already handled above by resolving the outer promise; nothing else to do with a
+                   rejected child here */
+              })
+          })
+        await waitForChildExit(disposeGraceMs)
         try {
           child.kill('SIGTERM')
         } catch {
           /* already exited */
+        }
+        // Escalate to SIGKILL if the wrapper is still alive after SIGTERM: a wrapper wedged deeply
+        // enough to ignore its own `shutdown` command AND its own 5-second backstop timer (see
+        // wrapper.ts) — e.g. the OS itself is stalled, or the process is stuck in an
+        // uninterruptible syscall — must not be left running indefinitely just because this
+        // adapter only ever asked nicely once. Re-uses the SAME `disposeGraceMs` window as the
+        // first wait (this is a fixed, bounded, best-effort reap either way, not a precisely
+        // tuned budget), so the total worst-case background teardown time is `2 * disposeGraceMs`
+        // — still entirely off the executor's own settlement path (see the `result`/`error`
+        // branches, both of which call `shutdownInBackground()` without awaiting it).
+        await waitForChildExit(disposeGraceMs)
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          /* already exited */
+        }
+        // issue #42 round-2 defect #1: SIGKILL cannot be caught, so if the wrapper above is the
+        // one that gets killed, its own `process.on('exit', () => killGrandchildGroup(...))`
+        // cleanup can never run — the `claude` grandchild's entire detached process group would
+        // otherwise be orphaned. Kill that group directly, in addition to (not instead of) the
+        // wrapper itself — but ONLY when there is still positive evidence the group is genuinely
+        // the grandchild's own:
+        //
+        // 1. `grandchildPid` must still be set. It is cleared the instant a `grandchild_exited`
+        //    event arrives (see that branch above), so once the grandchild has actually exited,
+        //    this stays `undefined` and no signal is ever sent — a bare "the group already
+        //    exited" fact is not enough on its own to trust a remembered pid/pgid forever: once
+        //    every process in a group has exited, POSIX allows the OS to reuse that exact same
+        //    numeric pgid for a LATER, entirely unrelated process group, and signalling a stale
+        //    pid we merely haven't heard about yet would SIGKILL that unrelated group instead.
+        // 2. The wrapper must not have exited NORMALLY (`exitCode === null`). A normal exit means
+        //    its own `process.on('exit', () => killGrandchildGroup('SIGTERM'))` handler
+        //    (wrapper.ts) already ran, so signalling again would be redundant at best and a
+        //    SIGKILL against a since-reused pgid at worst. Note this is NOT a liveness test. The
+        //    wrapper traps SIGTERM/SIGINT and leaves via `process.exit()`, so those end with a
+        //    numeric `exitCode`; only an UNTRAPPED signal — above all the `SIGKILL` sent just above
+        //    — leaves `exitCode === null` (the signal is in `signalCode`). That is deliberate: such
+        //    a wrapper never ran its exit handler, so its group is exactly the one that would be
+        //    orphaned, and this is the one place left to reap it.
+        //
+        // Residual, ACKNOWLEDGED gaps (neither can be closed from here without a way to verify
+        // process-group ownership, which POSIX does not portably offer):
+        //
+        // - Unknown pid. If this runs before `grandchild_spawned` arrives, `grandchildPid` is
+        //   `undefined` and nothing is signalled. That does NOT mean `claude` hasn't spawned: the
+        //   wrapper may have spawned it and not yet written, or we not yet read, the event. The
+        //   wrapper's own `exit` handler still reaps the group on every non-SIGKILL path, so the
+        //   only uncovered case is a wrapper SIGKILLed between spawning `claude` and its event
+        //   reaching us — which can orphan that group.
+        // - Stale pgid. A wrapper that is SIGSTOPped (or otherwise wedged) cannot report
+        //   `grandchild_exited`, so if the grandchild group has already exited and the OS has
+        //   reused its number within the ~`2 * disposeGraceMs` escalation window, this signals an
+        //   unrelated group. PID/pgid reuse that fast is unlikely under ordinary process churn,
+        //   but it is not ruled out.
+        if (typeof grandchildPid === 'number' && child.exitCode === null) {
+          try {
+            process.kill(-grandchildPid, 'SIGKILL')
+          } catch {
+            /* group already gone, or platform doesn't support negative-pid signalling */
+          }
         }
       }
 
@@ -986,19 +1134,19 @@ export class ClaudeCodeCliAdapter {
       // `fn` used to run with no try/catch: a throw inside a settlement callback (e.g.
       // `helpers.reportGenerationStats(...)` or `ctx.ack()`/`ctx.nack()` throwing
       // `E_LLM_EXECUTION_ALREADY_SIGNALLED` on a lost race) propagated out of `settleOnce` itself
-      // AFTER `settled` had already flipped true. Every OTHER settlement call site resolves the
-      // iteration promise from WITHIN its own `fn` (the startup/idle timers, the `error` branch, the
-      // Fix-B `onEvent(...).catch(...)` handler, the stdout `'end'` handler, the wrapper-process
-      // `.then/.catch`) — a throw meant that code never ran. The `result` branch is the one
-      // exception: it deliberately calls `finish()` AFTER `settleOnce(...)` returns (to await the
-      // wrapper's real exit first, see the comment at that call site) rather than inside `fn`, so a
-      // throw there aborted the branch before `finish()` was ever reached. Either way, nothing else
-      // in the file resolves the promise, and the executor hangs forever.
+      // AFTER `settled` had already flipped true. EVERY settlement call site (the startup/idle
+      // timers, the `result` branch, the `error` branch, the Fix-B `onEvent(...).catch(...)`
+      // handler, the stdout `'end'` handler, the wrapper-process `.then/.catch`) resolves the
+      // iteration promise from WITHIN its own `fn` — as of issue #42's part B, this now includes
+      // the `result` branch too (it used to call `finish()` AFTER `settleOnce(...)` returned,
+      // deliberately awaiting the wrapper's real OS exit first; it no longer waits on that at all —
+      // see the long comment at that call site for why). A throw inside `fn` means that resolving
+      // code never ran, and nothing else in the file resolves the promise, so the executor hangs
+      // forever without the catch below.
       //
       // The catch below guarantees resolution ONLY on that failure path — nacking (unless something
       // already signalled) and force-resolving the iteration promise — without changing the timing
-      // of the NORMAL, non-throwing path for any caller (in particular, the `result` branch above
-      // still resolves only after awaiting the wrapper's exit when `fn` does not throw).
+      // of the NORMAL, non-throwing path for any caller.
       //
       // Every step inside the `catch` is individually try/catch-guarded, and `resolveIteration?.()`
       // runs in a `finally` gated on a local `threw` flag — NOT sequentially after the log/nack/
@@ -1098,19 +1246,38 @@ export class ClaudeCodeCliAdapter {
         }, streamIdleTimeoutMs)
       }
 
-      const sealCurrentMessage = async (): Promise<void> => {
-        if (sealedMessage || currentMessageId === undefined) return
-        sealedMessage = true
+      // Seals ONE message by its (already-namespaced) ADK id. Every distinct message this iteration
+      // produced gets its own `messageState` entry, so calling this once per `event.isComplete`
+      // (one per message) correctly stores each of them, rather than only ever the first (issue
+      // #43, fix C).
+      const sealMessage = async (id: string | undefined): Promise<void> => {
+        if (id === undefined) return
+        const entry = messageState.get(id)
+        if (entry === undefined || entry.sealed) return
+        entry.sealed = true
         await ctx.storeMessage(
           new Message({
-            id: currentMessageId,
+            id,
             role: 'assistant',
-            content: currentMessageBuffer,
+            content: entry.buffer,
             identity: merged.selfIdentity ?? 'assistant',
             createdAt: nowIso(),
             updatedAt: nowIso(),
           })
         )
+      }
+      // The `result`-handler's defensive call site below used to seal only `currentMessageId` — the
+      // single most-recently-seen message. That silently dropped any EARLIER message that was still
+      // unsealed when `result` arrived (e.g. a spawn that emits two distinct messages before the
+      // wrapper's `result` line, where the first message's own `isComplete` seal path was, for
+      // whatever reason, never reached). Iterate every entry in `messageState` instead — Map
+      // iteration order is insertion order in JS, so this seals any still-open messages in the same
+      // order they were first seen — rather than defaulting to only the last one (issue #43,
+      // verification-pass LOW finding against f3d7fde).
+      const sealCurrentMessage = async (): Promise<void> => {
+        for (const id of messageState.keys()) {
+          await sealMessage(id)
+        }
       }
 
       const handleToolCallRequest = async (
@@ -1262,6 +1429,23 @@ export class ClaudeCodeCliAdapter {
             // with this call removed. The `init` branch below is what actually starts the clock.
             return
           }
+          if (event.type === 'grandchild_spawned') {
+            // issue #42 defect #1: capture the grandchild's pid/pgid for the SIGKILL-escalation
+            // path in `gracefulShutdown()` above. Additive event — a wrapper build that predates
+            // it simply never sends this, and `grandchildPid` just stays undefined.
+            grandchildPid = event.pid
+            return
+          }
+          if (event.type === 'grandchild_exited') {
+            // issue #42 round-2 defect #1: the grandchild is gone — clear the cached pid/pgid so
+            // `gracefulShutdown()`'s escalation never signals it again. Once a process group's
+            // members have all exited, the OS is free to reuse that same numeric pgid for an
+            // entirely unrelated future process group; without this, a `grandchild_spawned` seen
+            // early in a long-lived wrapper session could still be "remembered" and SIGKILLed long
+            // after it stopped meaning anything.
+            grandchildPid = undefined
+            return
+          }
           if (event.type === 'init') {
             sawInit = true
             maybeClearStartupTimer()
@@ -1315,17 +1499,29 @@ export class ClaudeCodeCliAdapter {
             return
           }
           if (event.type === 'message_delta') {
-            currentMessageId = event.id
-            currentMessageBuffer += event.delta
-            helpers.reportMessage(event.id, event.delta, { isComplete: event.isComplete })
+            // Namespace the wrapper's per-spawn-local id (unique only WITHIN this spawn, e.g.
+            // "message-0"/"message-1") with this iteration's nonce, so it is also unique ACROSS the
+            // other iterations sharing this same `helpers`/`ctx` (issue #43, fix A) — the wrapper's
+            // own reset-per-message counter (fix B, wrapper.ts) guarantees distinct wrapper-local ids
+            // within one spawn; this mapping is what makes them turn-unique too.
+            const id = `${dispatchNonce}:message:${event.id}`
+            const entry = messageState.get(id) ?? { buffer: '', sealed: false }
+            entry.buffer += event.delta
+            messageState.set(id, entry)
+            helpers.reportMessage(id, event.delta, { isComplete: event.isComplete })
             if (event.isComplete) {
-              await sealCurrentMessage()
+              await sealMessage(id)
             }
             armIdleTimer()
             return
           }
           if (event.type === 'thought_delta') {
-            helpers.reportThought(event.id, event.delta, { isComplete: event.isComplete })
+            // Same namespacing rationale as `message_delta` above, applied defensively — no live
+            // wrapper code path emits `thought_delta` today (see wrapper.ts), but the wire protocol
+            // and this reporting branch both support it, and an id collision here would hit the
+            // exact same core stream-completion guard as messages do.
+            const id = `${dispatchNonce}:thought:${event.id}`
+            helpers.reportThought(id, event.delta, { isComplete: event.isComplete })
             armIdleTimer()
             return
           }
@@ -1355,6 +1551,28 @@ export class ClaudeCodeCliAdapter {
             sawTerminalEvent = true
             await sealCurrentMessage()
             settleOnce(() => {
+              // `finish()` (resolving the executor's iteration promise) and `shutdownInBackground()`
+              // (reaping the wrapper process) run FIRST, before the ack/nack branching below — same
+              // ordering the `error` branch and both timers already use. This is issue #42's part B
+              // fix: the wrapper, not the adapter, initiates its own shutdown on this path (Decision
+              // D step 5) — a terminal NDJSON line proves the wrapper WROTE the result, not that the
+              // OS process has actually exited yet — but the OLD code awaited `Promise.resolve(child)`
+              // HERE, inside the settlement path, before ever calling `finish()`. That blocked the
+              // executor's own resolution on the wrapper's (and its `claude` grandchild's) full OS
+              // teardown, which is exactly backwards for a host whose wrapper legitimately takes a
+              // while to exit (a large MCP bridge teardown, a slow grandchild) but whose CALLER has
+              // no reason to wait on that: the turn is already fully decided (the terminal `result`
+              // line IS the answer) the moment it arrives. Resolving immediately and reaping in the
+              // background — exactly like the startup/idle timeouts and the `error` branch already
+              // do — removes that needless latency and, more importantly, removes a dependency the
+              // executor's settlement previously had on the wrapper's OWN internal shutdown sequence
+              // (including the `waitForPendingWrites()` flush barrier issue #42's part A adds there)
+              // ever completing at all: if that hangs for any reason, this branch no longer hangs
+              // with it — `gracefulShutdown()`'s own bounded `disposeGraceMs` wait plus SIGTERM
+              // escalation (reused verbatim via `shutdownInBackground()`, not reinvented) is what
+              // reaps a slow-to-exit wrapper, entirely off the executor's own critical path.
+              finish()
+              shutdownInBackground()
               if (event.isError && event.subtype !== 'error_max_turns') {
                 ctx.nack(
                   new E_CLAUDE_CODE_CLI_TURN_FAILED([
@@ -1379,13 +1597,15 @@ export class ClaudeCodeCliAdapter {
               })
               if (merged.autoAck) ctx.ack()
             })
-            // The wrapper, not the adapter, initiates its own shutdown on this path (Decision D
-            // step 5) — a terminal NDJSON line proves the wrapper WROTE it, not that the OS
-            // process has actually exited yet. Await the wrapper's real exit before resolving so
-            // the executor doesn't return while the wrapper (and its `claude` grandchild) are
-            // still tearing down.
-            await Promise.resolve(child).catch(() => undefined)
-            finish()
+            // No `await Promise.resolve(child)` here any more (see the long comment inside
+            // `settleOnce`'s callback above for why) — `finish()` already ran synchronously inside
+            // it. The `child.stdout.on('end', ...)` handler and the `Promise.resolve(child)
+            // .then/.catch` handler at the bottom of this function both still fire after this
+            // point (the child has not necessarily exited yet) — both are already guarded by
+            // `sawTerminalEvent` (set unconditionally at the top of this branch, synchronously,
+            // before the `sealCurrentMessage()` await above), so neither can nack a turn that
+            // already settled successfully here, and `settleOnce`'s own idempotency guard means
+            // even a lost race there is a safe no-op.
             return
           }
           if (event.type === 'error') {

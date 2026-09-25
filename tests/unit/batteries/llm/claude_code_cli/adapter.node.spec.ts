@@ -1,4 +1,7 @@
+import { execa } from 'execa'
 import { DateTime } from 'luxon'
+import { join } from 'node:path'
+import { existsSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { validator } from '@nhtio/validation'
 import { describe, expect, it, vi } from 'vitest'
@@ -32,6 +35,17 @@ import type { WrapperEvent } from '../../../../../src/batteries/llm/claude_code_
 
 const dt = (iso: string): DateTime => DateTime.fromISO(iso, { zone: 'utc' })
 
+// ─── real-process fixtures (issue #42 defect #1) ───────────────────────────────
+// Mirrors `wrapper.node.spec.ts`'s own convention: the real BUILT wrapper asset, driven by a real
+// `execa`, with the `claude` grandchild replaced by the same `fake_claude.mjs` fixture. Needed
+// ONLY for the SIGKILL-escalation-reaches-the-grandchild's-process-group test below — every other
+// test in this file uses `FakeWrapperChild`, which cannot exercise real OS process-group/signal
+// semantics at all (its `kill()` just pushes a string onto an array).
+const distDir = join(__dirname, '../../../../../dist')
+const wrapperPath = join(distDir, 'claude-code-cli-wrapper.mjs')
+const fakeClaudePath = join(__dirname, '../../../../_fixtures/claude_code_cli/fake_claude.mjs')
+const distBuilt = existsSync(wrapperPath)
+
 // ─── fake execa-shaped wrapper child ───────────────────────────────────────────
 
 /**
@@ -43,6 +57,11 @@ class FakeWrapperChild {
   readonly writes: string[] = []
   readonly kills: Array<string | undefined> = []
   readonly stdout = new EventEmitter()
+  // Mirrors `ExecaLike`'s own `readonly exitCode: number | null` — issue #42 round-2 defect #1's
+  // escalation-time "is the wrapper itself still alive" check reads this directly off `child`, so
+  // this fake must track it the same way a real execa subprocess/ChildProcess does: `null` until
+  // `exit()` below is called, then set to whatever exit code was passed.
+  exitCode: number | null = null
   #resolve!: (v: { exitCode: number | null }) => void
   #settled = false
   readonly #promise: Promise<{ exitCode: number | null }>
@@ -71,6 +90,7 @@ class FakeWrapperChild {
   exit(exitCode: number | null): void {
     if (this.#settled) return
     this.#settled = true
+    this.exitCode = exitCode
     this.#resolve({ exitCode })
   }
 
@@ -248,8 +268,216 @@ describe('ClaudeCodeCliAdapter — spawn shape', () => {
   })
 })
 
+describe('ClaudeCodeCliAdapter — Electron host spawn decision (issue #42, part C)', () => {
+  // `process.versions` itself is non-writable (reassigning the property fails) but its object
+  // value is a plain, non-frozen object under Node — mutating `.electron` on it directly (and
+  // deleting the key again afterwards) is the seamless way to simulate "running inside Electron"
+  // without needing to inject a fake `process` object through the adapter's own constructor
+  // surface, which has no such seam today (deliberately: this option-driven design keeps
+  // `process.versions.electron` as the single source of truth for a REAL host, and the option
+  // fields as the explicit, testable overrides — see `wrapperExecPath`/`wrapperEnv`/
+  // `autoDetectElectronHost` in `types.ts`).
+  const setElectronVersion = (v: string | undefined): void => {
+    if (v === undefined) {
+      delete (process.versions as Record<string, string | undefined>).electron
+    } else {
+      ;(process.versions as Record<string, string | undefined>).electron = v
+    }
+  }
+
+  it('plain Node host (process.versions.electron undefined): spawn is byte-identical to today — no env key at all', async () => {
+    expect(process.versions.electron).toBeUndefined()
+    const fake = new FakeWrapperChild()
+    const { execaFn, calls } = makeExecaFn(fake)
+    const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn }))
+    const helpers = makeHelpers()
+    const ctx = makeCtx()
+    const result = adapter.executor()(ctx, helpers)
+    await nextTurn()
+    fake.emit({ type: 'ready' })
+    await nextTurn()
+    fake.emit({ type: 'init' })
+    await nextTurn()
+    fake.emit({ type: 'result', isError: false, resultText: 'ok' })
+    fake.exit(0)
+    await result
+
+    const [cmd, , options] = calls[0] as [string, string[], Record<string, unknown>]
+    expect(cmd).toBe(process.execPath)
+    expect(options).toEqual({ cleanup: true })
+    expect(options).not.toHaveProperty('env')
+  })
+
+  it('Electron host detected (process.versions.electron set), autoDetectElectronHost left at its default: ELECTRON_RUN_AS_NODE=1 is merged into the spawn env', async () => {
+    setElectronVersion('30.0.0')
+    try {
+      const fake = new FakeWrapperChild()
+      const { execaFn, calls } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn }))
+      const helpers = makeHelpers()
+      const ctx = makeCtx()
+      const result = adapter.executor()(ctx, helpers)
+      await nextTurn()
+      fake.emit({ type: 'ready' })
+      await nextTurn()
+      fake.emit({ type: 'init' })
+      await nextTurn()
+      fake.emit({ type: 'result', isError: false, resultText: 'ok' })
+      fake.exit(0)
+      await result
+
+      const [cmd, , options] = calls[0] as [string, string[], Record<string, unknown>]
+      expect(cmd).toBe(process.execPath)
+      expect(options).toMatchObject({ cleanup: true, env: { ELECTRON_RUN_AS_NODE: '1' } })
+    } finally {
+      setElectronVersion(undefined)
+    }
+  })
+
+  it('Electron host detected but autoDetectElectronHost:false: no ELECTRON_RUN_AS_NODE is added', async () => {
+    setElectronVersion('30.0.0')
+    try {
+      const fake = new FakeWrapperChild()
+      const { execaFn, calls } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(
+        baseOptions({ execa: execaFn, autoDetectElectronHost: false })
+      )
+      const helpers = makeHelpers()
+      const ctx = makeCtx()
+      const result = adapter.executor()(ctx, helpers)
+      await nextTurn()
+      fake.emit({ type: 'ready' })
+      await nextTurn()
+      fake.emit({ type: 'init' })
+      await nextTurn()
+      fake.emit({ type: 'result', isError: false, resultText: 'ok' })
+      fake.exit(0)
+      await result
+
+      const [, , options] = calls[0] as [string, string[], Record<string, unknown>]
+      expect(options).toEqual({ cleanup: true })
+      expect(options).not.toHaveProperty('env')
+    } finally {
+      setElectronVersion(undefined)
+    }
+  })
+
+  it('wrapperExecPath overrides the spawned executable (fuse-off Electron mitigation), and wrapperEnv wins over the ELECTRON_RUN_AS_NODE default on a key collision', async () => {
+    setElectronVersion('30.0.0')
+    try {
+      const fake = new FakeWrapperChild()
+      const { execaFn, calls } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(
+        baseOptions({
+          execa: execaFn,
+          wrapperExecPath: '/opt/bundled-node/bin/node',
+          wrapperEnv: { ELECTRON_RUN_AS_NODE: undefined, EXTRA_FLAG: 'yes' },
+        })
+      )
+      const helpers = makeHelpers()
+      const ctx = makeCtx()
+      const result = adapter.executor()(ctx, helpers)
+      await nextTurn()
+      fake.emit({ type: 'ready' })
+      await nextTurn()
+      fake.emit({ type: 'init' })
+      await nextTurn()
+      fake.emit({ type: 'result', isError: false, resultText: 'ok' })
+      fake.exit(0)
+      await result
+
+      const [cmd, args, options] = calls[0] as [string, string[], Record<string, unknown>]
+      expect(cmd).toBe('/opt/bundled-node/bin/node')
+      expect(args).toEqual(['/fake/wrapper.mjs'])
+      expect(options).toMatchObject({ cleanup: true })
+      const env = (options as { env?: Record<string, string | undefined> }).env
+      expect(env).toBeDefined()
+      expect(env!.ELECTRON_RUN_AS_NODE).toBeUndefined()
+      expect(env!.EXTRA_FLAG).toBe('yes')
+      // issue #42 round-2 defect #3: the consumer took ownership of `ELECTRON_RUN_AS_NODE` (opting
+      // OUT of it here), so the private strip-marker — which exists ONLY to tell the wrapper "the
+      // adapter itself injected this value" — must never appear in the actual spawn env either.
+      // Before the fix, the marker was derived from `wantsElectronRunAsNode` alone (true here, since
+      // this IS a detected Electron host) and so survived untouched regardless of `wrapperEnv`,
+      // meaning the wrapper would still strip the grandchild's own ambient `ELECTRON_RUN_AS_NODE`
+      // even though the adapter no longer injected anything — silently defeating this very opt-out.
+      expect(env).not.toHaveProperty('ADK_CLAUDE_CODE_CLI_STRIP_RUN_AS_NODE_FROM_GRANDCHILD')
+    } finally {
+      setElectronVersion(undefined)
+    }
+  })
+
+  it('issue #42 round-2 defect #3: consumer overriding ELECTRON_RUN_AS_NODE to the SAME value ("1") still suppresses the strip-marker', async () => {
+    setElectronVersion('30.0.0')
+    try {
+      const fake = new FakeWrapperChild()
+      const { execaFn, calls } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(
+        baseOptions({
+          execa: execaFn,
+          // The consumer explicitly takes ownership of this key, even choosing the identical value
+          // the adapter would have injected on its own — the marker must STILL be suppressed,
+          // because it certifies "the adapter itself is the one who set this", which is no longer
+          // true once the consumer's own `wrapperEnv` is the thing that actually wins the spread.
+          wrapperEnv: { ELECTRON_RUN_AS_NODE: '1' },
+        })
+      )
+      const helpers = makeHelpers()
+      const ctx = makeCtx()
+      const result = adapter.executor()(ctx, helpers)
+      await nextTurn()
+      fake.emit({ type: 'ready' })
+      await nextTurn()
+      fake.emit({ type: 'init' })
+      await nextTurn()
+      fake.emit({ type: 'result', isError: false, resultText: 'ok' })
+      fake.exit(0)
+      await result
+
+      const [, , options] = calls[0] as [string, string[], Record<string, unknown>]
+      const env = (options as { env?: Record<string, string | undefined> }).env
+      expect(env).toBeDefined()
+      expect(env!.ELECTRON_RUN_AS_NODE).toBe('1')
+      expect(env).not.toHaveProperty('ADK_CLAUDE_CODE_CLI_STRIP_RUN_AS_NODE_FROM_GRANDCHILD')
+    } finally {
+      setElectronVersion(undefined)
+    }
+  })
+
+  it('Electron host detected, no wrapperEnv override at all: the strip-marker IS present alongside the adapter-injected ELECTRON_RUN_AS_NODE', async () => {
+    setElectronVersion('30.0.0')
+    try {
+      const fake = new FakeWrapperChild()
+      const { execaFn, calls } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn }))
+      const helpers = makeHelpers()
+      const ctx = makeCtx()
+      const result = adapter.executor()(ctx, helpers)
+      await nextTurn()
+      fake.emit({ type: 'ready' })
+      await nextTurn()
+      fake.emit({ type: 'init' })
+      await nextTurn()
+      fake.emit({ type: 'result', isError: false, resultText: 'ok' })
+      fake.exit(0)
+      await result
+
+      const [, , options] = calls[0] as [string, string[], Record<string, unknown>]
+      const env = (options as { env?: Record<string, string | undefined> }).env
+      expect(env).toBeDefined()
+      expect(env!.ELECTRON_RUN_AS_NODE).toBe('1')
+      // Sanity-check the positive case still works: the marker must be present when the adapter
+      // truly is the sole source of `ELECTRON_RUN_AS_NODE`, otherwise defect #3's fix would have
+      // over-corrected into never setting the marker at all.
+      expect(env!.ADK_CLAUDE_CODE_CLI_STRIP_RUN_AS_NODE_FROM_GRANDCHILD).toBe('1')
+    } finally {
+      setElectronVersion(undefined)
+    }
+  })
+})
+
 describe('ClaudeCodeCliAdapter — happy path', () => {
-  it('completes a full run: ready -> init -> message_delta -> result, storing a Message and awaiting wrapper self-shutdown', async () => {
+  it('completes a full run: ready -> init -> message_delta -> result, storing a Message and settling WITHOUT waiting for the wrapper to actually exit (issue #42, part B)', async () => {
     const fake = new FakeWrapperChild()
     const { execaFn } = makeExecaFn(fake)
     const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn, autoAck: true }))
@@ -284,12 +512,13 @@ describe('ClaudeCodeCliAdapter — happy path', () => {
     })
     await nextTurn()
 
-    // Terminal `result` observed — the adapter must await the wrapper's OWN self-shutdown (its
-    // process exit) before the executor promise settles, per Decision D step 5.
+    // Terminal `result` observed — as of issue #42's part B, the executor settles PROMPTLY on the
+    // terminal NDJSON line alone; it must NOT wait for the wrapper's own OS process exit (`fake`
+    // here never calls `.exit(...)` at all in this test, and the promise still settles). Reaping
+    // the wrapper is a background concern (`shutdownInBackground()`/`gracefulShutdown()`), entirely
+    // decoupled from the executor's own settlement.
     fake.emit({ type: 'result', isError: false, resultText: 'Hello there' })
     await nextTurn()
-    expect(settled).toBe(false)
-    fake.exit(0)
     await promise
     expect(settled).toBe(true)
 
@@ -303,6 +532,12 @@ describe('ClaudeCodeCliAdapter — happy path', () => {
     const runCmd = parsedWrites(fake).find((w) => w.type === 'run')
     expect(runCmd).toBeDefined()
     expect(String(runCmd!.prompt)).toContain('hi')
+
+    // Background reaping still happened: a `shutdown` command was written to the (still-alive, in
+    // this test) fake wrapper as part of `gracefulShutdown()`.
+    expect(fake.writes.some((w) => (JSON.parse(w) as { type: string }).type === 'shutdown')).toBe(
+      true
+    )
   })
 
   it('a terminal result{isError:true} nacks with E_CLAUDE_CODE_CLI_TURN_FAILED', async () => {
@@ -880,8 +1115,11 @@ describe('ClaudeCodeCliAdapter — timeouts and abnormal termination', () => {
     fake.emit({ type: 'init' })
     await nextTurn()
     fake.emit({ type: 'result', isError: false, resultText: 'done' })
-    // The wrapper process settling before the `result` handler's own `await Promise.resolve(child)`
-    // resolves is exactly the race this test reproduces.
+    // Since issue #42's part B, the executor no longer awaits `Promise.resolve(child)` on this
+    // path at all — this test now covers the OTHER order (child exit racing/lagging AFTER the
+    // `result` line, rather than before it): the bottom-of-file `Promise.resolve(child).then/.catch`
+    // handler firing on this exit must still be a no-op, guarded by `sawTerminalEvent`, and must
+    // not double-nack/double-ack a turn that already settled synchronously inside `settleOnce`.
     fake.exit(0)
     await promise
 
@@ -970,6 +1208,67 @@ describe('ClaudeCodeCliAdapter — timeouts and abnormal termination', () => {
       fake.exit(0)
       await promise
     } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('issue #42 round-2 defect #1: once grandchild_exited is observed, SIGKILL escalation never signals the (now-stale) grandchild pid', async () => {
+    vi.useFakeTimers()
+    // A genuine unit-level spy on `process.kill` — NOT a real OS-level kill — proving the adapter
+    // itself never even ATTEMPTS the negative-pid call once it has cleared `grandchildPid`. Guard
+    // the fake's own implementation so this suite's real teardown (and any other code running
+    // concurrently under Node's single-threaded event loop while fake timers are in play) is
+    // unaffected: only observe calls, never actually signal anything.
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    try {
+      const fake = new FakeWrapperChild()
+      const { execaFn } = makeExecaFn(fake)
+      const controller = new AbortController()
+      const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn, disposeGraceMs: 25 }))
+      const ctx = makeCtx({ abortSignal: controller.signal })
+      const promise = adapter.executor()(ctx, makeHelpers())
+      await vi.advanceTimersByTimeAsync(0)
+      fake.emit({ type: 'ready' })
+      await vi.advanceTimersByTimeAsync(0)
+      fake.emit({ type: 'init' })
+      await vi.advanceTimersByTimeAsync(0)
+      // Report a grandchild pid, exactly as the wrapper does in a real run...
+      fake.emit({ type: 'grandchild_spawned', pid: 54321 })
+      await vi.advanceTimersByTimeAsync(0)
+      // ...then immediately report it as exited — the adapter must clear its cached pid on this
+      // event (see the `grandchild_exited` branch in adapter.ts), BEFORE escalation ever runs.
+      fake.emit({ type: 'grandchild_exited' })
+      await vi.advanceTimersByTimeAsync(0)
+
+      controller.abort()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fake.writes.some((w) => (JSON.parse(w) as { type: string }).type === 'shutdown')).toBe(
+        true
+      )
+      // First `disposeGraceMs` wait elapses -> SIGTERM on the wrapper (unrelated to the
+      // grandchild-pid question this test is about, but part of the same escalation sequence).
+      await vi.advanceTimersByTimeAsync(30)
+      expect(fake.kills).toContain('SIGTERM')
+      // The wrapper itself never actually exits in this test (mirrors the real "ignores signals"
+      // shape without any test-only env hook) — so the second `waitForChildExit` also times out and
+      // the adapter proceeds to its SIGKILL escalation branch.
+      await vi.advanceTimersByTimeAsync(30)
+      expect(fake.kills).toContain('SIGKILL')
+
+      // The actual assertion: no call to the real `process.kill` used a negative pid (the process-
+      // group-signalling convention) at all — proving the escalation branch's
+      // `typeof grandchildPid === 'number'` guard correctly evaluated false once `grandchildPid`
+      // had been cleared by the earlier `grandchild_exited` event, and never even attempted to
+      // signal the stale, possibly-reused pgid.
+      const negativePidCalls = killSpy.mock.calls.filter(
+        (call) => typeof call[0] === 'number' && call[0] < 0
+      )
+      expect(negativePidCalls).toEqual([])
+
+      fake.exit(0)
+      await promise
+    } finally {
+      killSpy.mockRestore()
       vi.useRealTimers()
     }
   })
@@ -1948,5 +2247,562 @@ describe('ClaudeCodeCliAdapter — fire-and-forget gracefulShutdown() never beco
     } finally {
       process.off('unhandledRejection', onUnhandledRejection)
     }
+  })
+})
+
+describe('ClaudeCodeCliAdapter — a wrapper that never exits after result does not block settlement (issue #42, part B)', () => {
+  it('child never exits after the terminal result: dispatch still settles promptly, background reaping is attempted, and no unhandled rejection occurs', async () => {
+    const unhandledRejections: unknown[] = []
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      // `FakeWrapperChild.exit(...)` is DELIBERATELY never called anywhere in this test — the
+      // underlying execa-shaped thenable never settles, modelling a wrapper whose own OS process
+      // hangs (a stuck MCP bridge teardown, a slow grandchild, or simply a wrapper that never
+      // observed its own `shutdown_complete` write finish) well past the terminal `result` line.
+      // Pre-fix, the `result` branch's own `await Promise.resolve(child)` would have hung the
+      // executor's iteration promise right alongside it, forever. Post-fix, `finish()` runs
+      // synchronously inside `settleOnce`'s callback and does not depend on the child ever
+      // resolving at all.
+      const fake = new FakeWrapperChild()
+      const { execaFn } = makeExecaFn(fake)
+      const adapter = new ClaudeCodeCliAdapter(
+        baseOptions({ execa: execaFn, autoAck: true, disposeGraceMs: 20 })
+      )
+      const ctx = makeCtx()
+      const helpers = makeHelpers()
+      const promise = adapter.executor()(ctx, helpers)
+      await nextTurn()
+      fake.emit({ type: 'ready' })
+      await nextTurn()
+      fake.emit({ type: 'init' })
+      await nextTurn()
+      fake.emit({ type: 'result', isError: false, resultText: 'done' })
+
+      // The executor promise must settle within `raceAgainstHang`'s bounded wait EVEN THOUGH the
+      // fake child's own thenable is left permanently pending — proving settlement no longer has
+      // any dependency on the wrapper's OS exit.
+      const timedOut = await raceAgainstHang(promise)
+      expect(timedOut).toBe(false)
+      expect(unhandledRejections).toEqual([])
+
+      expect(ctx.ack).toHaveBeenCalledTimes(1)
+      expect(ctx.nack).not.toHaveBeenCalled()
+      expect(helpers._stats).toHaveLength(1)
+
+      // Background reaping was still attempted: `gracefulShutdown()` writes a `shutdown` command
+      // to the (still "alive", in this test) fake wrapper regardless of whether it ever actually
+      // exits — the executor's own settlement above did not wait on this, but the attempt itself
+      // must still happen (a silently-skipped reap would leak the wrapper process in a real host).
+      expect(fake.writes.some((w) => (JSON.parse(w) as { type: string }).type === 'shutdown')).toBe(
+        true
+      )
+
+      // `gracefulShutdown()`'s own internal `waitForChildExit(disposeGraceMs)` bounded waits (used
+      // twice: once before SIGTERM, once before SIGKILL) are real timers racing a promise that
+      // never resolves — give them their own full `2 * disposeGraceMs` plus slack to run to
+      // completion in the background before asserting the SIGTERM/SIGKILL escalation, so this
+      // assertion cannot pass merely because the background work hasn't reached that point yet.
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      expect(fake.kills).toContain('SIGTERM')
+      expect(fake.kills).toContain('SIGKILL')
+      // No unhandled rejection surfaced from the backgrounded `gracefulShutdown()` promise chain
+      // even though the child it raced against never actually settled.
+      expect(unhandledRejections).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
+  })
+})
+
+describe.skipIf(!distBuilt)(
+  'ClaudeCodeCliAdapter — SIGKILL escalation reaches the grandchild process group (issue #42 defect #1)',
+  () => {
+    // Real OS processes throughout, deliberately NOT `FakeWrapperChild`: `FakeWrapperChild.kill()`
+    // only pushes a signal name onto an array, so it can prove the adapter CALLS `child.kill(...)`
+    // but can never prove the OS-level consequence defect #1 is actually about — that a SIGKILL to
+    // the wrapper, which cannot be caught or handled, still results in the `claude` grandchild's
+    // entire detached process group actually dying. Only a real subprocess tree can prove that.
+    it('after SIGTERM-then-SIGKILL escalation, BOTH the wrapper and its detached grandchild are gone', async () => {
+      // issue #42 round-2 defect #2: this test used to force the escalation path with a test-only
+      // env hook (`ADK_CLAUDE_CODE_CLI_TEST_IGNORE_SIGNALS`) that shipped inside the PUBLISHED
+      // wrapper source purely to serve this one test. Real `SIGSTOP` achieves the identical
+      // observable effect — a process that cannot act on its own `shutdown` command NOR SIGTERM —
+      // without adding any test-only branch to production code: `SIGSTOP` suspends the wrapper at
+      // the OS level (uncatchable, unblockable, delivered instantly regardless of what the process
+      // is doing), so it can neither read the `shutdown` command off stdin nor run its own SIGTERM
+      // handler. The adapter's own escalation is FORCED all the way to its SIGKILL branch exactly
+      // as before — SIGKILL (unlike SIGTERM) is delivered to a stopped process too. `SIGCONT` is
+      // sent in the `finally` block below purely as a safety net in case an assertion throws before
+      // the SIGKILL is ever sent, so a failed run never leaves a real frozen process behind.
+      let wrapperStopped = false
+
+      // Wraps the REAL `execa` import (not a fake) so `resolveExeca`'s own heuristic treats it as
+      // the already-resolved spawn function (see `makeExecaFn`'s doc comment above) while still
+      // letting this test capture the real execa-returned child handle — specifically its `.pid` —
+      // the instant it's spawned, for the post-escalation liveness poll below.
+      let wrapperChild: ReturnType<typeof execa> | undefined
+      const realExecaFn = (
+        cmd: string,
+        args: readonly string[],
+        options: Record<string, unknown>
+      ): ReturnType<typeof execa> => {
+        const child = execa(cmd, args, { ...options, reject: false } as unknown as Parameters<
+          typeof execa
+        >[1])
+        wrapperChild = child
+        return child
+      }
+      ;(realExecaFn as unknown as { exec: unknown }).exec = true
+
+      const adapter = new ClaudeCodeCliAdapter(
+        baseOptions({
+          execa: realExecaFn,
+          wrapperPath,
+          claudeBin: fakeClaudePath,
+          disposeGraceMs: 200,
+        })
+      )
+      const abortController = new AbortController()
+      const ctx = makeCtx({ abortSignal: abortController.signal })
+      const helpers = makeHelpers()
+
+      // `FAKE_CLAUDE_HANG` makes the grandchild a real long-lived detached process that never
+      // exits on its own — exactly the shape defect #1 is about: something has to actually kill
+      // it, since nothing else ever will. `FAKE_CLAUDE_LINES` must still emit a `system/init` line
+      // (the wrapper's own `init` event depends on it) — the fixture only ever emits lines it is
+      // explicitly told to via env, matching every other convention in this file/`wrapper.node.
+      // spec.ts`.
+      const previousHang = process.env.FAKE_CLAUDE_HANG
+      const previousArgvLog = process.env.FAKE_CLAUDE_ARGV_LOG
+      const previousLines = process.env.FAKE_CLAUDE_LINES
+      process.env.FAKE_CLAUDE_HANG = '1'
+      process.env.FAKE_CLAUDE_LINES = JSON.stringify([
+        { type: 'system', subtype: 'init', model: 'claude-sonnet-5', tools: [] },
+      ])
+      delete process.env.FAKE_CLAUDE_ARGV_LOG
+      let grandchildPid: number | undefined
+      try {
+        const promise = adapter.executor()(ctx, helpers)
+
+        // Drive the real wrapper through ready -> (grandchild_spawned) -> init by polling its own
+        // emitted NDJSON events, mirroring `WrapperHarness#waitFor` in `wrapper.node.spec.ts` but
+        // reading off the real `child.stdout` this test captured above (the adapter has already
+        // attached its OWN listener to the same stream; Node's stream 'data' event supports
+        // multiple listeners, so this does not interfere with the adapter's own parsing).
+        const events: Array<Record<string, unknown>> = []
+        let buffer = ''
+        await vi.waitUntil(() => wrapperChild !== undefined, { timeout: 5_000, interval: 10 })
+        wrapperChild!.stdout?.on('data', (chunk: Buffer) => {
+          buffer += chunk.toString('utf-8')
+          let idx = buffer.indexOf('\n')
+          while (idx !== -1) {
+            const line = buffer.slice(0, idx)
+            buffer = buffer.slice(idx + 1)
+            idx = buffer.indexOf('\n')
+            if (line.trim().length === 0) continue
+            try {
+              events.push(JSON.parse(line) as Record<string, unknown>)
+            } catch {
+              /* ignore malformed/partial lines for this test's own polling purposes */
+            }
+          }
+        })
+
+        await vi.waitUntil(() => events.some((e) => e.type === 'grandchild_spawned'), {
+          timeout: 8_000,
+          interval: 20,
+        })
+        const spawnedEvent = events.find((e) => e.type === 'grandchild_spawned')!
+        grandchildPid = spawnedEvent.pid as number
+        expect(typeof grandchildPid).toBe('number')
+
+        await vi.waitUntil(() => events.some((e) => e.type === 'init'), {
+          timeout: 8_000,
+          interval: 20,
+        })
+
+        const wrapperPid = wrapperChild!.pid
+        expect(typeof wrapperPid).toBe('number')
+
+        // Confirm both processes are genuinely alive before triggering teardown — `process.kill(
+        // pid, 0)` is the standard POSIX "is this pid alive?" probe: it throws ESRCH if not, and
+        // does nothing (no actual signal delivered) otherwise.
+        expect(() => process.kill(wrapperPid!, 0)).not.toThrow()
+        expect(() => process.kill(grandchildPid!, 0)).not.toThrow()
+
+        // issue #42 round-2 defect #2: SIGSTOP suspends the real wrapper process at the OS level —
+        // uncatchable and unblockable — so it can neither read the `shutdown` command off its own
+        // stdin nor act on the SIGTERM the adapter sends next. This forces the exact same escalation
+        // path the removed `ADK_CLAUDE_CODE_CLI_TEST_IGNORE_SIGNALS` hook used to force, without any
+        // test-only branch in production code.
+        process.kill(wrapperPid!, 'SIGSTOP')
+        wrapperStopped = true
+
+        // Trigger the adapter's `gracefulShutdown()` via abort — it writes `shutdown` (never read,
+        // the wrapper is stopped), waits `disposeGraceMs`, sends SIGTERM (delivered but not acted on
+        // while stopped), waits `disposeGraceMs` again, then escalates to SIGKILL on the wrapper AND
+        // (defect #1's fix) `process.kill(-grandchildPid, 'SIGKILL')` on the grandchild's process
+        // group directly. SIGKILL, unlike SIGTERM, IS delivered to a stopped process — the OS never
+        // gives the target a chance to ignore it.
+        abortController.abort()
+
+        // Total worst-case background teardown time is `2 * disposeGraceMs` (see the long comment
+        // at `gracefulShutdown`'s own call sites) — wait comfortably past that before polling.
+        await new Promise((resolve) => setTimeout(resolve, 200 * 2 + 500))
+
+        let wrapperGone = false
+        try {
+          process.kill(wrapperPid!, 0)
+        } catch (err) {
+          wrapperGone = (err as NodeJS.ErrnoException).code === 'ESRCH'
+        }
+        expect(wrapperGone).toBe(true)
+
+        let grandchildGone = false
+        try {
+          process.kill(grandchildPid!, 0)
+        } catch (err) {
+          grandchildGone = (err as NodeJS.ErrnoException).code === 'ESRCH'
+        }
+        expect(grandchildGone).toBe(true)
+
+        // The executor's own settlement never depends on any of this background teardown (issue
+        // #42 part B) — but drain it anyway so this test doesn't leave a dangling promise behind.
+        await raceAgainstHang(promise, 2_000)
+      } finally {
+        if (previousHang === undefined) delete process.env.FAKE_CLAUDE_HANG
+        else process.env.FAKE_CLAUDE_HANG = previousHang
+        if (previousArgvLog === undefined) delete process.env.FAKE_CLAUDE_ARGV_LOG
+        else process.env.FAKE_CLAUDE_ARGV_LOG = previousArgvLog
+        if (previousLines === undefined) delete process.env.FAKE_CLAUDE_LINES
+        else process.env.FAKE_CLAUDE_LINES = previousLines
+        // Belt-and-suspenders: if the assertions above failed (e.g. proving this test RED against
+        // a reverted fix), make sure this test never actually leaks a real hung process into the
+        // rest of the suite regardless of outcome. SIGCONT first: a SIGSTOPped process can still
+        // legitimately receive and act on SIGKILL (the OS never lets a stopped process ignore it),
+        // but resuming it here removes any doubt and guards against ever leaving a frozen zombie
+        // process behind if some earlier assertion threw before the real SIGKILL escalation ran.
+        if (wrapperStopped && wrapperChild !== undefined && typeof wrapperChild.pid === 'number') {
+          try {
+            process.kill(wrapperChild.pid, 'SIGCONT')
+          } catch {
+            /* already gone */
+          }
+        }
+        if (typeof grandchildPid === 'number') {
+          try {
+            process.kill(-grandchildPid, 'SIGKILL')
+          } catch {
+            /* already gone */
+          }
+        }
+        if (wrapperChild !== undefined && typeof wrapperChild.pid === 'number') {
+          try {
+            wrapperChild.kill('SIGKILL')
+          } catch {
+            /* already gone */
+          }
+        }
+      }
+    }, 20_000)
+  }
+)
+
+// ─── issue #43: message/thought id collision across wrapper spawns + within one spawn ──────────
+
+/**
+ * A `reportMessage`/`reportThought`-shaped pair that faithfully mirrors core's own
+ * `buildStream`/`messageStreams`/`thoughtStreams` guard (`dispatch_runner.ts`'s `#buildHelpers`):
+ * a `Map` keyed by id, throwing `stream "${id}" is already complete; further chunks are not
+ * accepted` on any chunk (even a first, immediately-complete one) for an id already marked
+ * complete. The default `makeHelpers()` mock's bare `vi.fn()`s accept ANY id any number of times,
+ * so a test built on it could never actually observe the collision this suite targets — this is
+ * the piece that makes these tests capable of failing on unfixed code.
+ */
+const makeStreamGuardedHelpers = (): DispatchExecutorHelpers & {
+  _stats: Array<Record<string, unknown>>
+  _messageCalls: Array<{ id: string; delta: string; isComplete: boolean }>
+  _thoughtCalls: Array<{ id: string; delta: string; isComplete: boolean }>
+} => {
+  const stats: Array<Record<string, unknown>> = []
+  const messageCalls: Array<{ id: string; delta: string; isComplete: boolean }> = []
+  const thoughtCalls: Array<{ id: string; delta: string; isComplete: boolean }> = []
+  const noop = vi.fn()
+  const makeGuardedReporter =
+    (calls: Array<{ id: string; delta: string; isComplete: boolean }>) =>
+    (id: string, delta: string, opts?: { isComplete?: boolean }): void => {
+      const isComplete = opts?.isComplete ?? false
+      const already = calls.find((c) => c.id === id && c.isComplete)
+      if (already !== undefined) {
+        throw new Error(`stream "${id}" is already complete; further chunks are not accepted`)
+      }
+      calls.push({ id, delta, isComplete })
+    }
+  return {
+    reportMessage: vi.fn(makeGuardedReporter(messageCalls)),
+    reportThought: vi.fn(makeGuardedReporter(thoughtCalls)),
+    reportToolCall: vi.fn(),
+    log: { trace: noop, debug: noop, info: noop, warn: noop, error: noop },
+    reportGenerationStats: vi.fn((s: Record<string, unknown>) => {
+      stats.push(s)
+    }),
+    _stats: stats,
+    _messageCalls: messageCalls,
+    _thoughtCalls: thoughtCalls,
+  } as unknown as DispatchExecutorHelpers & {
+    _stats: typeof stats
+    _messageCalls: typeof messageCalls
+    _thoughtCalls: typeof thoughtCalls
+  }
+}
+
+describe('ClaudeCodeCliAdapter — message id de-collision across wrapper spawns (issue #43, fix A)', () => {
+  it('two dispatch iterations, each a fresh wrapper spawn whose assistant text streams under the wrapper id "message-0", get DISTINCT ADK message ids, both complete, and both are stored as distinct Messages', async () => {
+    // A single shared `ctx` standing in for the ONE dispatch that spans both iterations — mirrors
+    // the #39 fix-A tool-call-id test's own `ctx` sharing rationale: `helpers`/`messageStreams` are
+    // constructed once per dispatch in the real runner, so this is what actually exercises the
+    // cross-iteration collision path (a fresh `makeCtx()`/`makeHelpers()` per iteration would not).
+    const ctx = makeCtx()
+
+    // ── Iteration 1: fresh wrapper spawn #1 ──
+    const fake1 = new FakeWrapperChild()
+    const { execaFn: execaFn1 } = makeExecaFn(fake1)
+    const adapter1 = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn1, autoAck: true }))
+    const helpers = makeStreamGuardedHelpers()
+    const promise1 = adapter1.executor()(ctx, helpers)
+    await nextTurn()
+    fake1.emit({ type: 'ready' })
+    await nextTurn()
+    fake1.emit({ type: 'init' })
+    await nextTurn()
+    // The wrapper's own collision-prone id (pre-fix, always the literal "message"; post-fix,
+    // "message-0" for the first message of this spawn).
+    fake1.emit({
+      type: 'message_delta',
+      id: 'message-0',
+      delta: 'iteration one reply',
+      isComplete: true,
+    })
+    await nextTurn()
+    fake1.emit({ type: 'result', isError: false, resultText: 'iteration one reply' })
+    fake1.exit(0)
+    await promise1
+
+    // ── Iteration 2: a BRAND NEW wrapper spawn against the SAME `ctx`/`helpers`, whose first
+    // (and only) message ALSO arrives under the wrapper-local id "message-0" — every spawn resets
+    // its own per-spawn counter, exactly like issue #39's tool-call `requestId`.
+    const fake2 = new FakeWrapperChild()
+    const { execaFn: execaFn2 } = makeExecaFn(fake2)
+    const adapter2 = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn2, autoAck: true }))
+    const promise2 = adapter2.executor()(ctx, helpers)
+    await nextTurn()
+    fake2.emit({ type: 'ready' })
+    await nextTurn()
+    fake2.emit({ type: 'init' })
+    await nextTurn()
+    fake2.emit({
+      type: 'message_delta',
+      id: 'message-0',
+      delta: 'iteration two reply',
+      isComplete: true,
+    })
+    await nextTurn()
+    fake2.emit({ type: 'result', isError: false, resultText: 'iteration two reply' })
+    fake2.exit(0)
+    await promise2
+
+    // Neither iteration nacked — in particular, NOT with E_CLAUDE_CODE_CLI_STREAM_ERROR, which is
+    // exactly what a thrown "stream already complete" from `makeStreamGuardedHelpers` above would
+    // produce on unfixed code (the id-collision propagates through the adapter's own `onEvent(...)
+    // .catch(...)` last-line-of-defence handler).
+    expect(ctx.nack).not.toHaveBeenCalled()
+
+    // Both messages were reported as complete, under DISTINCT ids.
+    const completeCalls = helpers._messageCalls.filter((c) => c.isComplete)
+    expect(completeCalls).toHaveLength(2)
+    const reportedIds = completeCalls.map((c) => c.id)
+    expect(new Set(reportedIds).size).toBe(2)
+
+    // Both were stored as distinct `Message`s with the right content, matching the ids reported.
+    expect(ctx._stored.messages).toHaveLength(2)
+    const storedIds = ctx._stored.messages.map((m) => m.id)
+    expect(new Set(storedIds).size).toBe(2)
+    expect(new Set(storedIds)).toEqual(new Set(reportedIds))
+    const contents = ctx._stored.messages.map((m) => m.content?.toString())
+    expect(contents).toContain('iteration one reply')
+    expect(contents).toContain('iteration two reply')
+  })
+})
+
+describe('ClaudeCodeCliAdapter — thought id de-collision across wrapper spawns (issue #43, fix A)', () => {
+  it('two dispatch iterations, each a fresh wrapper spawn whose thought stream uses the SAME wrapper-local id, get DISTINCT ADK thought ids and both complete without nacking', async () => {
+    const ctx = makeCtx()
+
+    // ── Iteration 1 ──
+    const fake1 = new FakeWrapperChild()
+    const { execaFn: execaFn1 } = makeExecaFn(fake1)
+    const adapter1 = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn1, autoAck: true }))
+    const helpers = makeStreamGuardedHelpers()
+    const promise1 = adapter1.executor()(ctx, helpers)
+    await nextTurn()
+    fake1.emit({ type: 'ready' })
+    await nextTurn()
+    fake1.emit({ type: 'init' })
+    await nextTurn()
+    // No live wrapper code path emits `thought_delta` today (see wrapper.ts), but the wire
+    // protocol and the adapter's reporting branch both support it — this synthesizes the event
+    // directly against the SAME wrapper-local id a real emitter would be most likely to reuse.
+    fake1.emit({ type: 'thought_delta', id: 'thought-0', delta: 'thinking one', isComplete: true })
+    await nextTurn()
+    fake1.emit({ type: 'result', isError: false, resultText: 'ok' })
+    fake1.exit(0)
+    await promise1
+
+    // ── Iteration 2: same `ctx`/`helpers`, same wrapper-local thought id ──
+    const fake2 = new FakeWrapperChild()
+    const { execaFn: execaFn2 } = makeExecaFn(fake2)
+    const adapter2 = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn2, autoAck: true }))
+    const promise2 = adapter2.executor()(ctx, helpers)
+    await nextTurn()
+    fake2.emit({ type: 'ready' })
+    await nextTurn()
+    fake2.emit({ type: 'init' })
+    await nextTurn()
+    fake2.emit({ type: 'thought_delta', id: 'thought-0', delta: 'thinking two', isComplete: true })
+    await nextTurn()
+    fake2.emit({ type: 'result', isError: false, resultText: 'ok' })
+    fake2.exit(0)
+    await promise2
+
+    expect(ctx.nack).not.toHaveBeenCalled()
+    const completeCalls = helpers._thoughtCalls.filter((c) => c.isComplete)
+    expect(completeCalls).toHaveLength(2)
+    const reportedIds = completeCalls.map((c) => c.id)
+    expect(new Set(reportedIds).size).toBe(2)
+  })
+})
+
+describe('ClaudeCodeCliAdapter — multiple distinct messages within ONE wrapper spawn (issue #43, fix B/C)', () => {
+  it('a single spawn emitting text -> tool_use -> more text produces TWO distinct, complete, correctly-stored Messages instead of colliding or merging', async () => {
+    const tool = new Tool({
+      name: 'echo_tool',
+      description: 'echoes',
+      inputSchema: validator.object({ text: validator.string().required() }),
+      handler: (async (args: unknown) => `echoed:${JSON.stringify(args)}`) as never,
+    })
+    const ctx = makeCtx({ tools: new ToolRegistry([tool]) })
+    const fake = new FakeWrapperChild()
+    const { execaFn } = makeExecaFn(fake)
+    const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn, autoAck: true }))
+    const helpers = makeStreamGuardedHelpers()
+    const promise = adapter.executor()(ctx, helpers)
+    await nextTurn()
+    fake.emit({ type: 'ready' })
+    await nextTurn()
+    fake.emit({ type: 'init' })
+    await nextTurn()
+
+    // First assistant message, sealed complete under the wrapper's per-spawn id "message-0".
+    fake.emit({
+      type: 'message_delta',
+      id: 'message-0',
+      delta: 'first message text',
+      isComplete: true,
+    })
+    await nextTurn()
+
+    // A tool call in between — the wrapper's own message-id counter/reset must not be disturbed by
+    // unrelated tool-call traffic sharing the same spawn.
+    fake.emit({ type: 'tool_call_request', requestId: '0', tool: 'echo_tool', args: { text: 'x' } })
+    await nextTurn()
+    await nextTurn()
+
+    // A second, DISTINCT assistant message arrives later in the SAME spawn. Post-fix, the wrapper
+    // resets its counter after sealing the first message, so this arrives as "message-1" — the
+    // exact id the wrapper-side fix is responsible for minting.
+    fake.emit({
+      type: 'message_delta',
+      id: 'message-1',
+      delta: 'second message text',
+      isComplete: true,
+    })
+    await nextTurn()
+    fake.emit({ type: 'result', isError: false, resultText: 'second message text' })
+    fake.exit(0)
+    await promise
+
+    expect(ctx.nack).not.toHaveBeenCalled()
+
+    // Both messages reported complete under distinct ids — not one call silently colliding with
+    // (or being dropped in favor of) the other.
+    const completeCalls = helpers._messageCalls.filter((c) => c.isComplete)
+    expect(completeCalls).toHaveLength(2)
+    expect(new Set(completeCalls.map((c) => c.id)).size).toBe(2)
+
+    // Both were persisted as distinct `Message`s — pre-fix (Bug C), `sealCurrentMessage`'s flat
+    // `sealedMessage` boolean guard meant only the FIRST message per spawn was ever stored, and its
+    // flat `currentMessageBuffer` accumulator would have concatenated the two texts together had
+    // the id collision (Bug B) not thrown first.
+    expect(ctx._stored.messages).toHaveLength(2)
+    const contents = ctx._stored.messages.map((m) => m.content?.toString())
+    expect(contents).toContain('first message text')
+    expect(contents).toContain('second message text')
+    // Neither message's stored content bled into the other's.
+    expect(contents.every((c) => c === 'first message text' || c === 'second message text')).toBe(
+      true
+    )
+  })
+})
+
+describe('ClaudeCodeCliAdapter — `result` seals EVERY still-unsealed message, not just the most recent (issue #43, verification-pass LOW finding)', () => {
+  it('two distinct messages are both still unsealed (no isComplete: true seen for either) when `result` arrives — both get sealed and stored, not only the most-recently-seen one', async () => {
+    const ctx = makeCtx()
+    const fake = new FakeWrapperChild()
+    const { execaFn } = makeExecaFn(fake)
+    const adapter = new ClaudeCodeCliAdapter(baseOptions({ execa: execaFn, autoAck: true }))
+    const helpers = makeStreamGuardedHelpers()
+    const promise = adapter.executor()(ctx, helpers)
+    await nextTurn()
+    fake.emit({ type: 'ready' })
+    await nextTurn()
+    fake.emit({ type: 'init' })
+    await nextTurn()
+
+    // First message: at least one delta arrives, but no `isComplete: true` is ever seen for it —
+    // `messageState` has an entry for it, unsealed.
+    fake.emit({
+      type: 'message_delta',
+      id: 'message-0',
+      delta: 'first message text',
+      isComplete: false,
+    })
+    await nextTurn()
+
+    // A second, DISTINCT message id also streams a delta, and it ALSO never sees `isComplete: true`
+    // before `result` arrives — e.g. the wrapper process exits right after a spawn emits two
+    // in-progress messages back to back. Pre-fix, `sealCurrentMessage()` sealed only whichever id
+    // was assigned to `currentMessageId` last (here, "message-1"), silently dropping "message-0".
+    fake.emit({
+      type: 'message_delta',
+      id: 'message-1',
+      delta: 'second message text',
+      isComplete: false,
+    })
+    await nextTurn()
+
+    fake.emit({ type: 'result', isError: false, resultText: 'second message text' })
+    fake.exit(0)
+    await promise
+
+    expect(ctx.nack).not.toHaveBeenCalled()
+
+    // BOTH messages were sealed and stored on `result`, in insertion order, not just the last one.
+    expect(ctx._stored.messages).toHaveLength(2)
+    const contents = ctx._stored.messages.map((m) => m.content?.toString())
+    expect(contents).toContain('first message text')
+    expect(contents).toContain('second message text')
   })
 })

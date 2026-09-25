@@ -147,6 +147,52 @@ export interface WrapperReadyEvent {
   type: 'ready'
 }
 
+/**
+ * The `claude` grandchild has just been spawned, detached in its own process group. Emitted once,
+ * immediately after `spawn()` returns and before any stream-json line has been parsed — issue
+ * #42 defect #1's additive protocol extension: without this, the adapter's own SIGKILL escalation
+ * in `gracefulShutdown()` could only ever target the wrapper's own pid, never the grandchild's
+ * process group, so escalating past a wrapper that ignores SIGTERM would orphan the grandchild's
+ * entire group (SIGKILL cannot be caught by any handler, so the wrapper's own
+ * `process.on('exit', ...)` group-cleanup can never run in that case). A consumer/adapter build
+ * that predates this event simply never sees it — the union member is additive, and every
+ * existing branch keeps working unchanged.
+ */
+export interface WrapperGrandchildSpawnedEvent {
+  /** Discriminant for the {@link WrapperEvent} union. */
+  type: 'grandchild_spawned'
+  /**
+   * The grandchild's OS pid. Spawned with `detached: true` (its own process group leader), so on
+   * POSIX this pid also equals the process group id (pgid) — the adapter negates it
+   * (`process.kill(-pid, 'SIGKILL')`) to signal the whole group, not just this one process.
+   */
+  pid: number
+}
+
+/**
+ * The `claude` grandchild's OS process has exited (observed via the wrapper's own
+ * `grandchild.on('exit', ...)` handler) — issue #42 round-2 defect #1's additive protocol
+ * extension. Emitted unconditionally on that exit, independent of whether it was expected
+ * (`sawResult`) or already mid-shutdown, and independent of whether the wrapper itself goes on to
+ * exit cleanly afterwards.
+ *
+ * @remarks
+ * Exists solely so the adapter can clear its own cached `grandchildPid`: once the grandchild is
+ * gone, its pid/pgid is free for the OS to reuse for an entirely unrelated process group, and the
+ * adapter's SIGKILL-escalation path in `gracefulShutdown()` must never signal a pid it no longer
+ * has positive evidence is still the grandchild's own group. The wrapper itself can observe (and
+ * emit) this even while stuck elsewhere in its own shutdown sequence — Node still delivers a
+ * `ChildProcess` `'exit'` event to a handler registered on it regardless of what else the process is
+ * doing — unless the wrapper is wedged badly enough to never run any JS at all, in which case
+ * nothing it could emit would help regardless. A consumer/adapter build that predates this event
+ * simply never sees it — the union member is additive, and every existing branch keeps working
+ * unchanged.
+ */
+export interface WrapperGrandchildExitedEvent {
+  /** Discriminant for the {@link WrapperEvent} union. */
+  type: 'grandchild_exited'
+}
+
 /** Mirrors Claude's own `system/init` stream-json event. */
 export interface WrapperInitEvent {
   /** Discriminant for the {@link WrapperEvent} union. */
@@ -271,6 +317,8 @@ export interface WrapperShutdownCompleteEvent {
 /** The full wrapper→adapter event union. */
 export type WrapperEvent =
   | WrapperReadyEvent
+  | WrapperGrandchildSpawnedEvent
+  | WrapperGrandchildExitedEvent
   | WrapperInitEvent
   | WrapperMessageDeltaEvent
   | WrapperThoughtDeltaEvent

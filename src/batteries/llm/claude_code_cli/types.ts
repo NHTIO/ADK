@@ -322,4 +322,80 @@ export interface ClaudeCodeCliAdapterOptions {
    * session-state configuration, and never accepts a value string starting with `-`.
    */
   extraArgs?: ClaudeCodeCliExtraArg[]
+  /**
+   * Overrides the executable spawned for the wrapper process. Defaults to `process.execPath` — on
+   * an Electron main process (issue #42), `process.execPath` there is the Electron binary itself,
+   * not a Node binary, so spawning it boots a copy of Electron rather than plain Node unless
+   * `ELECTRON_RUN_AS_NODE` is both set (see `autoDetectElectronHost`) AND honored — which it is not
+   * once the host's packaged binary has its `RunAsNode` Fuse disabled; the env var is silently
+   * ignored in that case and the spawned copy boots as a full Electron app regardless. As of issue
+   * #42 Part A, this no longer affects whether the wrapper exits cleanly (it always does, via an
+   * explicit `process.exit(0)`) — it only affects resource cost: a full Electron app boots GPU/
+   * network/renderer utility processes the wrapper never needed, for every dispatch. Set this to
+   * an actual Node binary path (e.g. one a consumer bundles alongside their Electron app
+   * specifically to run this battery) to avoid that cost — most valuable when
+   * `process.versions.electron` is set AND the host's fuse is disabled, since
+   * `autoDetectElectronHost`'s own `ELECTRON_RUN_AS_NODE` mitigation cannot help at all in that
+   * specific case (see its own doc comment for the measured evidence), but worthwhile even with
+   * the fuse enabled if avoiding the Electron-boot cost matters more than the small code-path
+   * difference. Has no effect on the `claude` grandchild binary itself (`claudeBin`), only on the
+   * wrapper's own host process.
+   */
+  wrapperExecPath?: string
+  /**
+   * Additional environment variables merged into the wrapper's spawn env, applied AFTER
+   * `autoDetectElectronHost`'s own `ELECTRON_RUN_AS_NODE` default — so a key set here (including
+   * explicit `undefined`, which deletes the key from the child's env entirely) always wins over
+   * that default. Everything else about the parent's own `process.env` is inherited as-is (execa's
+   * normal behavior); this is only for additions/overrides, not a replacement env map.
+   */
+  wrapperEnv?: Record<string, string | undefined>
+  /**
+   * Whether to auto-detect an Electron main-process host (`process.versions.electron !== undefined`)
+   * and default the wrapper's spawn env to include `ELECTRON_RUN_AS_NODE: '1'` — the documented
+   * Electron mechanism for making a spawned copy of the Electron binary behave as plain Node
+   * instead of booting a full second Electron app that runs the wrapper script as its main script.
+   * Default `true`; every plain-Node host is unaffected either way (`process.versions.electron` is
+   * `undefined` there, so this default is inert), and this can be disabled if a consumer has their
+   * own mitigation or supplies `wrapperExecPath` instead.
+   *
+   * @remarks
+   * **This option is a resource optimization, not a correctness requirement.** Earlier revisions of
+   * this doc comment (pre-issue-#42-Part-A) framed it as the fix for an Electron host hanging
+   * indefinitely; that is no longer accurate and this paragraph corrects it. The wrapper's own
+   * explicit `process.exit(0)` on the normal-completion path (issue #42, Part A) now guarantees a
+   * clean exit unconditionally, regardless of whether this option is enabled, disabled, or
+   * defeated by a disabled `RunAsNode` fuse — correctness no longer depends on this option at all.
+   * What it still controls is which of two ways a spawned Electron binary reaches that same clean
+   * exit:
+   *
+   * Measured (this fix's own investigation, scratch harnesses against a real copy of
+   * `Electron.app`, both with the `RunAsNode` Electron Fuse left at its default (ON) and explicitly
+   * disabled via `npx @electron/fuses`, and separately re-measured end-to-end against the BUILT
+   * wrapper after Part A landed):
+   * - Fuse ON, `ELECTRON_RUN_AS_NODE=1` (this option's default effect): spawned copy runs as plain
+   *   Node (`process.type === undefined`) — cheap, no GPU/network/renderer utility processes ever
+   *   boot. Exits 0.
+   * - Fuse ON, no env var (this option disabled): spawned copy boots as a full Electron app
+   *   (`process.type === 'browser'`) — measurably more expensive (GPU process, network service
+   *   process, etc., all spun up and torn down for a wrapper that never needed any of them). Still
+   *   exits 0 with Part A in place.
+   * - Fuse OFF, either way: `ELECTRON_RUN_AS_NODE` is silently ignored by the Electron runtime
+   *   itself — this option categorically cannot make the spawned copy behave as plain Node once
+   *   the fuse is disabled. The spawned copy boots as a full Electron app regardless (the same
+   *   "expensive" path as the previous bullet). With Part A in place, it still exits 0 — just
+   *   wastefully, having booted machinery it didn't need. `child_process.fork()` from within a
+   *   genuine Electron main process throws synchronously in this state (`"...fork() is not
+   *   supported when the runAsNode fuse is disabled; use utilityProcess.fork() instead"`), and
+   *   Electron's own suggested replacement, `utilityProcess.fork()`, throws synchronously the
+   *   instant a non-`'ignore'` stdin is requested (`"stdin value other than ignore is not
+   *   supported."`) — incompatible with this wrapper's NDJSON-over-stdin protocol regardless of
+   *   fuse state, so neither is a substitute spawn mechanism.
+   *
+   * `wrapperExecPath` (pointing at a real bundled Node binary) remains the recommended mitigation
+   * for a fuse-disabled Electron host — not because it is needed for the process to exit (Part A
+   * already guarantees that), but because it avoids the resource cost of booting a full Electron
+   * app per dispatch, the same reason this option exists at all when the fuse is enabled.
+   */
+  autoDetectElectronHost?: boolean
 }

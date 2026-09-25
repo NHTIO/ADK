@@ -40,9 +40,17 @@ if (process.env.FAKE_CLAUDE_ENV_LOG) {
 const emitLines = (envVar) => {
   const raw = process.env[envVar]
   if (!raw) return
-  for (const line of JSON.parse(raw)) {
-    process.stdout.write(JSON.stringify(line) + '\n')
-  }
+  const lines = JSON.parse(raw)
+  if (lines.length === 0) return
+  // ONE `write()` call carrying every configured line, newline-joined, rather than one `write()`
+  // per line. This is what lets a test reliably force several NDJSON lines to arrive at the
+  // wrapper as a SINGLE stdout `'data'` chunk (a single underlying write, well under the pipe
+  // buffer size, is delivered as one chunk to the reader in practice) instead of depending on
+  // however many separate synchronous writes happen to get coalesced by the OS/kernel pipe on a
+  // given run — used by wrapper.node.spec.ts's issue #43 fix-B race regression test, which needs
+  // multiple `assistant`/`stream_event` lines to land in one chunk to exercise the wrapper's
+  // per-chunk line-handling path at all.
+  process.stdout.write(lines.map((line) => JSON.stringify(line)).join('\n') + '\n')
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))

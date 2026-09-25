@@ -15,6 +15,54 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-09-25
+
+### Fixed
+
+- **`@nhtio/adk/batteries/llm/claude_code_cli` — the dispatch no longer hangs after `result` under
+  an Electron host** (closes issue #42). In an Electron main process the adapter spawned the
+  wrapper with Electron's own binary. Measured with bare Electron: without `ELECTRON_RUN_AS_NODE`,
+  or with the `RunAsNode` fuse off, that binary's event loop never drained, so the wrapper never
+  exited and the executor, which waited for that exit, never settled. The adapter now settles on
+  the terminal `result` event without waiting for the wrapper to exit, and shuts the wrapper down
+  in the background: `SIGTERM`, a bounded wait, then `SIGKILL`, then a kill of the `claude`
+  process group, so a force-killed wrapper cannot orphan it. The wrapper now waits for its pending
+  stdout writes before `process.exit(0)` instead of relying on the loop draining. Its 5-second
+  backstop stays armed through that wait, and it tolerates `EPIPE`. When the host is Electron
+  (`process.versions.electron`), the adapter sets `ELECTRON_RUN_AS_NODE=1` on the wrapper, and the
+  wrapper strips it again before spawning `claude`. New options: `autoDetectElectronHost`
+  (default `true`) turns this off; `wrapperExecPath` runs the wrapper with a different runtime,
+  such as a real `node`; `wrapperEnv` adds or overrides wrapper environment variables. An Electron
+  build with the `RunAsNode` fuse **off** cannot act as Node at all. It still settles now, but
+  set `wrapperExecPath` to a Node binary for the wrapper to run properly.
+- **`@nhtio/adk/batteries/llm/claude_code_cli` — assistant message and thought ids no longer
+  collide** (closes issue #43). The wrapper named every assistant message `"message"`, and ids
+  restarted on every spawn, so the second dispatch iteration of a turn hit core's `stream
+  "message" is already complete` guard. Ids are now namespaced per executor invocation and
+  numbered per message within a spawn. The wrapper also handles its `claude` stdout lines
+  strictly in order: before, lines that arrived in one chunk could interleave their handlers and
+  mis-assign ids. Trade-off: a wrapper stdout write that never completes now also holds back the
+  lines after it, `result` included; `streamIdleTimeoutMs` still nacks that dispatch.
+- **`@nhtio/adk/batteries/llm/gemini_generate_content` and `…/bedrock_converse` — the `retry`
+  option is now applied** (closes issues #44 and #45). Both adapters validated `retry` but always
+  sent exactly one request. They now retry transport failures, per-attempt timeouts and
+  `retriableStatuses` responses, using the same backoff, jitter and `Retry-After` handling as the
+  other HTTP batteries. Vendor rejections that no retry can fix fail at once: Gemini's
+  `thought_signature` error, and Bedrock's `toolConfig` and message-alternation errors. The
+  defaults match the sibling batteries (`maxAttempts: 1`, `baseDelayMs: 500`, `maxDelayMs:
+  30000`, `retriableStatuses: [429, 502, 503, 504]`, `honorRetryAfter: true`), so a caller who
+  doesn't set `retry` still gets a single attempt. `timeoutMs` now also covers reading the
+  response body, and each attempt's abort-signal link is disposed so listeners don't pile up on
+  the caller's signal.
+
+### Internal
+
+- **CI — the Node and browser smoke checks now run on merge requests.** Both
+  `Core … Functionality Smoke Check` jobs were master-only and skipped on merge commits, so no
+  release path ever ran them (a release lands as a merge commit). They now use the same MR-gated
+  rules as the other gates. The browser smoke also installs the `@toon-format/toon` peer, which
+  its `toon_to_json` converter spec needs.
+
 ## 2026-09-24
 
 ### Fixed

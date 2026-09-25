@@ -175,6 +175,12 @@ export const claudeCodeCliOptionsSchema = validator
     unsupportedMediaPolicy: unsupportedMediaPolicySchema,
     unsupportedResultMediaPolicy: unsupportedMediaPolicySchema,
     extraArgs: extraArgsSchema,
+    wrapperExecPath: validator.string().min(1).optional(),
+    wrapperEnv: validator
+      .object()
+      .pattern(validator.string(), validator.string().optional())
+      .optional(),
+    autoDetectElectronHost: validator.boolean().default(true),
 
     // CLI-native safety caps / timeouts
     streamIdleTimeoutMs: validator.number().integer().min(0).default(60_000),

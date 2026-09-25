@@ -29,6 +29,12 @@ import { resolveToolCallParser } from '../chat_common/tool_parsers'
 import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { ArtifactTool, Media, Message, Thought, Tokenizable, ToolCall } from '@nhtio/adk/common'
 import {
+  computeBackoff,
+  sleepWithJitter,
+  parseRetryAfter,
+  linkAbortSignals,
+} from '../../../lib/utils/retry'
+import {
   DEFAULT_GEMINI_BUCKET_ORDER,
   buildGeminiRequest,
   extractGeminiGeneration,
@@ -64,6 +70,7 @@ import type { Memory, SpooledArtifact, Tool } from '@nhtio/adk/common'
 import type { TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
 import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/types'
 import type {
+  ChatCompletionsRetryConfig,
   GeminiGenerateContentAdapterOptions,
   GeminiGenerateContentHelpers,
   GeminiGenerateContentResponse,
@@ -351,30 +358,185 @@ export class GeminiGenerateContentAdapter {
         else headers['x-goog-api-key'] = merged.apiKey
       }
 
+      // retry / timeout loop — mirrors openai_chat_completions/adapter.ts and
+      // anthropic_messages/adapter.ts: same defaults, same backoff, same Retry-After handling,
+      // same log shape. This battery has no dedicated request-timeout exception class, so an
+      // exhausted timeout and an exhausted generic transport failure both nack with the
+      // existing E_GEMINI_STREAM_ERROR — only the log `kind` distinguishes them.
+      const retryCfg: ChatCompletionsRetryConfig = {
+        maxAttempts: merged.retry?.maxAttempts ?? 1,
+        baseDelayMs: merged.retry?.baseDelayMs ?? 500,
+        maxDelayMs: merged.retry?.maxDelayMs ?? 30_000,
+        retriableStatuses: merged.retry?.retriableStatuses ?? [429, 502, 503, 504],
+        honorRetryAfter: merged.retry?.honorRetryAfter ?? true,
+      }
+
       const doFetch = merged.fetch ?? globalThis.fetch
+      const maxAttempts = retryCfg.maxAttempts ?? 1
+
+      let res: Response | undefined
+      let attempt = 1
+      // Each retry attempt re-links to the long-lived ctx.abortSignal — dispose the PRIOR
+      // attempt's link before making a new one, else N retries leave N stale listeners on
+      // ctx.abortSignal for the rest of the turn. The outer `finally` below disposes the LAST
+      // attempt's link too, on every exit path (success, terminal error, or abort) — without it
+      // the fallback path's listener (used when native AbortSignal.any is unavailable) never
+      // detaches from ctx.abortSignal after the final attempt.
+      let disposeLink: () => void = () => {}
+      let rawText = ''
       let parsed: GeminiGenerateContentResponse
       try {
-        const res = await doFetch(url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(body),
-          signal: merged.timeoutMs ? AbortSignal.timeout(merged.timeoutMs) : ctx.abortSignal,
-        })
-        const text = await res.text()
-        if (!res.ok) {
-          // Classify the vendor's own signature rejection separately — it is actionable, and
-          // Gemini's generic INVALID_ARGUMENT body gives a caller nothing to act on.
-          if (/thought_signature|thoughtSignature/i.test(text)) {
-            ctx.nack(new E_GEMINI_MISSING_THOUGHT_SIGNATURE([text.slice(0, 400)]))
+        while (attempt <= maxAttempts) {
+          if (ctx.abortSignal.aborted) return
+
+          const internalController = new AbortController()
+          disposeLink()
+          const { signal: linkedSignal, dispose: disposeCurrentLink } = linkAbortSignals([
+            ctx.abortSignal,
+            internalController.signal,
+          ])
+          disposeLink = disposeCurrentLink
+          // Start the per-attempt timer only AFTER the signal link is built. `disposeLink()` and
+          // `linkAbortSignals()` can throw synchronously; if the timer were already running, the
+          // outer `finally` would dispose the link but leave this attempt's timer armed. Nothing
+          // that can throw runs between this `setTimeout` and the `try` below, whose completion
+          // and rejection paths both clear it.
+          let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+          const timeoutMs = merged.timeoutMs ?? 0
+          if (timeoutMs > 0) {
+            timeoutHandle = setTimeout(() => internalController.abort(), timeoutMs)
+          }
+
+          try {
+            // The per-attempt timeout/abort link must stay live through BOTH the fetch call and
+            // the body read below — this battery has no incremental SSE parsing, so `res.text()`
+            // buffering the entire body is the only phase a stalled upstream can hang in, and it
+            // needs the same bound the fetch phase gets (previously the timeout was cleared right
+            // after headers arrived, leaving the body read unbounded).
+            res = await doFetch(url, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(body),
+              signal: linkedSignal,
+            })
+            rawText = await res.text()
+            if (timeoutHandle !== undefined) clearTimeout(timeoutHandle)
+          } catch (err) {
+            if (timeoutHandle !== undefined) clearTimeout(timeoutHandle)
+            if (ctx.abortSignal.aborted) return
+            if (internalController.signal.aborted) {
+              helpers.log.warn({
+                kind: 'request-timeout',
+                message: `Request timed out after ${timeoutMs}ms on attempt ${attempt}/${maxAttempts}`,
+                payload: { timeoutMs, attempt, maxAttempts },
+              })
+              if (attempt < maxAttempts) {
+                const delay = computeBackoff(attempt, retryCfg)
+                helpers.log.debug({
+                  kind: 'retry-attempt',
+                  message: `Retrying after request timeout in ~${delay}ms (attempt ${attempt + 1}/${maxAttempts})`,
+                  payload: {
+                    reason: 'request-timeout',
+                    delayMs: delay,
+                    attempt: attempt + 1,
+                    maxAttempts,
+                  },
+                })
+                await sleepWithJitter(delay, ctx.abortSignal)
+                attempt += 1
+                continue
+              }
+              ctx.nack(new E_GEMINI_STREAM_ERROR([`Request timed out after ${timeoutMs}ms`]))
+              return
+            }
+            helpers.log.error({
+              kind: 'transport-error',
+              message: `Transport failure on attempt ${attempt}/${maxAttempts}: ${isError(err) ? err.message : String(err)}`,
+              payload: {
+                attempt,
+                maxAttempts,
+                detail: isError(err) ? err.message : String(err),
+              },
+            })
+            if (attempt < maxAttempts) {
+              const delay = computeBackoff(attempt, retryCfg)
+              helpers.log.debug({
+                kind: 'retry-attempt',
+                message: `Retrying after transport failure in ~${delay}ms (attempt ${attempt + 1}/${maxAttempts})`,
+                payload: {
+                  reason: 'transport-error',
+                  delayMs: delay,
+                  attempt: attempt + 1,
+                  maxAttempts,
+                },
+              })
+              await sleepWithJitter(delay, ctx.abortSignal)
+              attempt += 1
+              continue
+            }
+            ctx.nack(new E_GEMINI_STREAM_ERROR([isError(err) ? err.message : String(err)]))
             return
           }
-          ctx.nack(new E_GEMINI_REQUEST_FAILED([res.status, text.slice(0, 400)]))
-          return
+
+          if (!res.ok) {
+            // Classify the vendor's own signature rejection separately, and BEFORE the generic
+            // retriable-status check — it is a terminal, actionable error regardless of status
+            // code, and Gemini's generic INVALID_ARGUMENT body gives a caller nothing to act on.
+            if (/thought_signature|thoughtSignature/i.test(rawText)) {
+              ctx.nack(new E_GEMINI_MISSING_THOUGHT_SIGNATURE([rawText.slice(0, 400)]))
+              return
+            }
+            const status = res.status
+            const retriable = (retryCfg.retriableStatuses ?? [429, 502, 503, 504]).includes(status)
+            if (retriable && attempt < maxAttempts) {
+              let delay = computeBackoff(attempt, retryCfg)
+              let retryAfterMs: number | undefined
+              if (retryCfg.honorRetryAfter !== false) {
+                const ra = res.headers.get('Retry-After')
+                if (ra) {
+                  const raMs = parseRetryAfter(ra)
+                  if (raMs > 0) {
+                    retryAfterMs = raMs
+                    delay = Math.min(Math.max(delay, raMs), retryCfg.maxDelayMs ?? 30_000)
+                  }
+                }
+              }
+              helpers.log.warn({
+                kind: 'retry-attempt',
+                message: `HTTP ${status} on attempt ${attempt}/${maxAttempts}; retrying in ~${delay}ms`,
+                payload: {
+                  reason: 'http-status',
+                  status,
+                  delayMs: delay,
+                  ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+                  attempt: attempt + 1,
+                  maxAttempts,
+                },
+              })
+              await sleepWithJitter(delay, ctx.abortSignal)
+              attempt += 1
+              continue
+            }
+            helpers.log.error({
+              kind: 'http-error',
+              message: `HTTP ${status} (terminal): ${rawText.slice(0, 256)}`,
+              payload: { status, body: rawText, attempt, maxAttempts, retriable },
+            })
+            ctx.nack(new E_GEMINI_REQUEST_FAILED([status, rawText.slice(0, 400)]))
+            return
+          }
+          break
         }
-        parsed = JSON.parse(text) as GeminiGenerateContentResponse
+        if (!res) return
+        parsed = JSON.parse(rawText) as GeminiGenerateContentResponse
       } catch (err) {
         ctx.nack(new E_GEMINI_STREAM_ERROR([isError(err) ? err.message : String(err)]))
         return
+      } finally {
+        // Runs on every exit from the loop above — success, an early `return` inside a `try`
+        // still runs its enclosing `finally` — so the LAST attempt's link is disposed too, not
+        // just the intermediate ones handled by the per-iteration `disposeLink()` call.
+        disposeLink()
       }
 
       // ── interpret ───────────────────────────────────────────────────────

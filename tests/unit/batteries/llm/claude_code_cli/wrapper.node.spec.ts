@@ -2,6 +2,7 @@ import { execa } from 'execa'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { readFileSync, existsSync, writeFileSync, unlinkSync } from 'node:fs'
@@ -317,6 +318,53 @@ describe.skipIf(!distBuilt)('claude_code_cli wrapper — env construction', () =
     const argv = JSON.parse(readFileSync(argvLog, 'utf-8')) as string[]
     expect(argv.join(' ')).not.toContain('12345')
   })
+
+  it('strips ELECTRON_RUN_AS_NODE and its own marker var from the grandchild when the marker is present (issue #42 defect #3)', async () => {
+    // The wrapper's OWN env (not the grandchild's) carries both vars here — mirroring exactly how
+    // `adapter.ts` injects them onto the wrapper itself when it detects an Electron host, per
+    // Part C. `buildClaudeEnv` starts from `{ ...process.env }` (the WRAPPER's own env) before
+    // constructing the grandchild's, so setting these on the spawned wrapper process (via
+    // `spawnHarness`'s env, not a `run` command field) is the correct way to simulate that
+    // injected condition.
+    const envLog = trackTmpFile(tmpFile('env.json'))
+    const h = spawnHarness({
+      ELECTRON_RUN_AS_NODE: '1',
+      ADK_CLAUDE_CODE_CLI_STRIP_RUN_AS_NODE_FROM_GRANDCHILD: '1',
+      FAKE_CLAUDE_ENV_LOG: envLog,
+      FAKE_CLAUDE_LINES: JSON.stringify(defaultFakeClaudeLines()),
+    })
+    await h.waitFor((e) => e.type === 'ready')
+    h.send(baseRunCommand())
+    await h.waitFor((e) => e.type === 'shutdown_complete')
+    await h.waitForExit()
+
+    const grandchildEnv = JSON.parse(readFileSync(envLog, 'utf-8')) as Record<string, string>
+    // Neither the stray var nor the wrapper-internal marker that gates stripping it should ever
+    // reach the `claude` grandchild — the marker specifically, because it is purely an
+    // adapter-to-wrapper signal with no meaning to `claude` itself, and would otherwise leak as an
+    // unexplained ambient env var on every Electron-hosted run.
+    expect(grandchildEnv.ELECTRON_RUN_AS_NODE).toBeUndefined()
+    expect(grandchildEnv.ADK_CLAUDE_CODE_CLI_STRIP_RUN_AS_NODE_FROM_GRANDCHILD).toBeUndefined()
+  })
+
+  it('leaves an ambient ELECTRON_RUN_AS_NODE untouched when the marker is absent (a consumer-set var, not adapter-injected)', async () => {
+    // Without the marker, this is presumed to be a consumer's own ambient env var for an unrelated
+    // reason (see the source comment on `buildClaudeEnv`) — stripping it unconditionally would be
+    // a surprising, undocumented behavior change for such a consumer.
+    const envLog = trackTmpFile(tmpFile('env.json'))
+    const h = spawnHarness({
+      ELECTRON_RUN_AS_NODE: '1',
+      FAKE_CLAUDE_ENV_LOG: envLog,
+      FAKE_CLAUDE_LINES: JSON.stringify(defaultFakeClaudeLines()),
+    })
+    await h.waitFor((e) => e.type === 'ready')
+    h.send(baseRunCommand())
+    await h.waitFor((e) => e.type === 'shutdown_complete')
+    await h.waitForExit()
+
+    const grandchildEnv = JSON.parse(readFileSync(envLog, 'utf-8')) as Record<string, string>
+    expect(grandchildEnv.ELECTRON_RUN_AS_NODE).toBe('1')
+  })
 })
 
 describe.skipIf(!distBuilt)('claude_code_cli wrapper — bounded grandchild-exit wait', () => {
@@ -347,7 +395,7 @@ describe.skipIf(!distBuilt)('claude_code_cli wrapper — bounded grandchild-exit
 })
 
 describe.skipIf(!distBuilt)('claude_code_cli wrapper — happy path + exit code', () => {
-  it('process.exitCode is 0 on success and the process exits naturally (no explicit process.exit(0) on this path)', async () => {
+  it("process.exitCode is 0 on success and the process exits via shutdownNormally's own explicit process.exit(0) after the flush barrier (issue #42, part A)", async () => {
     const h = spawnHarness({
       FAKE_CLAUDE_LINES: JSON.stringify(defaultFakeClaudeLines()),
     })
@@ -374,6 +422,38 @@ describe.skipIf(!distBuilt)('claude_code_cli wrapper — happy path + exit code'
     await h.waitFor((e) => e.type === 'shutdown_complete')
   })
 })
+
+describe.skipIf(!distBuilt)(
+  'claude_code_cli wrapper — explicit exit survives a non-draining event loop (issue #42, part A)',
+  () => {
+    // `keep_alive_preload.cjs` installs a bare `setInterval` that never clears itself — on its
+    // own, this keeps Node's event loop alive forever, exactly the symptom an Electron main
+    // process exhibits (an open BrowserWindow, a live timer, an open server socket the HOST owns,
+    // none of it under this wrapper's own control) without needing a real Electron binary in CI.
+    // Loaded via `NODE_OPTIONS=--require`, it affects ONLY the spawned wrapper process below, not
+    // this test file's own process. Before issue #42's part A fix, `shutdownNormally` fell off the
+    // end of its own async function without ever calling `process.exit(0)` — fine in a host whose
+    // loop drains on its own, but exactly the case that hangs here.
+    const preloadPath = join(
+      __dirname,
+      '../../../../_fixtures/claude_code_cli/keep_alive_preload.cjs'
+    )
+
+    it('exits 0 with a full shutdown_complete round-trip even though something else is keeping the event loop alive', async () => {
+      const h = spawnHarness({
+        FAKE_CLAUDE_LINES: JSON.stringify(defaultFakeClaudeLines()),
+        NODE_OPTIONS: `--require ${preloadPath}`,
+      })
+      await h.waitFor((e) => e.type === 'ready')
+      h.send(baseRunCommand())
+      await h.waitFor((e) => e.type === 'result')
+      await h.waitFor((e) => e.type === 'shutdown_complete')
+      const { exitCode, signal } = await h.waitForExit()
+      expect(exitCode).toBe(0)
+      expect(signal).toBeFalsy()
+    })
+  }
+)
 
 describe.skipIf(!distBuilt)(
   'claude_code_cli wrapper — shutdown-order regression (in-flight tools/call + open SSE stream)',
@@ -456,3 +536,254 @@ describe.skipIf(!distBuilt)('claude_code_cli wrapper — process group + signal 
     expect(after.stdout.trim()).toBe('')
   }, 15_000)
 })
+
+describe.skipIf(!distBuilt)(
+  'claude_code_cli wrapper — backstop stays armed through the flush barrier (issue #42 defect #2)',
+  () => {
+    // Both tests below deliberately never read the wrapper's own stdout past the point they
+    // detect `ready` — leaving that pipe's OS buffer to fill is exactly how a real backpressured
+    // or closed reader looks from the wrapper's side, and neither test can use `WrapperHarness`
+    // (which always attaches its own draining `stdout.on('data', ...)` listener) for this reason.
+    // Both use `node:child_process.spawn` directly rather than `execa`, because `execa`'s own
+    // returned promise does not settle until its OWN stdout stream reaches 'end' — which never
+    // happens while this test is deliberately not draining it — whereas the raw `ChildProcess`'s
+    // `'exit'` event fires independently of whether anything is reading its stdout, which is the
+    // signal every assertion below actually needs.
+
+    const spawnWrapper = (env: Record<string, string | undefined> = {}): ReturnType<typeof spawn> =>
+      spawn(process.execPath, [wrapperPath], {
+        env: { ...process.env, ...env },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+
+    /** Reads stdout in paused mode just long enough to observe one `ready` event, then stops reading entirely (leaving the pipe's OS buffer to fill on every subsequent write). */
+    const waitForReadyThenStopReading = (child: ReturnType<typeof spawn>): Promise<void> =>
+      new Promise((resolve) => {
+        let buffer = ''
+        let settled = false
+        const onReadable = (): void => {
+          if (settled) return
+          const chunk = child.stdout?.read() as Buffer | null
+          if (!chunk) return
+          buffer += chunk.toString('utf-8')
+          if (buffer.includes('"type":"ready"')) {
+            settled = true
+            child.stdout?.off('readable', onReadable)
+            resolve()
+          }
+        }
+        child.stdout?.on('readable', onReadable)
+      })
+
+    it('a wrapper whose flush barrier never resolves still force-exits via the backstop, not the normal 0-exit path (ordering regression)', async () => {
+      // This test targets the ORDERING of `disarmBackstop()` relative to
+      // `await waitForPendingWrites()` specifically — not general backpressure. An earlier draft
+      // tried to induce this by flooding stdin with malformed commands to fill the real OS pipe
+      // buffer, but that flood also backs up `runShutdownSequence`'s OWN
+      // `await writeEvent({ type: 'shutdown_complete' })` call, which sits BEFORE either the
+      // pre-fix or post-fix `disarmBackstop()` position — so that version of the test hung on an
+      // earlier, unrelated line in both the fixed and reverted source, and its GREEN result did
+      // not actually discriminate the ordering fix (confirmed empirically: it stayed GREEN even
+      // against the reverted, pre-fix anchor).
+      //
+      // issue #42 round-2 defect #2: the previous mechanism (`ADK_CLAUDE_CODE_CLI_TEST_HOLD_PENDING_WRITE`)
+      // was a test-only env hook baked into the PUBLISHED wrapper source — removed entirely. This
+      // now holds one wrapper-TRACKED write open forever from OUTSIDE the wrapper, via a
+      // `NODE_OPTIONS=--require` preload (`tests/_fixtures/claude_code_cli/stuck_flush_preload.cjs`,
+      // same loading mechanism as `keep_alive_preload.cjs` above) that monkey-patches
+      // `process.stdout.write` in the spawned wrapper process only: it waits for the first write
+      // whose payload is a wrapper-emitted `log` event, passes those bytes through for real, but
+      // withholds the CALLBACK the wrapper itself is waiting on — forever. Sending one malformed
+      // (non-JSON) line over the wrapper's stdin below reliably triggers exactly one such `log`
+      // write (wrapper.ts's NDJSON command reader calls the fire-and-forget
+      // `log('trace', 'malformed-command', ...)` on a parse failure), which is itself a
+      // `pendingWriteCount`-tracked `writeEvent(...)` call like every other wrapper write. Because
+      // its callback never fires, `pendingWriteCount` never returns to zero, so
+      // `waitForPendingWrites()` (called later, from `shutdownNormally`, once a real `shutdown`
+      // command triggers `runShutdownSequence`) can never resolve on its own — isolating exactly
+      // the moment that flush barrier is stuck, which is the only way to tell whether the backstop
+      // is still armed at that point without racing real OS pipe capacity.
+      const preloadPath = join(
+        __dirname,
+        '../../../../_fixtures/claude_code_cli/stuck_flush_preload.cjs'
+      )
+      const child = spawnWrapper({
+        NODE_OPTIONS: `--require ${preloadPath}`,
+      })
+      try {
+        await waitForReadyThenStopReading(child)
+
+        // Not valid NDJSON — the wrapper's command reader fails to `JSON.parse` this line and
+        // emits the fire-and-forget `log('trace', 'malformed-command', ...)` write the preload is
+        // waiting to intercept.
+        child.stdin?.write('this is not json\n')
+        child.stdin?.write(`${JSON.stringify({ type: 'shutdown' })}\n`)
+
+        const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+          (resolve, reject) => {
+            const timer = setTimeout(() => {
+              reject(new Error('wrapper did not exit within the 8s bound — backstop did not fire'))
+            }, 8_000)
+            child.once('exit', (code, signal) => {
+              clearTimeout(timer)
+              resolve({ code, signal })
+            })
+          }
+        )
+
+        // The backstop's own exit path is `process.exitCode = 1; process.exit(1)` — distinct
+        // from the normal path's `process.exitCode = 0; process.exit(0)`. Exit code 1 here is
+        // proof the BACKSTOP fired despite `waitForPendingWrites()` never resolving on its own —
+        // which is only possible if the backstop is still armed at that point (the fix); if
+        // `disarmBackstop()` ran before the flush-barrier await (the bug), this would hang
+        // forever instead, since nothing else in this path can force an exit.
+        expect(exit.code).toBe(1)
+      } finally {
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          /* already gone */
+        }
+      }
+    }, 12_000)
+
+    it('a closed-read-end (EPIPE) on stdout mid-turn does not crash the process, and it still exits (not hangs)', async () => {
+      const child = spawnWrapper({
+        FAKE_CLAUDE_LINES: JSON.stringify(defaultFakeClaudeLines()),
+      })
+      try {
+        await new Promise<void>((resolve) => {
+          let buffer = ''
+          const onReadable = (): void => {
+            const chunk = child.stdout?.read() as Buffer | null
+            if (!chunk) return
+            buffer += chunk.toString('utf-8')
+            if (buffer.includes('"type":"ready"')) {
+              child.stdout?.off('readable', onReadable)
+              // Destroy OUR OWN read end of the pipe now — every subsequent write the wrapper
+              // makes to its stdout will raise a real EPIPE at the OS level. This is the exact
+              // condition issue #42 defect #2 identifies: an unhandled 'error' event (or,
+              // pre-fix, an unhandled promise rejection from `writeEvent`'s own promise) crashes
+              // the process with exit code 1 instead of exiting cleanly.
+              child.stdout?.destroy()
+              resolve()
+            }
+          }
+          child.stdout?.on('readable', onReadable)
+        })
+
+        let sawStderrCrash = false
+        child.stderr?.on('data', (chunk: Buffer) => {
+          const text = chunk.toString('utf-8')
+          // A Node uncaught-exception crash always prints this frame; an intentionally
+          // stderr-logged non-EPIPE write error (the fix's own diagnostic path) never does.
+          if (text.includes('triggerUncaughtException') || text.includes('Error: write EPIPE')) {
+            sawStderrCrash = true
+          }
+        })
+
+        const runCommand = baseRunCommand({
+          claudeBin: fakeClaudePath,
+        })
+        child.stdin?.write(`${JSON.stringify(runCommand)}\n`)
+
+        const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+          (resolve, reject) => {
+            const timer = setTimeout(() => {
+              reject(new Error('wrapper did not exit within the 8s bound'))
+            }, 8_000)
+            child.once('exit', (code, signal) => {
+              clearTimeout(timer)
+              resolve({ code, signal })
+            })
+          }
+        )
+
+        expect(sawStderrCrash).toBe(false)
+        // Exit code 0: the normal-completion path, not the backstop's exit(1) — an EPIPE must
+        // not even trip the backstop's alternate path, since nothing about it should hang.
+        expect(exit.code).toBe(0)
+      } finally {
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          /* already gone */
+        }
+      }
+    }, 12_000)
+  }
+)
+
+describe.skipIf(!distBuilt)(
+  'claude_code_cli wrapper — message-id race across lines in one stdout chunk (issue #43, fix B HIGH regression)',
+  () => {
+    it('two distinct assistant messages, a tool_use line in between, all delivered to the wrapper in ONE stdout chunk, get TWO distinct message_delta ids, each completed exactly once, in input order', async () => {
+      // Every line below is written by `fake_claude.mjs` in a SINGLE `stdout.write()` call (see
+      // that fixture's updated `emitLines`), so the wrapper's own `createNdjsonLineReader` sees
+      // them as one chunk and its callback fires for all four lines synchronously, back to back,
+      // before any of their handlers has had a chance to `await` anything — exactly the shape
+      // that exposed the original fix-B race (unawaited `void handleClaudeLine(line)`: a second
+      // line's handler could interleave with the first's still-pending `await writeEvent(...)`
+      // and observe/reset shared id-state out of order). `message_delta`/`writeEvent` itself does
+      // a real (fast) `process.stdout.write` per event, which already introduces its own
+      // between-await scheduling — sufficient in practice to have reproduced the race against the
+      // pre-fix wrapper without needing any artificial delay.
+      const lines = [
+        { type: 'system', subtype: 'init', model: 'claude-sonnet-5', tools: [] },
+        // First complete assistant message (no preceding stream_event delta) — claims wrapper-local
+        // id "message-0".
+        {
+          type: 'assistant',
+          message: { id: 'm1', content: [{ type: 'text', text: 'first message text' }] },
+        },
+        // A stream_event delta belonging to the SECOND message, immediately following the first's
+        // complete line in the very same chunk — pre-fix, this is where the race lived: the first
+        // line's handler resets its shared state AFTER an `await`, and this second line's handler
+        // could run its own synchronous prefix first and read the STALE (not-yet-reset) id.
+        {
+          type: 'stream_event',
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'second ' } },
+        },
+        // The second message's own complete line, sealing it.
+        {
+          type: 'assistant',
+          message: { id: 'm2', content: [{ type: 'text', text: 'second message text' }] },
+        },
+        { type: 'result', is_error: false, result: 'second message text', session_id: 's1' },
+      ]
+
+      const h = spawnHarness({
+        FAKE_CLAUDE_LINES: JSON.stringify(lines),
+      })
+      await h.waitFor((e) => e.type === 'ready')
+      h.send(baseRunCommand())
+      await h.waitFor((e) => e.type === 'shutdown_complete')
+      await h.waitForExit()
+
+      const deltaEvents = h.events.filter(
+        (e): e is WireEvent & { id: string; isComplete?: boolean } => e.type === 'message_delta'
+      )
+      expect(deltaEvents.length).toBeGreaterThanOrEqual(2)
+
+      const completeEvents = deltaEvents.filter((e) => e.isComplete === true)
+      // Exactly two DISTINCT messages were sealed complete — not one id reused/collided into a
+      // single completion, and not one message silently dropped.
+      expect(completeEvents).toHaveLength(2)
+      const completeIds = completeEvents.map((e) => e.id)
+      expect(new Set(completeIds).size).toBe(2)
+
+      // The two sealed ids appear in the SAME order the input lines did: the message carrying
+      // "first message text" was claimed and sealed strictly before the one carrying "second ".
+      // Pre-fix, the race could make the second message's delta/seal reuse the first's id instead
+      // of minting its own, or reorder which one is observed as sealed first.
+      const firstDeltaIdxById = new Map<string, number>()
+      deltaEvents.forEach((e, idx) => {
+        if (!firstDeltaIdxById.has(e.id)) firstDeltaIdxById.set(e.id, idx)
+      })
+      const orderedIds = [...firstDeltaIdxById.entries()]
+        .sort((a, b) => a[1] - b[1])
+        .map(([id]) => id)
+      expect(orderedIds).toEqual(completeIds)
+    }, 15_000)
+  }
+)
