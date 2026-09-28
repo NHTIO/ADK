@@ -35,7 +35,7 @@ upgrading.
   shape as any backend without in-place rename: create the new collection, copy the records across
   with a filter scan (`.select('id', 'vector', 'document', 'metadata')`), verify the copy is complete,
   then drop the old one — see the sqlite_vec entry in
-  [the adapter matrix](docs/batteries/vector/adapters.md) for the exact snippet and the requirement to
+  [the adapter matrix](/batteries/vector/adapters) for the exact snippet and the requirement to
   stop writes to the source for the whole operation. While in there, every SQL identifier the adapter
   interpolates (collection and `__meta`
   table names, across create/drop/upsert/search/delete) is now escaped against embedded double
