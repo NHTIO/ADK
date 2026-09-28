@@ -15,6 +15,45 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-09-28
+
+### Fixed
+
+- **`@nhtio/adk/batteries/vector/sqlite_vec` — `renameCollection` now throws instead of leaving a
+  collection that can't be searched** (closes issue #41). A collection is a `vec0` virtual table
+  plus shadow tables sqlite-vec creates alongside it (`<name>_chunks`, `_info`, `_rowids`,
+  `_vector_chunks00`). The adapter renamed the owning table and its `__meta` table with plain
+  `ALTER TABLE`. sqlite-vec 0.1.9 implements no `xRename` hook, so that succeeds but renames only
+  the virtual table's own entry and never moves its shadow tables, and a "successful" rename left
+  a collection that failed every subsequent search with `no such table: main.<new>_chunks`, with
+  no error at rename time. Finishing the job by hand isn't
+  possible either: the core shadow tables (`_chunks`, `_info`, `_rowids`) reject a direct rename
+  outright (`table <name>_chunks may not be altered`). `capabilities.rename` is now `false` and
+  `renameCollection` throws `E_VECTOR_STORE_UNSUPPORTED_OPERATION` up front, before touching anything.
+  **Callers who renamed a sqlite_vec collection previously got a broken collection with no indication
+  anything was wrong; they now get a clear error at the call site instead.** The workaround is the same
+  shape as any backend without in-place rename: create the new collection, copy the records across
+  with a filter scan (`.select('id', 'vector', 'document', 'metadata')`), verify the copy is complete,
+  then drop the old one — see the sqlite_vec entry in
+  [the adapter matrix](docs/batteries/vector/adapters.md) for the exact snippet and the requirement to
+  stop writes to the source for the whole operation. While in there, every SQL identifier the adapter
+  interpolates (collection and `__meta`
+  table names, across create/drop/upsert/search/delete) is now escaped against embedded double
+  quotes, so a collection name containing a `"` no longer produces a broken statement.
+- **`@nhtio/adk/batteries/vector/lancedb` — `capabilities.rename` is now `false`, matching
+  `renameCollection`'s existing behavior** (closes issue #41). The adapter's `renameCollection`
+  always threw `E_VECTOR_STORE_UNSUPPORTED_OPERATION` — `connection.renameTable` is a LanceDB Cloud
+  feature that LanceDB OSS (what this adapter drives) rejects with `LanceDBError: not supported:
+  rename_table is not supported in LanceDB OSS` — but `capabilities.rename` still advertised `true`,
+  so a caller checking the capability before calling would wrongly conclude rename was safe to try.
+
+### Internal
+
+- **The vector-store conformance suite now exercises `renameCollection` against
+  `capabilities.rename`.** Every adapter advertising `rename: true` renames a live collection with
+  records in it and confirms the old name is gone, the new name is searchable, and further writes
+  land; every adapter advertising `rename: false` is confirmed to reject the call.
+
 ## 2026-09-25
 
 ### Fixed

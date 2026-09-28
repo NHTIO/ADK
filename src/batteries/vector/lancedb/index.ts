@@ -65,7 +65,9 @@ export class LanceDBVectorStore extends BaseVectorStore {
   readonly capabilities: VectorStoreCapabilities = {
     transactions: false,
     namedVectors: false,
-    rename: true,
+    // Probed against @lancedb/lancedb 0.30.0 (local directory database): connection.renameTable
+    // rejects with "LanceDBError: not supported: rename_table is not supported in LanceDB OSS".
+    rename: false,
     rawSql: false,
     builtInEncoding: false,
     // Embedded and synchronous: a write is visible on resolve. The option is a no-op.

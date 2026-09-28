@@ -14,9 +14,13 @@ import {
   E_VECTOR_STORE_SEARCH_FAILED,
   E_VECTOR_STORE_DELETE_FAILED,
   E_VECTOR_STORE_DIMENSION_MISMATCH,
+  E_VECTOR_STORE_UNSUPPORTED_OPERATION,
 } from '../exceptions'
 import type { SearchPlan, UpsertPlan, DeletePlan, CollectionSpec } from '../plan'
 import type { VectorMatch, VectorStoreCapabilities, BaseVectorStoreOptions } from '../types'
+
+// A double-quoted SQL identifier (table/column), escaping embedded quotes.
+const ident = (name: string): string => `"${name.replace(/"/g, '""')}"`
 
 /** Construction options for {@link SqliteVecVectorStore}. */
 export interface SqliteVecVectorStoreOptions extends BaseVectorStoreOptions {
@@ -40,7 +44,15 @@ export class SqliteVecVectorStore extends BaseVectorStore {
   readonly capabilities: VectorStoreCapabilities = {
     transactions: true,
     namedVectors: false,
-    rename: true,
+    // sqlite-vec 0.1.9 implements no `xRename` hook, so `ALTER TABLE … RENAME TO` on the vec0 table
+    // succeeds but renames only the virtual table's own entry, never its shadow tables
+    // (`_chunks`/`_info`/`_rowids`/`_vector_chunks00`), so a
+    // "renamed" collection is left unsearchable (`no such table: main.<new>_chunks`) with no error
+    // at rename time. Finishing the job by hand isn't possible either — the core shadow tables
+    // (`_chunks`/`_info`/`_rowids`) reject a direct rename outright (`table <name>_chunks may not be
+    // altered`). sqlite-vec 0.1.9 has no supported rename, so renameCollection throws instead of
+    // leaving a broken collection.
+    rename: false,
     rawSql: true,
     builtInEncoding: false,
     // Strongly consistent (local file/in-memory): visible on resolve, so the option is a no-op.
@@ -120,8 +132,8 @@ export class SqliteVecVectorStore extends BaseVectorStore {
     await this.connect()
     const { collection, vector } = spec
     const dims = vector.dimensions
-    const tbl = `"${collection}"`
-    const metaTbl = `"${collection}__meta"`
+    const tbl = ident(collection)
+    const metaTbl = ident(collection + '__meta')
 
     const { db } = this
 
@@ -143,8 +155,8 @@ export class SqliteVecVectorStore extends BaseVectorStore {
 
   async dropCollection(collection: string, ifExists: boolean): Promise<void> {
     await this.connect()
-    const tbl = `"${collection}"`
-    const metaTbl = `"${collection}__meta"`
+    const tbl = ident(collection)
+    const metaTbl = ident(collection + '__meta')
 
     const has = await this.hasCollection(collection)
     if (!has) {
@@ -177,30 +189,12 @@ export class SqliteVecVectorStore extends BaseVectorStore {
     }
   }
 
-  async renameCollection(from: string, to: string): Promise<void> {
-    await this.connect()
-    const hasFrom = await this.hasCollection(from)
-    if (!hasFrom) {
-      throw new E_VECTOR_STORE_COLLECTION_FAILED(['rename', 'source collection does not exist'])
-    }
-
-    const hasTo = await this.hasCollection(to)
-    if (hasTo) {
-      throw new E_VECTOR_STORE_COLLECTION_FAILED(['rename', 'target collection already exists'])
-    }
-
-    const { db } = this
-    try {
-      db.exec(`ALTER TABLE "${from}" RENAME TO "${to}"`)
-      db.exec(`ALTER TABLE "${from}__meta" RENAME TO "${to}__meta"`)
-      const dims = this.#_dims.get(from)
-      if (dims !== undefined) {
-        this.#_dims.set(to, dims)
-        this.#_dims.delete(from)
-      }
-    } catch (e: any) {
-      throw new E_VECTOR_STORE_COLLECTION_FAILED(['rename', e?.message ?? String(e)])
-    }
+  async renameCollection(_from: string, _to: string): Promise<void> {
+    // With no `xRename` hook in sqlite-vec 0.1.9, `ALTER TABLE … RENAME TO` on the vec0 table would
+    // succeed but leave its shadow tables behind under the old name, and the core shadow tables
+    // (`_chunks`/`_info`/`_rowids`) reject a direct rename outright (`table <name>_chunks may not be
+    // altered`). There is no way to finish the job, so there is no supported rename.
+    throw new E_VECTOR_STORE_UNSUPPORTED_OPERATION(['renameCollection', 'sqlite_vec'])
   }
 
   async executeUpsert(plan: UpsertPlan): Promise<void> {
@@ -237,15 +231,18 @@ export class SqliteVecVectorStore extends BaseVectorStore {
       })
     }
 
+    const metaTbl = ident(collection + '__meta')
+    const tbl = ident(collection)
+
     const stmtMetaInsert = db.prepare(
-      `INSERT INTO "${collection}__meta" (id, document, metadata) VALUES (?, ?, ?)`
+      `INSERT INTO ${metaTbl} (id, document, metadata) VALUES (?, ?, ?)`
     )
     const stmtMetaUpdate = db.prepare(
-      `UPDATE "${collection}__meta" SET document = ?, metadata = ? WHERE id = ?`
+      `UPDATE ${metaTbl} SET document = ?, metadata = ? WHERE id = ?`
     )
-    const stmtRowid = db.prepare(`SELECT rowid FROM "${collection}__meta" WHERE id = ?`)
-    const stmtVecDelete = db.prepare(`DELETE FROM "${collection}" WHERE rowid = ?`)
-    const stmtVecInsert = db.prepare(`INSERT INTO "${collection}" (rowid, embedding) VALUES (?, ?)`)
+    const stmtRowid = db.prepare(`SELECT rowid FROM ${metaTbl} WHERE id = ?`)
+    const stmtVecDelete = db.prepare(`DELETE FROM ${tbl} WHERE rowid = ?`)
+    const stmtVecInsert = db.prepare(`INSERT INTO ${tbl} (rowid, embedding) VALUES (?, ?)`)
 
     const txn = db.transaction(() => {
       for (const r of resolvedRows) {
@@ -281,8 +278,8 @@ export class SqliteVecVectorStore extends BaseVectorStore {
     await this.connect()
     const { db } = this
     const collection = plan.collection
-    const tbl = `"${collection}"`
-    const metaTbl = `"${collection}__meta"`
+    const tbl = ident(collection)
+    const metaTbl = ident(collection + '__meta')
 
     const near = plan.near
     const limit = (plan.offset ?? 0) + plan.topK
@@ -412,8 +409,8 @@ export class SqliteVecVectorStore extends BaseVectorStore {
   async executeDelete(plan: DeletePlan): Promise<void> {
     await this.connect()
     const collection = plan.collection
-    const metaTbl = `"${collection}__meta"`
-    const tbl = `"${collection}"`
+    const metaTbl = ident(collection + '__meta')
+    const tbl = ident(collection)
 
     const { db } = this
 

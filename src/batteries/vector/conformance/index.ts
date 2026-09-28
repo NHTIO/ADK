@@ -247,6 +247,48 @@ export const runVectorStoreConformance = async (
         await expect(vs.transaction(async () => {})).rejects.toThrow()
       }
     })
+    it('renameCollection: honours capabilities.rename', io, async () => {
+      const vs = await makeStore()
+      if (vs.capabilities.rename) {
+        await vs.schema.dropCollectionIfExists('docs_renamed')
+        let bodyFailed = false
+        let bodyError: unknown
+        try {
+          await vs('docs').upsert([
+            { id: '1', vector: p([3, 1, 0]) },
+            { id: '2', vector: p([3, 0, 1]) },
+          ])
+          await vs.schema.renameCollection('docs', 'docs_renamed')
+          expect(await vs.schema.hasCollection('docs')).toBe(false)
+          expect(await vs.schema.hasCollection('docs_renamed')).toBe(true)
+          const res = await vs('docs_renamed')
+            .nearVector(p([3, 1, 0]))
+            .select('id', 'score')
+            .limit(2)
+          expect(res.length).toBe(2)
+          expect(res[0].id).toBe('1')
+          expect(typeof res[0].score).toBe('number')
+          expect(res[0].score! >= 0 && res[0].score! <= 1).toBe(true)
+          await vs('docs_renamed').upsert([{ id: '3', vector: p([1, 1, 1]) }])
+          const all = await vs('docs_renamed').select('id').limit(10)
+          expect(all.map((r) => r.id).sort()).toEqual(['1', '2', '3'])
+        } catch (e) {
+          bodyFailed = true
+          bodyError = e
+        }
+        // A cleanup failure here must never mask a real failure from the try block above: only
+        // swallow it when the body already failed (there's nothing left to mask); otherwise let it
+        // propagate, since a passing body followed by a broken cleanup is itself a real failure.
+        try {
+          await vs.schema.dropCollectionIfExists('docs_renamed')
+        } catch (cleanupErr) {
+          if (!bodyFailed) throw cleanupErr
+        }
+        if (bodyFailed) throw bodyError
+      } else {
+        await expect(vs.schema.renameCollection('docs', 'docs_renamed')).rejects.toThrow()
+      }
+    })
   })
   for (const fn of pending) {
     await fn()
