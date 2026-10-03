@@ -47,6 +47,23 @@ export const E_SANDBOX_NARROWING_UNSUPPORTED = createException<[string]>(
   422,
   false
 )
+/**
+ * A per-call policy's network section cannot be enforced for one child.
+ *
+ * @remarks
+ * SRT's proxy enforces the SESSION network config per request; a per-call section that DIFFERS from
+ * it in any way — a wider allow-list, a narrower one, an added deny, a different `disabled` flag —
+ * is silently ignored by the backend, so ADK rejects the call instead of running a child whose
+ * effective policy is not the one it was handed. Repeat the session's network section exactly, or
+ * establish network access in the session policy (a new session) rather than per call.
+ */
+export const E_SANDBOX_NETWORK_GRANT_UNSUPPORTED = createException<[string]>(
+  'E_SANDBOX_NETWORK_GRANT_UNSUPPORTED',
+  '%s',
+  'E_SANDBOX_NETWORK_GRANT_UNSUPPORTED',
+  422,
+  false
+)
 /** A required approval gate was not supplied. */
 export const E_SANDBOX_GATE_REQUIRED = createException<[string]>(
   'E_SANDBOX_GATE_REQUIRED',

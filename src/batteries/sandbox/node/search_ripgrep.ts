@@ -61,6 +61,49 @@ const collect = async (
   }
 }
 
+/**
+ * Validate an explicit `limit`, permitting full omission (unbounded).
+ *
+ * @remarks
+ * Issue #48: the contract previously mandated `limit: number` and the adapter rejected everything
+ * but a positive integer, so an UNBOUNDED search was inexpressible — the searcher forced a cap, and
+ * `Number.MAX_SAFE_INTEGER` is a disguised one. Omission is now the documented unbounded mode: no
+ * post-collection cap, the scan finishes `complete: true`. An EXPLICIT value must still be a positive
+ * integer — `0`, negatives, non-integers, `Infinity` and `NaN` remain rejections, so a caller cannot
+ * accidentally disable the bound they named.
+ *
+ * @param limit - The requested limit, or `undefined` for unbounded.
+ * @returns The validated limit, or `undefined` when unbounded.
+ */
+export const resolveSearchLimit = (limit: number | undefined): number | undefined => {
+  if (limit === undefined) return undefined
+  if (!Number.isInteger(limit) || limit < 1)
+    throw new Error('limit must be a positive integer, or omitted for an unbounded search')
+  return limit
+}
+
+/**
+ * Emit `--max-depth N` only when a depth was EXPLICITLY requested.
+ *
+ * @remarks
+ * Issue #48: the adapter emitted this flag unconditionally, so omitting `maxDepth` produced the
+ * literal argv `--max-depth undefined`, rg exited 2, and every omitted-depth search failed. Omission
+ * now means unbounded — rg's own behaviour — and the flag is simply not emitted.
+ *
+ * @param maxDepth - The requested depth, or `undefined` for unbounded.
+ * @returns The flag pair, or an empty array when unbounded.
+ */
+export const resolveMaxDepthArgv = (maxDepth: number | undefined): readonly string[] => {
+  if (maxDepth === undefined) return []
+  if (!Number.isInteger(maxDepth) || maxDepth < 0)
+    throw new Error('maxDepth must be a non-negative integer, or omitted for an unbounded scan')
+  return ['--max-depth', String(maxDepth)]
+}
+
+/** Stop yielding after `limit` items; `undefined` never stops. */
+const wantMore = (shown: number, limit: number | undefined): boolean =>
+  limit === undefined || shown < limit
+
 /** Ripgrep backend. Both child pipes are drained immediately and concurrently. */
 export const createRipgrepSearch = (
   enforcer: SandboxPolicyEnforcer,
@@ -69,8 +112,12 @@ export const createRipgrepSearch = (
   searchContent(o: {
     root: string
     pattern: string
-    maxDepth: number
-    limit: number
+    /** Omit for an unbounded scan (no `--max-depth`); an explicit integer sets the boundary. */
+    maxDepth?: number
+    /** Omit for no result cap: every match is returned and the scan finishes `complete: true`. Note
+     * the whole scan is buffered before results are yielded, so an unbounded search over a very
+     * large tree uses memory in proportion to the output — pass a `limit` where that matters. */
+    limit?: number
     ignoreCase?: boolean
     literal?: boolean
     glob?: string
@@ -83,8 +130,12 @@ export const createRipgrepSearch = (
   findPaths(o: {
     root: string
     glob: string
-    maxDepth: number
-    limit: number
+    /** Omit for an unbounded scan (no `--max-depth`); an explicit integer sets the boundary. */
+    maxDepth?: number
+    /** Omit for no result cap: every match is returned and the scan finishes `complete: true`. Note
+     * the whole scan is buffered before results are yielded, so an unbounded search over a very
+     * large tree uses memory in proportion to the output — pass a `limit` where that matters. */
+    limit?: number
     iglob?: string
     follow?: boolean
     hidden?: boolean
@@ -132,8 +183,7 @@ export const createRipgrepSearch = (
   }
   return {
     async *searchContent(o) {
-      if (!Number.isInteger(o.limit) || o.limit < 1)
-        throw new Error('limit must be a positive integer')
+      const limit = resolveSearchLimit(o.limit)
       if (o.follow)
         throw new Error('follow is refused: descendant symlink containment audit pending')
       const argv = [
@@ -145,8 +195,7 @@ export const createRipgrepSearch = (
         ...(o.iglob ? ['--iglob', assertArgvValue(o.iglob)] : []),
         ...(o.hidden ? ['--hidden'] : []),
         ...(o.noIgnore ? ['--no-ignore'] : []),
-        '--max-depth',
-        String(o.maxDepth),
+        ...resolveMaxDepthArgv(o.maxDepth),
         '--',
         assertArgvValue(o.pattern),
         assertArgvValue(o.root),
@@ -175,7 +224,7 @@ export const createRipgrepSearch = (
             item.data.line_number &&
             item.data.lines
           ) {
-            if (shown >= o.limit) {
+            if (!wantMore(shown, limit)) {
               overLimit = true
               break
             }
@@ -196,8 +245,7 @@ export const createRipgrepSearch = (
         : { kind: 'done', complete: true }
     },
     async *findPaths(o) {
-      if (!Number.isInteger(o.limit) || o.limit < 1)
-        throw new Error('limit must be a positive integer')
+      const limit = resolveSearchLimit(o.limit)
       if (o.follow)
         throw new Error('follow is refused: descendant symlink containment audit pending')
       const argv = [
@@ -208,8 +256,7 @@ export const createRipgrepSearch = (
         ...(o.iglob ? ['--iglob', assertArgvValue(o.iglob)] : []),
         ...(o.hidden ? ['--hidden'] : []),
         ...(o.noIgnore ? ['--no-ignore'] : []),
-        '--max-depth',
-        String(o.maxDepth),
+        ...resolveMaxDepthArgv(o.maxDepth),
         '--',
         assertArgvValue(o.root),
       ]
@@ -226,7 +273,7 @@ export const createRipgrepSearch = (
       let overLimit = false
       for (const path of result.out.split('\n')) {
         if (!path) continue
-        if (shown >= o.limit) {
+        if (!wantMore(shown, limit)) {
           overLimit = true
           break
         }

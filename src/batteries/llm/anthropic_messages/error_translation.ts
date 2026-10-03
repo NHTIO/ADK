@@ -7,18 +7,82 @@
  * silently left the other wrong — exactly what happened with the statusless-`APIError` bug this
  * module's {@link AnthropicMessagesErrorStatusResolver} seam addresses.
  *
+ * Narrowing is STRUCTURAL (`isSdkError` below), never nominal against a statically imported class.
+ * Issue #46: importing `@anthropic-ai/sdk/core/error` directly gave the bundler a second, inlined
+ * copy of the SDK's error classes, and `instanceof`/constructor-name narrowing against that copy
+ * never matched the classes the REAL client (imported from `@anthropic-ai/sdk`) throws — every
+ * HTTP error classified `fatal` with status `0`, so `retry` and `Retry-After` never fired. The
+ * structural walk requires no class identity at all, so it works under bundling, dualRealm
+ * setups, and any future reshuffle of the SDK's internals.
+ *
  * @module @nhtio/adk/batteries/llm/anthropic_messages/error_translation
  */
 
-import { isObject, isError, isInstanceOf } from '@nhtio/adk/guards'
-import {
-  APIError,
-  AnthropicError,
-  APIConnectionError,
-  APIUserAbortError,
-  APIConnectionTimeoutError,
-} from '@anthropic-ai/sdk/core/error'
+import { isObject, isError } from '@nhtio/adk/guards'
 import type { AnthropicMessagesErrorStatusResolver } from './types'
+
+/**
+ * Whether an SDK error instance is at least the named class from the REAL `@anthropic-ai/sdk`
+ * module the client imports.
+ *
+ * @remarks
+ * Issue #46: this module previously narrowed with `isInstanceOf(err, "APIError", APIError)` where the
+ * `APIError` binding came from a STATIC import of `@anthropic-ai/sdk/core/error`, and the bundler
+ * inlined that module's error classes into the published chunk. `adapter.ts` imports the client from
+ * `@anthropic-ai/sdk`, which resolves to a DIFFERENT (non-inlined) module instance — so the client
+ * throws `RateLimitError`/`InternalServerError` instances whose ancestry ends at a bundled-vs-real
+ * `APIError` pair with equal NAMES but different REPTMs, and every nominal and name check failed. All
+ * 429/502/503/504/529 errors fell through to `fatal, status 0` and `retry` never fired.
+ *
+ * Structural narrowing avoids the second class identity entirely: every real SDK error class is an
+ * `Error` subclass, so the check walks the prototype chain for the named constructor and refuses
+ * anything the SDK could not have thrown (a bare `Error`, a `TypeError`, a string).
+ *
+ * @param err - The thrown value (already known to be an `Error`).
+ * @param name - The SDK error class name to match in the prototype chain.
+ */
+const isSdkError = (err: Error, name: string): boolean => {
+  for (
+    let current: object | null | undefined = err;
+    current !== undefined && current !== null;
+    current = Object.getPrototypeOf(current)
+  ) {
+    if (current.constructor?.name === name) return true
+  }
+  return false
+}
+
+/**
+ * Whether the thrown value carries the two observations every HTTP-status-carrying SDK error has.
+ *
+ * @remarks
+ * `APIError` declares `status` and `headers` on every instance, so this is the final structural
+ * confirmation that the value came from the SDK rather than something that merely has an `APIError`
+ * ancestor name in its chain.
+ */
+const isApiErrorShape = (
+  err: object
+): err is { status?: number; headers?: Headers; error?: unknown } =>
+  'status' in err && 'headers' in err && 'error' in err
+
+/**
+ * The response headers of a real SDK HTTP error, or `undefined` for anything else.
+ *
+ * @remarks
+ * The `Retry-After` header is read on the retry path (`adapter.ts` and `count_tokens.ts`), and BOTH
+ * sites previously guarded with `isInstanceOf(err, 'APIError', APIError)` against the inlined copy —
+ * so issue #46 silently disabled `Retry-After` honouring as well as retry classification. Exporting
+ * the structural check here keeps ONE identity-free definition of "is this an SDK HTTP error" and
+ * lets those callers stop importing `@anthropic-ai/sdk/core/error` (which is what inlined the second
+ * class identity in the first place).
+ *
+ * @param err - The thrown value.
+ * @returns The error's `Headers`, or `undefined` when it is not an SDK HTTP error.
+ */
+export const anthropicErrorHeaders = (err: unknown): Headers | undefined => {
+  if (!isError(err)) return undefined
+  return isSdkError(err, 'APIError') && isApiErrorShape(err) ? err.headers : undefined
+}
 
 /**
  * Body-text marker identifying an Anthropic context-overflow rejection.
@@ -112,6 +176,13 @@ const applyStatusResolver = (
  * `0`. Without a resolver the behaviour is unchanged from before the hook existed: a statusless
  * `APIError` coerces to `0`, matches no retriable status, and is fatal.
  *
+ * Branch coverage for real SDK error shapes (issue #46): an abort (`APIUserAbortError`), a request
+ * timeout (`APIConnectionTimeoutError`, the `APIConnectionError` subclass the SDK throws on its own
+ * deadline), a transport failure (`APIConnectionError`, retriable at status `0`), any HTTP-status
+ * error (an `APIError` carrying `status` and `Headers`) whose subclasses are matched through the
+ * same structural walk, and finally a non-HTTP SDK failure (`AnthropicError`, e.g. a
+ * `RetryableError`) or any other thrown value — both fatal at status `0`.
+ *
  * @param err - The thrown value.
  * @param retriableStatuses - Status codes configured as retriable.
  * @param opts - Optional status resolver and warning sink.
@@ -125,14 +196,17 @@ export const translateAnthropicError = (
     warn?: (msg: string) => void
   }
 ): AnthropicErrorClassification => {
-  if (isInstanceOf(err, 'APIUserAbortError', APIUserAbortError)) return { kind: 'abort' }
-  if (isInstanceOf(err, 'APIConnectionTimeoutError', APIConnectionTimeoutError)) {
+  // Every real SDK error is an `Error`, so non-Error values cannot reach the structural checks;
+  // classify them fatal at the bottom as before.
+  if (!isError(err)) return { kind: 'fatal', status: 0, message: String(err) }
+  if (isSdkError(err, 'APIUserAbortError')) return { kind: 'abort' }
+  if (isSdkError(err, 'APIConnectionTimeoutError')) {
     return { kind: 'timeout' }
   }
-  if (isInstanceOf(err, 'APIConnectionError', APIConnectionError)) {
+  if (isSdkError(err, 'APIConnectionError')) {
     return { kind: 'retriable', status: 0, message: err.message }
   }
-  if (isInstanceOf(err, 'APIError', APIError)) {
+  if (isSdkError(err, 'APIError') && isApiErrorShape(err)) {
     const sdkStatus = typeof err.status === 'number' ? err.status : 0
     const bodyText = isObject(err.error) ? JSON.stringify(err.error) : String(err.error ?? '')
     const status =
@@ -149,9 +223,6 @@ export const translateAnthropicError = (
     }
     return { kind: 'fatal', status, message: bodyText || err.message }
   }
-  const message = isError(err) ? err.message : String(err)
-  if (isInstanceOf(err, 'AnthropicError', AnthropicError)) {
-    return { kind: 'fatal', status: 0, message }
-  }
-  return { kind: 'fatal', status: 0, message }
+  if (isSdkError(err, 'AnthropicError')) return { kind: 'fatal', status: 0, message: err.message }
+  return { kind: 'fatal', status: 0, message: err.message }
 }

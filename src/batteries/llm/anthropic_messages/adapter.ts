@@ -64,14 +64,13 @@ import { DateTime } from 'luxon'
 import { sha256 } from 'js-sha256'
 import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
-import { APIError } from '@anthropic-ai/sdk/core/error'
 import { default as Anthropic } from '@anthropic-ai/sdk'
 import { countAnthropicMessagesTokens } from './count_tokens'
-import { translateAnthropicError } from './error_translation'
 import { resolveToolCallParser } from '../chat_common/tool_parsers'
 import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
 import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
+import { translateAnthropicError, anthropicErrorHeaders } from './error_translation'
 import { looksLikeSpooledArtifact, normalizeToolName } from '../chat_common/helpers'
 import {
   computeBackoff,
@@ -837,8 +836,8 @@ export class AnthropicMessagesAdapter {
           if (classified.kind === 'retriable') {
             if (attempt < maxAttempts) {
               let delay = computeBackoff(attempt, retryCfg)
-              if (retryCfg.honorRetryAfter !== false && isInstanceOf(err, 'APIError', APIError)) {
-                const ra = err.headers?.get?.('retry-after')
+              if (retryCfg.honorRetryAfter !== false) {
+                const ra = anthropicErrorHeaders(err)?.get('retry-after')
                 if (ra) {
                   const raMs = parseRetryAfter(ra)
                   if (raMs > 0) delay = Math.min(Math.max(delay, raMs), retryCfg.maxDelayMs)

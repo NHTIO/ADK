@@ -87,6 +87,10 @@ export interface SandboxToolsOptions {
 const argsPath = (extra: Record<string, unknown> = {}) =>
   validator.object({ path: validator.string().required(), ...extra })
 const depth = validator.number().integer().min(0).default(20)
+// No default: the SEARCH tools treat an OMITTED max_depth as unbounded (issue #48), so a default here
+// would silently re-bound every search that did not name one. `list_directory` keeps `depth`'s
+// default — its only boundary is max_depth and unbounded listing is out of scope.
+const searchDepth = validator.number().integer().min(0)
 const json = (value: unknown): string => JSON.stringify(value)
 const relativeFramePath = (root: string, value: string): string => {
   const prefix = root === '/' ? '/' : `${root}/`
@@ -531,14 +535,19 @@ export const createSandboxTools = async (options: SandboxToolsOptions): Promise<
     new Tool({
       name,
       description: content
-        ? 'Search file contents on disk that you have not opened; artifact_grep searches one artifact you already opened. Every whole hit is queryable JSON. Bounded by max_depth and a required limit; exceeding limit returns the bounded hits with a result-limited note, not an error. follow (symlink traversal) is not available in this deployment.'
-        : 'Find file names across the disk tree, rather than searching contents. Every result is queryable JSON. Bounded by max_depth and a required limit; exceeding limit returns the bounded paths with a result-limited note, not an error. follow (symlink traversal) is not available in this deployment.',
+        ? 'Search file contents on disk that you have not opened; artifact_grep searches one artifact you already opened. Every whole hit is queryable JSON. Bounded by max_depth and limit; omit either for an unbounded search. Exceeding limit returns the bounded hits with a result-limited note, not an error. follow (symlink traversal) is not available in this deployment.'
+        : 'Find file names across the disk tree, rather than searching contents. Every result is queryable JSON. Bounded by max_depth and limit; omit either for an unbounded search. Exceeding limit returns the bounded paths with a result-limited note, not an error. follow (symlink traversal) is not available in this deployment.',
       trusted: false,
       inputSchema: validator.object({
         [content ? 'pattern' : 'glob']: validator.string().required(),
         path: validator.string().allow('').default(''),
-        max_depth: depth,
-        limit: validator.number().integer().min(1).required(),
+        // Both bounds are OPTIONAL and omission means UNBOUNDED (issue #48): `max_depth` omits the
+        // `--max-depth` flag, and omitting `limit` yields every match with `{ complete: true }`.
+        // An explicit `limit` must still be an integer >= 1, so a caller cannot name a bound and
+        // silently get an unbounded search. `searchDepth` has NO default, so omission survives
+        // validation rather than being re-bounded to 20.
+        max_depth: searchDepth.optional(),
+        limit: validator.number().integer().min(1).optional(),
         ...(content
           ? {
               ignore_case: validator.boolean().default(false),
@@ -564,8 +573,8 @@ export const createSandboxTools = async (options: SandboxToolsOptions): Promise<
           pattern?: string
           glob?: string
           path: string
-          max_depth: number
-          limit: number
+          max_depth?: number
+          limit?: number
           ignore_case?: boolean
           literal?: boolean
           iglob?: string
@@ -590,8 +599,10 @@ export const createSandboxTools = async (options: SandboxToolsOptions): Promise<
           ? search!.searchContent({
               root: backendRoot,
               pattern: a.pattern!,
-              maxDepth: a.max_depth,
-              limit: a.limit,
+              // Spread-omitted when undefined: the model's UNBOUNDED mode is preserved through to the
+              // adapter, rather than being silently rebuilt into a fake default (issue #48).
+              ...(a.max_depth === undefined ? {} : { maxDepth: a.max_depth }),
+              ...(a.limit === undefined ? {} : { limit: a.limit }),
               ignoreCase: a.ignore_case,
               literal: a.literal,
               glob: a.glob,
@@ -604,8 +615,8 @@ export const createSandboxTools = async (options: SandboxToolsOptions): Promise<
           : search!.findPaths({
               root: backendRoot,
               glob: a.glob!,
-              maxDepth: a.max_depth,
-              limit: a.limit,
+              ...(a.max_depth === undefined ? {} : { maxDepth: a.max_depth }),
+              ...(a.limit === undefined ? {} : { limit: a.limit }),
               iglob: a.iglob,
               follow: a.follow,
               hidden: a.hidden,
@@ -645,15 +656,17 @@ export const createSandboxTools = async (options: SandboxToolsOptions): Promise<
           `${ctx.id}:${name}:${root}`,
           frames,
           terminal && !terminal.complete
-            ? // `limit` is REQUIRED on both search tools, so an over-limit terminal frame is the
-              // ordinary truncation outcome: narrate it and return the bounded results. It is NOT
-              // an error here, unlike `list_directory`, which has no `limit` and treats the same
-              // frame as a backend protocol violation.
+            ? // An over-limit terminal frame is the ORDINARY truncation outcome when a limit was
+              // set, and impossible when it was not (the backends honour an unbounded `-1` by
+              // returning `{ complete: true }`, so only a MALICIOUS adapter can emit one there —
+              // narrated as result-limited with 0, which is honest about the useless frame).
+              // Contrast `list_directory`, which has no `limit` and treats the same frame as a
+              // backend protocol violation.
               terminal.bound === 'limit'
               ? defaultSandboxNarrator({
                   kind: 'result-limited',
                   shown: terminal.shown,
-                  limit: a.limit,
+                  limit: a.limit ?? 0,
                   bound: 'limit',
                 })
               : defaultSandboxNarrator({

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Tokenizable, ToolRegistry, Registry } from '@nhtio/adk/common'
 import { GeminiGenerateContentAdapter } from '../../../../../src/batteries/llm/gemini_generate_content/adapter'
 import {
@@ -65,6 +65,11 @@ const makeCtx = (
   }) as never
 
 describe('GeminiGenerateContentAdapter — HTTP error mapping + retry', () => {
+  // A timed-out test can remain suspended before its finally block; don't leak fake timers.
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('retry disabled by default → single fetch on 502', async () => {
     const fetchFn = vi.fn(async () => new Response('upstream busy', { status: 502 }))
     const adapter = new GeminiGenerateContentAdapter({ model: 'test', fetch: fetchFn as never })
@@ -159,14 +164,13 @@ describe('GeminiGenerateContentAdapter — HTTP error mapping + retry', () => {
       const ctx = makeCtx()
       const before = Date.now()
       const p = adapter.executor()(ctx, makeHelpers())
-      // Advance in steps until the dispatch settles, rather than one 1500 ms jump. The backoff
-      // timer is only registered after the first response body has been read, and how many
-      // microtask turns that takes differs by runtime: in Chromium it lands AFTER a single large
-      // advance has already run, so that timer is never fired and the test hangs. Stepping lets
-      // each newly registered timer be picked up on a later step.
+      // Advance in steps rather than one large jump: the backoff timer is registered only after
+      // reading the first response body. Allow enough real macrotask yields for slow browsers to
+      // finish that read; the cap keeps a genuine failure bounded.
       let settled = false
       void Promise.resolve(p).then(() => (settled = true))
-      for (let i = 0; i < 20 && !settled; i++) await vi.advanceTimersByTimeAsync(100)
+      for (let i = 0; i < 300 && !settled; i++) await vi.advanceTimersByTimeAsync(100)
+      expect(settled).toBe(true)
       await p
       const elapsed = Date.now() - before
       expect(fetchFn).toHaveBeenCalledTimes(2)

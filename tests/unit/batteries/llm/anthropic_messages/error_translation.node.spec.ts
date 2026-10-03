@@ -1,8 +1,65 @@
 import { describe, expect, it, vi } from 'vitest'
+import { default as Anthropic } from '@anthropic-ai/sdk'
 import { APIError, APIConnectionError } from '@anthropic-ai/sdk/core/error'
 import { translateAnthropicError } from '../../../../../src/batteries/llm/anthropic_messages/error_translation'
 
 const RETRIABLE = [429, 502, 503, 504, 529] as const
+
+/**
+ * Drive the REAL `@anthropic-ai/sdk` client with an injected `fetch`, and hand the REAL thrown error
+ * to the classifier. This is the shape issue #46 was measured against: the SDK's error classes were
+ * only ever fed to the classifier as hand-built instances of the SAME module, so the bundled-copy
+ * identity mismatch never appeared. The client here imports the module the battery itself imports.
+ */
+const thrownByRealClient = async (
+  status: number,
+  headers: Record<string, string> = { 'content-type': 'application/json' }
+): Promise<unknown> => {
+  const client = new Anthropic({
+    apiKey: 'sk-ant-test-key',
+    maxRetries: 0,
+    fetch: (async () =>
+      new Response('{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}', {
+        status,
+        headers,
+      })) as never,
+  })
+  try {
+    await client.messages.create({
+      model: 'claude-opus-5',
+      max_tokens: 1,
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+  } catch (err) {
+    return err
+  }
+  throw new Error('the SDK did not throw for status ' + status)
+}
+
+describe('translateAnthropicError — REAL SDK-thrown HTTP errors (issue #46)', () => {
+  it.each([429, 502, 503, 504, 529])('%s is retriable with its real status', async (status) => {
+    const err = await thrownByRealClient(status)
+    // The regression itself: the thrown value must BE an APIError from the same module the
+    // classifier narrows against, not a bundled copy. `translateAnthropicError` is structural, so
+    // this assertion is about the SDK's own thrown shape, not the classifier's implementation.
+    expect(err).toBeInstanceOf(APIError)
+    expect(translateAnthropicError(err, RETRIABLE)).toMatchObject({
+      kind: 'retriable',
+      status,
+    })
+  })
+
+  it.each([400, 401])('%s is fatal with its real status (never retried)', async (status) => {
+    const err = await thrownByRealClient(status)
+    expect(translateAnthropicError(err, RETRIABLE)).toMatchObject({ kind: 'fatal', status })
+  })
+
+  it('reads the real SDK status, not 0, so the nack message tells the truth', async () => {
+    const err = await thrownByRealClient(529)
+    const classified = translateAnthropicError(err, RETRIABLE)
+    expect((classified as { message: string }).message).not.toMatch(/HTTP error 0|^0 /)
+  })
+})
 
 /**
  * An `APIError` as the SDK builds it when a GATEWAY terminated the HTTP request itself and reported

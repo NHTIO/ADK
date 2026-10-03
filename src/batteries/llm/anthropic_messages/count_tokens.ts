@@ -4,12 +4,11 @@
  * @module @nhtio/adk/batteries/llm/anthropic_messages/count_tokens
  */
 
+import { isObject } from '@nhtio/adk/guards'
 import { validateOptions } from './validation'
-import { APIError } from '@anthropic-ai/sdk/core/error'
 import { default as Anthropic } from '@anthropic-ai/sdk'
-import { isInstanceOf, isObject } from '@nhtio/adk/guards'
-import { translateAnthropicError } from './error_translation'
 import { DispatchContext, isDispatchContext } from '@nhtio/adk'
+import { translateAnthropicError, anthropicErrorHeaders } from './error_translation'
 import {
   computeBackoff,
   sleepWithJitter,
@@ -457,8 +456,8 @@ export const countAnthropicMessagesTokensWithResolvedOptions = async (
       if (classified.kind === 'retriable') {
         if (attempt < retryCfg.maxAttempts) {
           let delay = computeBackoff(attempt, retryCfg)
-          if (retryCfg.honorRetryAfter !== false && isInstanceOf(err, 'APIError', APIError)) {
-            const ra = err.headers?.get?.('retry-after')
+          if (retryCfg.honorRetryAfter !== false) {
+            const ra = anthropicErrorHeaders(err)?.get('retry-after')
             if (ra) {
               const raMs = parseRetryAfter(ra)
               if (raMs > 0) delay = Math.min(Math.max(delay, raMs), retryCfg.maxDelayMs)

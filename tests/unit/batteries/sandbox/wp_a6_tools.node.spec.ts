@@ -191,11 +191,30 @@ describe('WP-A6 workspace tools', () => {
     expect(result).toContain('5 bytes')
   })
 
-  it('rejects omitted, zero, and non-integer search limits', async () => {
+  it('accepts an omitted search limit and rejects zero/non-integer limits (issue #48)', async () => {
     const { fs } = makeFs({})
-    const all = await tools(() => ({ approved: true }), fs)
+    const opts = options(() => ({ approved: true }), fs) as any
+    const seen: Array<{ limit?: number; maxDepth?: number }> = []
+    opts.search = {
+      searchContent: async function* (a: any) {
+        seen.push(a)
+        yield { kind: 'done', complete: true }
+      },
+      findPaths: async function* (a: any) {
+        seen.push(a)
+        yield { kind: 'done', complete: true }
+      },
+    }
+    const all = await createSandboxTools(opts)
     const search = all.find((x) => x.name === 'search_files')!
-    await expect(search.executor(ctx({ n: 0 }))({ pattern: 'x' })).rejects.toThrow()
+    // BOTH bounds omitted: valid, and the omission must REACH the backend as omitted rather than
+    // being re-bounded to a default (a 20-deep default here was the bug that made unbounded search
+    // unreachable through the tool).
+    await search.executor(ctx({ n: 0 }))({ pattern: 'x' })
+    expect(seen.at(-1)).toMatchObject({})
+    expect(seen.at(-1)!.limit).toBeUndefined()
+    expect(seen.at(-1)!.maxDepth).toBeUndefined()
+    // Explicit invalid values still reject.
     await expect(search.executor(ctx({ n: 0 }))({ pattern: 'x', limit: 0 })).rejects.toThrow()
     await expect(search.executor(ctx({ n: 0 }))({ pattern: 'x', limit: 1.5 })).rejects.toThrow()
   })

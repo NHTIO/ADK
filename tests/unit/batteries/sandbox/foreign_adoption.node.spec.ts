@@ -233,7 +233,9 @@ describe('foreign SRT sandbox adoption', () => {
     const op = {
       argv: [process.execPath],
       cwd: process.cwd(),
-      policy: { filesystem: {}, network: {} },
+      // The per-call network section must EQUAL the foreign session's (['*']); only the per-call
+      // filesystem axis is granted per call, and any network difference is refused.
+      policy: { filesystem: {}, network: { allowedDomains: ['*'] } },
       correlationId: 'invoke',
     }
     await expect(handle.run(op)).resolves.toBeTruthy()

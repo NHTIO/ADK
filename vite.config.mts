@@ -178,6 +178,21 @@ export default defineConfig(async ({ mode }) => {
     })
   }
   const external = Array.from(externals).filter((ext) => !nonExternal.has(ext))
+  // Also externalise SUBPATHS of every SDK family package, as regexes (rolldown's `external`
+  // accepts them; a `'pkg/*'` string glob does NOT match here — verified: `@anthropic-ai/sdk/core/error`
+  // stayed inlined with the string form). Issue #46: the bare `@anthropic-ai/sdk` was external but
+  // `@anthropic-ai/sdk/core/error` was NOT, so the bundler inlined the SDK error classes into a
+  // private chunk while the adapter imported the real client from `@anthropic-ai/sdk` — two identities
+  // for `APIError`, so the client's subclasses never matched the inlined copy and every HTTP error was
+  // classified `fatal` with status 0. Keeping subpaths external preserves ONE class identity at
+  // runtime. Scoped to the SDK-family peers (Anthropic, MCP) rather than every peer: a blanket regex
+  // over all 60+ peers would change resolution for packages whose subpaths are intentionally bundled,
+  // and `node_modules/.pnpm/...`-inlining of those is not this bug.
+  const subpathExternal = [
+    '@anthropic-ai/sdk',
+    '@anthropic-ai/sandbox-runtime',
+    '@modelcontextprotocol/sdk',
+  ].map((dep) => new RegExp(`^${dep.replace(/[/\\]/g, '\\$&')}/`))
   const declarationExternal = [...external, '@types/luxon']
   // `dtsComplex` takes `bundledDependencies` directly rather than computing it from
   // `devDependencies` minus externals the way the legacy `dts` wrapper did. Compute the same set
@@ -222,7 +237,7 @@ export default defineConfig(async ({ mode }) => {
         },
       },
       rolldownOptions: {
-        external,
+        external: [...external, ...subpathExternal],
         // Per-format output configs (an ARRAY, not a single object) so each format can force its
         // own `chunkFileNames` extension. This is the fix for a real published-package bug: every
         // `.cjs` entry in `@nhtio/adk` failed `require()` with `Cannot find module

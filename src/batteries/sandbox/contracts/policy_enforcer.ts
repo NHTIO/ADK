@@ -43,7 +43,14 @@ export interface SandboxPolicyEnforcer {
   }): Promise<{
     stdout: ReadableStream<Uint8Array>
     stderr: ReadableStream<Uint8Array>
-    completed: Promise<{ exitCode: number; failed: boolean }>
+    /**
+     * The child's terminal settlement. `signalCode` is the REAL signal that killed the child
+     * (Node's `ChildProcess.signalCode`: `'SIGKILL'`, `'SIGTERM'`, …), and is OMITTED when the
+     * child exited on its own. Additive and optional so an adapter that cannot surface it simply
+     * leaves it off; a consumer must treat absence as "not signal-killed", never as a specific
+     * signal.
+     */
+    completed: Promise<{ exitCode: number; failed: boolean; signalCode?: string }>
   }>
   /** Return the opaque derived snapshot used for drift validation. */
   effectivePolicy(): DerivedRules | undefined

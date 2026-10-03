@@ -15,6 +15,104 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## 2026-10-02
+
+### Fixed
+
+- **`@nhtio/adk/batteries/llm/anthropic_messages` — every HTTP error from the Anthropic SDK was
+  classified `fatal` with status `0`, so `retry` and `Retry-After` never ran** (closes issue #46).
+  The classifier narrowed with `isInstanceOf(err, 'APIError', APIError)` against a statically imported
+  `@anthropic-ai/sdk/core/error`, and the bundler inlined that module's error classes into a private
+  chunk while the adapter imported the real client from `@anthropic-ai/sdk`. Two identities for one
+  class: the client throws `RateLimitError`/`InternalServerError`/`BadRequestError`, whose ancestry
+  ends at the REAL `APIError`, so `instanceof` failed against the inlined copy and the constructor-name
+  fallback compared only `constructor.name` — never matching the subclasses. Every HTTP error
+  (429/502/503/504/529 and 400/401 alike) fell through to `fatal` with status `0` and the nack read
+  `Anthropic Messages HTTP error 0: …`. The fix is two-sided. The narrowing is now STRUCTURAL —
+  `translateAnthropicError` walks the prototype chain for the named SDK error class and requires the
+  `APIError` field shape (`status`/`headers`/`error`), which needs no class identity at all —
+  `isInstanceOf` is untouched — and `vite.config.mts` now externalises `@anthropic-ai/sdk/*` subpath
+  imports so no second copy of the SDK's error module can ever be inlined next to the real client
+  again. The same structural check replaced the identical broken narrowings on the `Retry-After`
+  paths in the adapter and `count_tokens`, so header honouring works again. See
+  [the Anthropic Messages battery docs](/batteries/llm/anthropic) for the retry semantics this
+  restores.
+- **`@nhtio/adk/batteries/sandbox` — `run_shell_command` exited 127 for every command with
+  arguments** (closes issue #47). The tool handed the enforcer `argv: [args.command]`, and the SRT
+  enforcer runs `quoteShellArgs(op.argv)` before wrapping — so the whole command line was quoted as
+  ONE word and `bash -c "'printf hello'"` looked for an executable literally named `printf hello`.
+  The tool now hands the enforcer `argv: ['/bin/sh', '-c', args.command]`, which satisfies the
+  enforcer's real argv contract (separate words it can quote individually) while keeping `command` a
+  full shell command line: pipes, quoting and redirection are parsed by the shell, exactly as at a
+  terminal. When `allowedCommands` is set, shell syntax is now refused before policy resolution so
+  #47's `sh -c` cannot turn a first-word name check into a trailing-command bypass; see [the
+  run_shell_command docs](/batteries/sandbox/run-command). No other `SandboxPolicyEnforcer`
+  implementation or `quoteShellArgs` caller wraps a pre-built command line, and none needed changing.
+- **`@nhtio/adk/batteries/sandbox/node` — the ripgrep adapter emitted `--max-depth undefined` when
+  `maxDepth` was omitted, so rg exited 2** (closes issue #48). `--max-depth` was emitted
+  unconditionally, so an omitted depth produced the literal argv `--max-depth undefined` and every
+  depth-omitted search failed at command construction; and `limit` was mandatory, so an unbounded
+  search was inexpressible (`Number.MAX_SAFE_INTEGER` is a disguised cap, not an unbounded mode).
+  Omission is now the documented unbounded mode: no `--max-depth` flag at all, no result cap, and a
+  scan that finishes `{ kind: 'done', complete: true }`. Explicit values behave exactly as before, and
+  invalid explicit limits (`0`, negatives, non-integers, `Infinity`, `NaN`) are still rejected.
+  The `SandboxSearch` contract, the `search_files`/`find_files` tool schemas and
+  [the workspace-tools search docs](/batteries/sandbox/workspace-tools#searching-what-the-arguments-do-and-the-one-that-is-refused)
+  now document omission precisely, including what a custom adapter must do to conform. The docs also
+  state the memory shape plainly: the adapter collects rg's stdout before yielding, so an unbounded
+  search on a very large tree uses memory in proportion to the output (`limit` truncates only after
+  collection) — pass a `limit` or `maxDepth` where that matters.
+
+### Added
+
+- **`@nhtio/adk/batteries/sandbox` — `RunShellCommandOptions.policy` accepts a per-call policy
+  function** (closes issue #47). It is evaluated once per invocation, AFTER the gate and the cwd
+  gauntlet, and receives `{ args, relativeCwd }`; its return value is the policy for
+  that one child. A revoked grant is therefore gone on the very next call, and concurrent calls each
+  get their own policy object. A static policy object keeps working exactly as before. A per-call
+  function should return a fresh object per call — the enforcer stores what it is handed. (The gate
+  context deliberately carries no decision object: a gate approves with `void` and denies by
+  throwing, so a denied call never reaches policy resolution.)
+- **`@nhtio/adk/batteries/sandbox` — `RunShellCommandOptions.onCompletion` structured completion
+  callback** (closes issue #49). Called exactly once per invocation on EVERY terminal outcome —
+  success, non-zero exit, timeout, kill/signal, gate/approval denial, a failing per-call `policy`
+  function, and enforcer throw — with a
+  `{ exitCode, failed, timedOut, killedBy?, denied?, diagnostics, artifactRef? }` payload, exported
+  publicly as `RunShellCommandCompletion`. The tool's return type is unchanged (it still resolves to
+  the spooled artifact), and the `Exit code: N` text trailer is unchanged. A callback that throws is
+  logged and swallowed; it never breaks the tool call and never becomes an unhandled rejection.
+  A per-call `policy` function that throws or rejects settles the completion (failed, `exitCode: null`,
+  its message in `diagnostics`, no `artifactRef`) BEFORE the caller's usual rejection, so the audit
+  seam sees the outcome even when resolution itself failed; a rejected artifact store write
+  (`ctx.storeRetrievableBytes`) similarly fires the completion once before rethrowing; and `killedBy`
+  is the signal that actually killed the child — measured `'SIGKILL'` on a real timeout, where the
+  previous abort-reason derivation reported `'AbortError'` — with the field absent whenever the child
+  exited on its own (the enforcer contract now carries the real `signalCode`).
+- **`@nhtio/adk/batteries/sandbox` — per-call `SandboxHandle.run({ policy })` semantics under SRT,
+  measured against real seatbelt AND real bubblewrap, with every per-call network difference REJECTED**
+  (closes issue #50). A per-call FILESYSTEM grant is honoured for that one child and REPLACES the
+  session baseline for it — the per-call policy IS that child's complete filesystem policy, so it must
+  repeat baseline writes it still wants. A per-call NETWORK section that differs from the session's in
+  ANY way — a wider allow-list, a NARROWER one, an added deny, a different `disabled`, a different
+  reasons map — throws the new `E_SANDBOX_NETWORK_GRANT_UNSUPPORTED` from `run()` instead of spawning:
+  the shell tool preserves this typed refusal (with `denied: true` completion) rather than rewriting
+  it to a generic I/O failure. SRT's mux proxy is one process-global instance whose filter reads only
+  the session config (`filterNetworkRequest()` in `sandbox-manager.js`), so neither a per-call grant
+  nor a per-call narrowing is representable, and a silent ignore would run the child under a policy
+  other than the one it was handed. An EQUAL section is accepted (order-insensitive set equality of
+  the domain lists), so a filesystem-only per-call policy works by repeating the session's network
+  section. A concurrent test proves isolation: a baseline child reaches an allowed domain (HTTP 200)
+  while a sibling's diverging attempt is refused at the same moment, and the session still filters a
+  non-listed host. A per-child allow-list was investigated and MEASURED unavailable: SRT's
+  `initialize()` ask callback receives only `{host, port}` (no child identity), is never consulted
+  while `strictAllowlist` is set (which this battery always sets), and the one identity it could key
+  on — the proxy username — is client-controlled and forgeable, while `network.filterRequest` is
+  deny-only and runs after the session list already allowed the host. Measured on macOS/seatbelt and
+  Linux/bwrap (SRT 0.0.70); the two agreed on every step, so the docs state the behaviour for the SRT
+  enforcer as a whole rather than for one host. See [per-call policy semantics under
+  SRT](/batteries/sandbox/index#per-call-policy-semantics-under-srt) and the `SandboxHandle.run` doc
+  comment.
+
 ## 2026-09-28
 
 ### Fixed

@@ -19,9 +19,31 @@ export interface SandboxSearch {
   searchContent(o: {
     root: string
     pattern: string
-    maxDepth: number
-    /** Maximum results to yield. MUST be an integer >= 1; adapters reject anything else. */
-    limit: number
+    /**
+     * Traversal depth. Omit for an unbounded scan; an explicit value must be a non-negative integer.
+     *
+     * @remarks
+     * An adapter MUST NOT name a depth on its own initiative when omitted — the unbounded request is
+     * the caller's choice, and `Number.MAX_SAFE_INTEGER` is a disguised cap, not an implementation of
+     * it (issue #48).
+     */
+    maxDepth?: number
+    /**
+     * Maximum results to yield. Omit for an unbounded search; an explicit value MUST be an integer
+     * >= 1, and adapters reject anything else.
+     *
+     * @remarks
+     * Omission is the documented unbounded mode, NOT a default cap: every match is returned and the
+     * scan finishes `{ kind: 'done', complete: true }`. There is deliberately no sentinel —`undefined`
+     * cannot be confused with an explicit number, so `Infinity`/`NaN`/`0`/negatives stay rejections
+     * even though they conceptually mean the same thing (issue #48).
+     *
+     * MEMORY: an unbounded search is collected by the adapter before results are yielded (rg's
+     * stdout is buffered whole), so peak memory grows in proportion to the OUTPUT on very large
+     * trees — an explicit `limit` truncates only after collection. Pass a `limit` (or `maxDepth`)
+     * wherever the tree size is untrusted or unknown.
+     */
+    limit?: number
     ignoreCase?: boolean
     literal?: boolean
     glob?: string
@@ -35,9 +57,18 @@ export interface SandboxSearch {
   findPaths(o: {
     root: string
     glob: string
-    maxDepth: number
-    /** Maximum results to yield. MUST be an integer >= 1; adapters reject anything else. */
-    limit: number
+    /**
+     * Traversal depth. Omit for an unbounded scan; an explicit value must be a non-negative integer.
+     *
+     * @remarks
+     * An adapter MUST NOT name a depth on its own initiative when omitted — see `searchContent`.
+     */
+    maxDepth?: number
+    /**
+     * Maximum results to yield. Omit for an unbounded search; an explicit value MUST be an integer
+     * >= 1, and adapters reject anything else — see `searchContent` (issue #48).
+     */
+    limit?: number
     iglob?: string
     follow?: boolean
     hidden?: boolean

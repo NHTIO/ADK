@@ -1,6 +1,6 @@
 import { DateTime } from 'luxon'
 import { validator } from '@nhtio/validation'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { APIUserAbortError } from '@anthropic-ai/sdk/core/error'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import { makeDispatchContext } from '../../../../_fixtures/dispatch_context'
@@ -900,6 +900,119 @@ describe('AnthropicMessagesAdapter — resolveErrorStatus recovers a body-only s
     expect(helpers.log.warn).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'anthropic-resolve-error-status' })
     )
+  })
+})
+
+// Issue #46: the classifier previously narrowed against an INLINED copy of the SDK's error classes,
+// so every real HTTP error from the client was `fatal, status 0` and `retry` never ran. These drive
+// the REAL `@anthropic-ai/sdk` client (constructed by the adapter) with an injected `fetch`, so the
+// thrown values are the real SDK classes — the exact shape the bundled copy failed to match.
+describe('AnthropicMessagesAdapter — real SDK HTTP errors honour retry (issue #46)', () => {
+  // A timed-out test can remain suspended before its finally block; don't leak fake timers.
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const overloaded = () =>
+    new Response('{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}', {
+      status: 502,
+      headers: { 'content-type': 'application/json' },
+    })
+  const okBody = {
+    id: 'msg_ok',
+    type: 'message',
+    role: 'assistant',
+    model: 'claude-opus-5',
+    content: [{ type: 'text', text: 'recovered' }],
+    stop_reason: 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: 1, output_tokens: 1 },
+  }
+
+  it('retries three real 502s then succeeds, making exactly 4 fetch calls', async () => {
+    let calls = 0
+    const fetchFn = vi.fn(async () => {
+      calls += 1
+      if (calls <= 3) return overloaded()
+      return new Response(JSON.stringify(okBody), {
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'retry me' })] })
+    await new AnthropicMessagesAdapter({
+      apiKey: 'sk-ant-test-key',
+      model: 'claude-opus-5',
+      maxTokens: 64,
+      stream: false,
+      retry: { maxAttempts: 5, baseDelayMs: 0 },
+      fetch: fetchFn as never,
+    }).executor()(ctx, makeHelpers())
+    expect(fetchFn).toHaveBeenCalledTimes(4)
+    expect(ctx.nack).not.toHaveBeenCalled()
+    expect(ctx._stored.messages[0]!.content?.toString()).toBe('recovered')
+  })
+
+  it('honours a real Retry-After header, stepped in small increments', async () => {
+    // Advance in steps rather than one large jump: the backoff timer is registered only after
+    // reading the first response body. Allow enough real macrotask yields for slow browsers to
+    // finish that read; the cap keeps a genuine failure bounded.
+    vi.useFakeTimers()
+    try {
+      let calls = 0
+      const fetchFn = vi.fn(async () => {
+        calls += 1
+        if (calls === 1)
+          return new Response(
+            '{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}',
+            { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '1' } }
+          )
+        return new Response(JSON.stringify(okBody), {
+          headers: { 'content-type': 'application/json' },
+        })
+      })
+      const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'retry after me' })] })
+      const before = Date.now()
+      const p = new AnthropicMessagesAdapter({
+        apiKey: 'sk-ant-test-key',
+        model: 'claude-opus-5',
+        maxTokens: 64,
+        stream: false,
+        retry: { maxAttempts: 2, baseDelayMs: 10, maxDelayMs: 5000 },
+        fetch: fetchFn as never,
+      }).executor()(ctx, makeHelpers())
+      let settled = false
+      void Promise.resolve(p).then(() => (settled = true))
+      for (let i = 0; i < 300 && !settled; i++) await vi.advanceTimersByTimeAsync(100)
+      expect(settled).toBe(true)
+      await p
+      expect(fetchFn).toHaveBeenCalledTimes(2)
+      // Retry-After is 1s and baseDelayMs is 10ms, so the header (not the backoff) set the delay.
+      expect(Date.now() - before).toBeGreaterThanOrEqual(1000)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not retry a real non-retriable status from the client', async () => {
+    const fetchFn = vi.fn(
+      async () =>
+        new Response('{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}', {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
+    const ctx = makeCtx({ turnMessages: [makeMessage({ content: 'bad request' })] })
+    await new AnthropicMessagesAdapter({
+      apiKey: 'sk-ant-test-key',
+      model: 'claude-opus-5',
+      maxTokens: 64,
+      stream: false,
+      retry: { maxAttempts: 5, baseDelayMs: 0 },
+      fetch: fetchFn as never,
+    }).executor()(ctx, makeHelpers())
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    const nacked = (ctx.nack as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]?.[0]
+    expect(String((nacked as Error).message)).toContain('400')
   })
 })
 

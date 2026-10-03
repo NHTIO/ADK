@@ -52,6 +52,18 @@ export interface SandboxHandle {
    * separate `completed` promise. Drain BOTH concurrently: pipe buffers are per-fd, so draining one to
    * completion first can block the other and hang the child. A non-zero exit is data on `completed`,
    * never a rejection.
+   *
+   * `options.policy` is a PER-INVOCATION policy. Its effect is backend-specific and, under the SRT
+   * enforcer, axis-specific (measured on macOS/seatbelt AND Linux/bwrap, issue #50, both identical): a
+   * per-call FILESYSTEM grant is honoured for that ONE child, REPLACING the session baseline rather
+   * than unioning with it — the per-call policy is that child's complete filesystem policy, so it must
+   * repeat any baseline writes it still wants. A per-call NETWORK section that DIFFERS from the
+   * session's — a new domain, a narrowing, an added deny, a different `disabled` — is REFUSED with
+   * `E_SANDBOX_NETWORK_GRANT_UNSUPPORTED` (SRT's proxy filters every request against the
+   * process-global session config, so neither a per-call grant NOR a per-call narrowing is
+   * representable), so network policy is established for the session; a per-call policy must repeat
+   * the session's network section exactly (order-insensitive set equality). See
+   * [per-call policy semantics](/batteries/sandbox/index#per-call-policy-semantics-under-srt).
    */
   run(options: RunOptions): ReturnType<SandboxPolicyEnforcer['run']>
   /**

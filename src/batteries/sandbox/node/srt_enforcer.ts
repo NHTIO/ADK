@@ -1,12 +1,14 @@
 import { statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { spawn } from 'node:child_process'
+import { isObject } from '@nhtio/adk/guards'
 import { quoteShellArgs, validateAbsoluteBinaryPath, validateBinShell } from '../escape'
 import { derivedRulesFromSrt, primeGlobMatcher, reproduceMandatoryDeny } from './fs_node'
 import {
   E_INVALID_SANDBOX_CONFIG,
   E_SANDBOX_UNSUPPORTED_ENV,
   E_SANDBOX_POLICY_CONFLICT,
+  E_SANDBOX_NETWORK_GRANT_UNSUPPORTED,
 } from '../exceptions'
 import type { SandboxPolicy, DerivedRules } from '../types'
 import type { SandboxPolicyEnforcer } from '../contracts/policy_enforcer'
@@ -53,7 +55,78 @@ const unsupported = (): never => {
     `SRT sandbox is unavailable on ${process.platform}; use WSL2 or the SES browser path`,
   ])
 }
+
+const json = (value: unknown): string => JSON.stringify(value)
+
+/**
+ * Why a per-call policy's network section is not the session baseline, or an empty list when it
+ * EQUALS the baseline.
+ *
+ * @remarks
+ * SRT enforces network allow/deny per REQUEST against the process-global SESSION config, never the
+ * per-call `customConfig`: its mux proxy is started once at `initialize()` and `filterNetworkRequest`
+ * reads `config.network.*` on every request (see the docs page for the source receipts). An
+ * embedder hook exists — `network.filterRequest` and the `initialize()` ask callback — but neither
+ * can scope enforcement to one child: the ask callback is handed only `{host, port}`, is suppressed
+ * entirely while `strictAllowlist` is set (which this battery always sets), and its identity input
+ * (the proxy username) is client-controlled and forgeable; `filterRequest` runs only AFTER the
+ * session list has allowed a host, so it can deny within the list but never grant beyond it. A
+ * per-call network section that differs from the session one — WIDER or NARROWER — would therefore be
+ * silently ignored at enforcement time.
+ *
+ * Refusing every divergence turns that silent ignore into a typed, immediate error. Equality is
+ * exact: the same `disabled` flag, and — compared as SETS, so order does not matter — the same
+ * allowed and denied domain patterns and the same denial reasons. `deniedDomainReasons` is read from
+ * the LIVE session config (`manager.getConfig()`), which is what SRT's filter actually consults.
+ */
+const networkDivergence = (
+  baseline: DerivedRules,
+  policy: SandboxPolicy,
+  sessionReasons: Readonly<Record<string, string>>
+): readonly string[] => {
+  // A disabled policy may not carry domains (`mapPolicy` throws for that combination), so its
+  // canonical section is just the flag. A disabled BASELINE is unrestricted by definition, so it has
+  // no domain lists or reasons to compare against.
+  const policyDisabled = Boolean(policy.network.disabled)
+  const policyAllowed = policyDisabled ? [] : nonEmpty(policy.network.allowedDomains)
+  const policyDenied = policyDisabled ? [] : nonEmpty(policy.network.deniedDomains)
+  const policyReasons = policyDisabled ? {} : { ...(policy.network.deniedDomainReasons ?? {}) }
+  const baselineDisabled = baseline.network.disabled
+  const baselineAllowed = baselineDisabled ? [] : baseline.network.allowedDomains
+  const baselineDenied = baselineDisabled ? [] : baseline.network.deniedDomains
+  const baselineReasons = baselineDisabled ? {} : sessionReasons
+
+  const differences: string[] = []
+  if (policyDisabled !== baselineDisabled)
+    differences.push(`disabled ${baselineDisabled} → ${policyDisabled}`)
+  if (!sameSet(asSet(policyAllowed), asSet(baselineAllowed)))
+    differences.push(`allowedDomains ${json(baselineAllowed)} → ${json(policyAllowed)}`)
+  if (!sameSet(asSet(policyDenied), asSet(baselineDenied)))
+    differences.push(`deniedDomains ${json(baselineDenied)} → ${json(policyDenied)}`)
+  if (!sameReasons(policyReasons, baselineReasons))
+    differences.push(`deniedDomainReasons ${json(baselineReasons)} → ${json(policyReasons)}`)
+  return differences
+}
 const nonEmpty = (v: readonly string[] | undefined): string[] => [...(v ?? [])]
+const asSet = (v: readonly string[]): ReadonlySet<string> => new Set(v)
+const sameSet = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean =>
+  a.size === b.size && [...a].every((item) => b.has(item))
+const sameReasons = (
+  a: Readonly<Record<string, string>>,
+  b: Readonly<Record<string, string>>
+): boolean => {
+  const aKeys = Object.keys(a)
+  return aKeys.length === Object.keys(b).length && aKeys.every((key) => b[key] === a[key])
+}
+/** Coerce an arbitrary upstream value into the string→string denial-reason map SRT expects. */
+const reasonMap = (value: unknown): Record<string, string> =>
+  isObject(value)
+    ? Object.fromEntries(
+        Object.entries(value).filter(
+          (entry): entry is [string, string] => typeof entry[1] === 'string'
+        )
+      )
+    : {}
 
 /**
  * Host variables a sandboxed child inherits when the caller names no allow-list.
@@ -522,6 +595,34 @@ export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxP
     adopted,
     checkDependencies: async () => manager.checkDependenciesAsync(),
     run: async (op) => {
+      // PER-CALL ADMISSION, NETWORK AXIS. No per-call network section is enforceable under SRT: its
+      // mux proxy is started once at `initialize()` and filters every request against the SESSION
+      // config, so a per-call section that differs from the session one — whether WIDER (a new
+      // domain) or NARROWER (a shorter allow-list, an added deny) — is silently ignored at
+      // enforcement time. Both directions are refused rather than ignored: a narrowing would also be
+      // a lie (the child runs under the session list, not the narrower one the caller asked for).
+      // The per-call FILESYSTEM axis needs no such gate — its policy is baked into that child's
+      // profile/argv, a real per-child grant.
+      //
+      // The comparison reads the LIVE session state (re-derived per call, never the cached
+      // `derived`): an adopted session can be widened by a foreign `updateConfig()`, and reading the
+      // stale snapshot would reject sections the session already matches.
+      const liveBaseline = derive()
+      const divergence = networkDivergence(
+        liveBaseline,
+        op.policy,
+        reasonMap(manager.getConfig()?.network?.deniedDomainReasons)
+      )
+      if (divergence.length > 0)
+        throw new E_SANDBOX_NETWORK_GRANT_UNSUPPORTED([
+          `the per-call policy's network section differs from the sandbox session's, which SRT ` +
+            `cannot enforce for a single child (its proxy filters every request against the SESSION ` +
+            `config, not the per-call one), so the child would run under the session policy while ` +
+            `you believed it ran under yours. Differences: ${divergence.join('; ')}. A network ` +
+            `policy is per SESSION under SRT: repeat the session's network section for per-call ` +
+            `filesystem policies, or establish a new srtEnforcer + createSandbox pair with the ` +
+            `network policy you need.`,
+        ])
       const mapped = mapPolicy(op.policy)
       const command = await quoteShellArgs(op.argv)
       const wrapped = await manager.wrapWithSandboxArgv(
@@ -560,7 +661,11 @@ export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxP
         if (terminate && op.signal) op.signal.removeEventListener('abort', terminate)
         terminate = undefined
       }
-      const completed = new Promise<{ exitCode: number; failed: boolean }>((settle) => {
+      const completed = new Promise<{
+        exitCode: number
+        failed: boolean
+        signalCode?: string
+      }>((settle) => {
         // 'error' MUST be handled, and not only so `completed` settles: an unhandled 'error' on a
         // ChildProcess is an uncaught exception that terminates the HOST process. A missing wrapper
         // binary or an unusable `cwd` would therefore kill the agent instead of failing one command.
@@ -568,11 +673,20 @@ export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxP
         // a spawn failure emits 'error' then 'close', and the later 'close' is discarded.
         child.once('error', () => {
           cleanup()
+          // No `signalCode`: a spawn failure is not a signal kill.
           settle({ exitCode: 1, failed: true })
         })
-        child.once('close', (code) => {
+        // `close` carries the REAL terminating signal (`signal`), which Node derives from the wait
+        // status — the one source of truth for whether the child was signalled and by which signal,
+        // rather than inferring it from what we asked for. The field is OMITTED on a normal exit so
+        // the settlement of an exiting child stays byte-identical to its previous shape.
+        child.once('close', (code, signal) => {
           cleanup()
-          settle({ exitCode: code ?? 1, failed: (code ?? 1) !== 0 })
+          settle({
+            exitCode: code ?? 1,
+            failed: (code ?? 1) !== 0,
+            ...(signal ? { signalCode: signal } : {}),
+          })
         })
       })
       return {
