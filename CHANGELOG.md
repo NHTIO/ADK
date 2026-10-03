@@ -15,7 +15,7 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
-## 2026-10-02
+## 2026-10-03
 
 ### Fixed
 
