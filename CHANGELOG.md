@@ -15,6 +15,129 @@ you *when* you got it, not *what changed*: a `^` range will float across battery
 breaking changes, so pin an exact version if you need stability and read the entry before
 upgrading.
 
+## Unreleased
+
+### Fixed
+
+- **`@nhtio/adk/batteries/media/engines/execa_executor` — oversized escalation delays no longer busy-loop.** Deadline timers are capped at Node's maximum timer delay and re-armed against the monotonic deadline; `forceKillAfterDelay: Infinity` disables escalation.
+
+### Added
+
+- **`@nhtio/adk/batteries/sandbox/node` — `srtBinarySandbox(enforcer, opts?)`, the concrete
+  `BinarySandbox` implementor for the SRT enforcer** (closes issue #37, closes issue #20). The sandbox
+  battery could refuse and narrate invocations, but there was no bundled way to actually wrap a
+  media-era `BinaryExecutor` call with OS enforcement; this factory provides one, derived from an
+  existing `srtEnforcer` rather than a second SRT adapter. It reuses the enforcer's single live
+  `SandboxManager` session, its validated `binShell`, its one `mapPolicy` translation point, its
+  network-divergence admission gate and its host-env allow-list — the "admission + quote +
+  `wrapWithSandboxArgv`" part of `run()` was factored into an internal step both execution routes
+  call, so the streaming shell path and the settled media path cannot drift. The wrap result sets
+  `cmd` to the wrapper binary and `args` to the rest of the generated argv (the caller's argv is
+  already inside it — it is never appended twice), overlays the caller's explicit `env` ON TOP of the
+  host-env allow-list (which — never `process.env` wholesale — is what controls host inheritance), and
+  carries `cwd`, `timeoutMs`, `signal` and the kill controls through. The wrap computes ONE effective
+  directory — the invocation's `cwd`, else the factory's `cwd`,
+  else `process.cwd()` — and uses it for both the SRT profile and the returned invocation's `cwd`, so
+  the profile and the spawn can never disagree. A wrap-time policy must repeat the session's network section exactly (or differ only on
+  the FILESYSTEM axis), or the same `E_SANDBOX_NETWORK_GRANT_UNSUPPORTED` the streaming path throws
+  fires before anything runs. Exported from `@nhtio/adk/batteries/sandbox/node` only — deliberately
+  not re-exported from the node-free `batteries/sandbox` barrel.
+- **`@nhtio/adk/batteries/media/contracts` — `BinaryInvocation` carries `cwd`, `env`, `extendEnv`,
+  `killSignal` and `forceKillAfterDelay`; `BinaryExecResult` carries `signalCode`.** `cwd` is
+  exec-style and threaded by the bundled executor; `env` holds the caller's own explicit values,
+  applied last, with the same semantics the sandbox enforcer contract gives it. The host-env
+  allow-list is what controls inheritance from `process.env`, and an adapter must not let `env`
+  (or anything else) cause host variables beyond its allow-list to reach the child; explicit values
+  may add names or override allow-listed ones. `extendEnv: false` is the inheritance cut-off a
+  sandbox needs: execa's `extendEnv: true` default merges the whole `process.env` back in, which
+  would silently defeat any host-env allow-list, so `srtBinarySandbox` sets it and `execaExecutor`
+  maps it to execa's own `extendEnv: false`.
+  `killSignal` (default `'SIGTERM'`) and
+  `forceKillAfterDelay` (ms before `SIGKILL`; `false` disables escalation) are the kill controls.
+  `signalCode` is optional and additive — absent means the process exited on its own. The type stays
+  browser-safe: the signal is typed `string`, no `NodeJS` import.
+- **`@nhtio/adk/batteries/media/engines/execa_executor` — `detached` threads through the whole
+  termination path, plus `cwd`/`env`/`extendEnv` forwarding and executor-level `defaultKillSignal` /
+  `defaultForceKillAfterDelay`.**
+  Invocations are now spawned `detached` (the child leads its own process group) and every abort and
+  timeout path terminates the WHOLE group — `process.kill(-pid, signal)`, escalating to `SIGKILL`
+  after `forceKillAfterDelay` — so a binary hidden behind a wrapper (sandbox → shell → command) dies
+  too, mirroring what `srtEnforcer.run` already did for its own spawns. Group kill needs the process
+  handle: `ExecaLike`'s return type now exposes an optional `pid` and the promise, and a BYO
+  substitute without a `pid` falls back to execa's own kill rather than failing. With
+  `detached: false` the child leads no group, so every path signals, probes and escalates against the
+  DIRECT child only (`subprocess.kill`, `process.kill(pid, 0)`) — a group probe there would report the
+  target dead and silently skip the escalation — and escalation is cancelled at settlement in this
+  direct-child mode, because the reaped child leaves nothing to escalate against and its pid could
+  be recycled.
+  `process.kill`
+  throwing (`ESRCH` on an already-reaped group) is swallowed, abort listeners are removed on settle,
+  and no path leaves an unhandled rejection. Non-zero exits remain data and are never thrown.
+- **`@nhtio/adk/batteries/media/engines/execa_executor` — configurable settlement escalation.**
+  `BinaryInvocation.settleEscalation` and executor `defaultSettleEscalation` configure how escalation
+  behaves after abort/timeout: `'wait'` (default), `'cancel'`, or `'poll'`. Wait holds settlement until
+  the detached group is empty or receives its SIGKILL, so no descendant survives at the cost of
+  latency bounded by the remaining escalation delay; cancel returns fastest and drops escalation; poll
+  returns fastest and watches survivors later with unref'd probes every ~100 ms until the original
+  deadline, latching off at the first empty observation. Both group-probing modes retain the narrow
+  PGID-reuse risk between probes; wait bounds it to before return. `detached: false` degrades to cancel.
+
+### Changed
+
+- **`@nhtio/adk/batteries/media/engines/execa_executor` — detached process groups are now the default.**
+  `execaExecutor` spawns children detached as process-group leaders, so terminal-generated
+  `SIGINT`/`SIGQUIT` (Ctrl-C) no longer reaches them; they are terminated only through the
+  invocation's `signal` or `timeoutMs`. Callers that relied on Ctrl-C reaching children should
+  pass an abort signal, or opt out with `execaExecutor({ detached: false })`, which then terminates
+  the direct child only (its own `signal`/`timeoutMs` kill, liveness probe and `SIGKILL` escalation)
+  and gives up group-killing wrapped grandchildren.
+- **BREAKING `@nhtio/adk/batteries/sandbox` — the `BinarySandbox` contract now takes and returns the
+  plain `BinaryInvocation`; the wrapper returns cmd+args and quoting is the wrapper's job** (closes
+  issue #37). The previous shape threaded `BinaryInvocation & { command: string }` — a fully-quoted
+  shell command line the adapter produced with `quoteShellArgs` — and `sandboxedExecutor` then ran
+  `inner.exec({ ...wrapped, cmd: wrapped.command })`, executing the whole quoted command line AS the
+  binary name while still appending the original `args`. Nothing in the repo implemented the old
+  contract (the only implementation ships in this change), so the break is contained to the interface
+  itself: `wrap(invocation)` now receives the invocation verbatim and returns the invocation the
+  inner executor should run, whose `cmd`/`args` ARE the wrapped argv. Bypass behaviour is unchanged
+  (audit-only, `cmd`-only predicate, loud event). Consumers who implemented `BinarySandbox` against
+  the old shape must drop the `command` field handling and return `cmd`/`args` instead — see
+  [the media executor docs](/batteries/sandbox/media-executor).
+
+### Fixed
+
+- **`@nhtio/adk/batteries/media/engines/execa_executor` — disabled timeouts no longer kill
+  immediately.** Executor-owned deadlines now preserve execa 9's `timeout: 0` no-timeout
+  semantics; `Infinity` also means no deadline. Finite values above Node's 2,147,483,647 ms timer
+  limit likewise disable the deadline rather than being overflow-clamped to 1 ms and terminating
+  the process immediately. Negative values and `NaN` reject before spawn, matching execa 9's
+  validation behavior.
+- **`@nhtio/adk/batteries/media/engines/execa_executor` — the `SIGKILL` escalation deadline is now
+  measured on a MONOTONIC clock, and a deadline timer that fires early RE-ARMS instead of dropping
+  out.** The escalation stored `deadline = Date.now() + delay` (wall clock) while arming
+  `setTimeout(check, delay)` (monotonic), and `check()` returned without re-arming whenever
+  `Date.now() < deadline`. Two reachable cases made that permanent: Node's timers can fire about
+  1ms early, and a backward NTP step puts `Date.now()` behind the arm-time wall clock for as long
+  as the step lasts. Either way the deadline timer silently died. Before settlement nothing else
+  drove `check()`, so a `detached: true` group whose grandchild ignored the first signal and held
+  the stdout pipe never got its `SIGKILL` — execa cannot settle until the pipes close, so `exec()`
+  HUNG instead of escalating. The deadline is now
+  `performance.now()`-based and never touches `Date.now()`; a `check()` that finds the deadline not
+  yet due clears the previous deadline timer and re-arms for the remaining monotonic milliseconds
+  (unref'd), so the deadline can never be left unwatched while the escalation is `armed`. The
+  deadline is fixed once at `arm()` and never re-based; escalation timers are cancelled on return
+  in either detached mode, and every timer is unref'd and fully cleared on cancel/fire.
+- **`@nhtio/adk/batteries/sandbox` — `sandboxedExecutor` no longer mis-executes wrapped commands**
+  (closes issue #37, closes issue #20). This is the runtime face of the `BinarySandbox` contract
+  change above: `inner.exec({ ...wrapped, cmd: wrapped.command })` used the sandbox's fully-quoted
+  shell string as argv[0] — so `bash -c "sh -c 'printf hello'"` looked for an executable literally
+  named `sh -c 'printf hello'` (exit 127) — while the caller's original args were appended a second
+  time behind it. The adapter now runs the wrapped invocation the `BinarySandbox` returns as-is: the
+  wrapped `cmd`/`args` are the complete argv, `quoteShellArgs` is no longer called in the adapter
+  itself (quoting belongs to whichever wrapper is in use), and the original args are never re-appended.
+  A regression suite pins the passthrough: the wrapper receives the invocation verbatim, the inner
+  executor receives exactly `cmd`/`args` back, and bypass skips wrapping unchanged.
+
 ## 2026-10-03
 
 ### Fixed

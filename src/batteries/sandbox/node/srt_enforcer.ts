@@ -10,8 +10,34 @@ import {
   E_SANDBOX_POLICY_CONFLICT,
   E_SANDBOX_NETWORK_GRANT_UNSUPPORTED,
 } from '../exceptions'
+import type { BinarySandbox } from '../executor'
 import type { SandboxPolicy, DerivedRules } from '../types'
 import type { SandboxPolicyEnforcer } from '../contracts/policy_enforcer'
+
+/**
+ * The internal SRT bridge both execution routes share: admit a per-call policy, quote the argv,
+ * and ask SRT for the wrapped argv.
+ *
+ * @remarks
+ * Deliberately NOT part of `SandboxPolicyEnforcer` — the contract stays backend-neutral, so an
+ * SRT-shaped internal field would make the "ADK-owned types" firewall nominal. It is exported only
+ * as a type so the factory that consumes it can be typed; the value lives on the enforcer object
+ * as a hidden carrier field.
+ */
+type SrtWrapFn = (
+  argv: readonly string[],
+  policy: SandboxPolicy,
+  signal: AbortSignal | undefined,
+  cwd: string | undefined,
+  correlationId?: string
+) => Promise<{ argv: string[]; env: Record<string, string> }>
+
+/** What {@link srtBinarySandbox} probes for on the enforcer: the internal SRT carrier fields. */
+type SrtCarrier = SandboxPolicyEnforcer & {
+  wrapInvocation?: SrtWrapFn
+  sessionPolicy?: SandboxPolicy
+  hostEnv?: Record<string, string>
+}
 
 type SrtManager = {
   initialize(config: SrtConfig): Promise<void>
@@ -590,49 +616,80 @@ export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxP
     ...derived.write.denyWithinAllow,
     ...derived.mandatoryDeny.entries,
   ])
-  const enforcer: SandboxPolicyEnforcer = {
+  /**
+   * PER-CALL ADMISSION plus the SRT argv wrap — the one path BOTH execution routes take.
+   *
+   * @remarks
+   * `run()` spawns the result itself; {@link srtBinarySandbox} hands it to a `BinaryExecutor`
+   * instead. Factoring it out is what keeps those two routes from drifting apart: the network
+   * admission gate, the single `mapPolicy` translation, the single shell quoting step and the
+   * `wrapWithSandboxArgv` call are shared, so a change to any of them lands on both.
+   *
+   * The network axis is refused rather than degraded: SRT's mux proxy is started once at
+   * `initialize()` and filters every request against the SESSION config, so a per-call section that
+   * differs from the session one — whether WIDER (a new domain) or NARROWER (a shorter allow-list,
+   * an added deny) — is silently ignored at enforcement time. Both directions are refused: a
+   * narrowing would also be a lie (the child runs under the session list, not the narrower one the
+   * caller asked for). The per-call FILESYSTEM axis needs no such gate — its policy is baked into
+   * that child's profile/argv, a real per-child grant.
+   *
+   * The comparison reads the LIVE session state (re-derived per call, never the cached `derived`):
+   * an adopted session can be widened by a foreign `updateConfig()`, and reading the stale snapshot
+   * would reject sections the session already matches.
+   */
+  const admitAndWrap = async (
+    argv: readonly string[],
+    policy: SandboxPolicy,
+    signal: AbortSignal | undefined,
+    workingDir: string | undefined,
+    correlationId?: string
+  ): Promise<{ argv: string[]; env: Record<string, string> }> => {
+    const liveBaseline = derive()
+    const divergence = networkDivergence(
+      liveBaseline,
+      policy,
+      reasonMap(manager.getConfig()?.network?.deniedDomainReasons)
+    )
+    if (divergence.length > 0)
+      throw new E_SANDBOX_NETWORK_GRANT_UNSUPPORTED([
+        `the per-call policy's network section differs from the sandbox session's, which SRT ` +
+          `cannot enforce for a single child (its proxy filters every request against the SESSION ` +
+          `config, not the per-call one), so the child would run under the session policy while ` +
+          `you believed it ran under yours. Differences: ${divergence.join('; ')}. A network ` +
+          `policy is per SESSION under SRT: repeat the session's network section for per-call ` +
+          `filesystem policies, or establish a new srtEnforcer + createSandbox pair with the ` +
+          `network policy you need.`,
+      ])
+    const mapped = mapPolicy(policy)
+    const command = await quoteShellArgs(argv)
+    const wrapped = await manager.wrapWithSandboxArgv(
+      command,
+      binShell,
+      mapped,
+      signal,
+      workingDir,
+      {
+        commandId: correlationId,
+      }
+    )
+    // `env` is the HOST half only, deliberately NOT `wrapped.env`: SRT returns the unchanged host
+    // environment there, so using it would defeat the allow-list wholesale (the `run()` spawn
+    // documents the same trap). Callers overlay THEIR values on top of this, never beneath it.
+    return { argv: wrapped.argv, env: hostEnv }
+  }
+  const enforcer: SandboxPolicyEnforcer & {
+    /** Internal SRT bridge consumed by {@link srtBinarySandbox} — see `SrtWrapFn`. */
+    wrapInvocation: SrtWrapFn
+    /** The SESSION policy this enforcer established or adopted (for the wrap path's default). */
+    sessionPolicy: SandboxPolicy | undefined
+    /** The host-env allow-list resolved at construction (see `resolveHostEnv`). */
+    hostEnv: Record<string, string>
+  } = {
     isSupported: () => manager.isSupportedPlatform(),
     adopted,
     checkDependencies: async () => manager.checkDependenciesAsync(),
     run: async (op) => {
-      // PER-CALL ADMISSION, NETWORK AXIS. No per-call network section is enforceable under SRT: its
-      // mux proxy is started once at `initialize()` and filters every request against the SESSION
-      // config, so a per-call section that differs from the session one — whether WIDER (a new
-      // domain) or NARROWER (a shorter allow-list, an added deny) — is silently ignored at
-      // enforcement time. Both directions are refused rather than ignored: a narrowing would also be
-      // a lie (the child runs under the session list, not the narrower one the caller asked for).
-      // The per-call FILESYSTEM axis needs no such gate — its policy is baked into that child's
-      // profile/argv, a real per-child grant.
-      //
-      // The comparison reads the LIVE session state (re-derived per call, never the cached
-      // `derived`): an adopted session can be widened by a foreign `updateConfig()`, and reading the
-      // stale snapshot would reject sections the session already matches.
-      const liveBaseline = derive()
-      const divergence = networkDivergence(
-        liveBaseline,
-        op.policy,
-        reasonMap(manager.getConfig()?.network?.deniedDomainReasons)
-      )
-      if (divergence.length > 0)
-        throw new E_SANDBOX_NETWORK_GRANT_UNSUPPORTED([
-          `the per-call policy's network section differs from the sandbox session's, which SRT ` +
-            `cannot enforce for a single child (its proxy filters every request against the SESSION ` +
-            `config, not the per-call one), so the child would run under the session policy while ` +
-            `you believed it ran under yours. Differences: ${divergence.join('; ')}. A network ` +
-            `policy is per SESSION under SRT: repeat the session's network section for per-call ` +
-            `filesystem policies, or establish a new srtEnforcer + createSandbox pair with the ` +
-            `network policy you need.`,
-        ])
-      const mapped = mapPolicy(op.policy)
-      const command = await quoteShellArgs(op.argv)
-      const wrapped = await manager.wrapWithSandboxArgv(
-        command,
-        binShell,
-        mapped,
-        op.signal,
-        op.cwd,
-        { commandId: op.correlationId }
-      )
+      const wrapped = await admitAndWrap(op.argv, op.policy, op.signal, op.cwd, op.correlationId)
       const child = spawn(wrapped.argv[0], wrapped.argv.slice(1), {
         cwd: op.cwd,
         // SRT's `wrapped.env` is the unchanged process environment, not sandbox plumbing. Merging it
@@ -695,6 +752,13 @@ export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxP
         completed,
       }
     },
+    // THE SRT-BRIDGE CAPABILITY. Not part of the `SandboxPolicyEnforcer` contract — a hidden
+    // carrier field {@link srtBinarySandbox} probes for (structurally, so a duck-typed enforcer of
+    // the same shape but SRT-free origin is refused, not silently misused). It shares the closure
+    // state above, which is what makes the two execution routes one policy.
+    wrapInvocation: admitAndWrap,
+    sessionPolicy: options.policy,
+    hostEnv,
     // Owned sessions are immutable from this adapter's perspective and retain the cheap cached
     // snapshot. An adopted session must re-read SRT on every call: a foreign updateConfig() can widen
     // the live sandbox between invocations, and drift() must compare against that live state.
@@ -723,5 +787,125 @@ export const srtEnforcer = async (options: SrtEnforcerOptions): Promise<SandboxP
   }
   return enforcer
 }
+
+/**
+ * Options for {@link srtBinarySandbox}.
+ */
+export type SrtBinarySandboxOptions = {
+  /**
+   * The per-invocation policy this wrapper applies. Defaults to the enforcer's own session policy.
+   *
+   * @remarks
+   * This is the SAME per-call policy contract {@link SandboxPolicyEnforcer.run} takes, so it is
+   * admitted identically: the FILESYSTEM section is baked into this child's profile (and replaces
+   * the session baseline for it, exactly as `run()` does), while a NETWORK section that differs
+   * from the live session is refused with `E_SANDBOX_NETWORK_GRANT_UNSUPPORTED`. Omitted means the
+   * enforcer's established session policy, which is the only policy that can never diverge from
+   * the session's network state.
+   */
+  policy?: SandboxPolicy
+  /**
+   * The DEFAULT working directory, used when the invocation carries none — the invocation's own
+   * `cwd` wins. Falls back to the current process directory when neither names one.
+   *
+   * @remarks
+   * ONE effective directory is computed from those layers and used for BOTH the SRT profile and the
+   * returned invocation's `cwd`, so the profile and the spawn can never disagree. That matters
+   * because SRT derives its git `safe.directory` injection and (on Linux) its mandatory-deny scan
+   * from this directory: a profile generated for one directory while the executor spawns in
+   * another is a sandbox that does not describe the process it is supposedly enforcing.
+   */
+  cwd?: string
+}
+
+/**
+ * Expose an existing {@link SandboxPolicyEnforcer} as a {@link BinarySandbox} for the media
+ * pipeline — the bridge between the sandbox battery and {@link sandboxedExecutor}.
+ *
+ * @remarks
+ * DELIBERATELY DERIVED FROM {@link srtEnforcer}, NOT A SECOND SRT ADAPTER. It holds no state of its
+ * own: the wrapper closes over the enforcer's single live `SandboxManager` session, its validated
+ * `binShell`, its `mapPolicy` translation, its network-divergence admission gate and its host-env
+ * allow-list. One process-global session, one translation point, one admission policy — the two
+ * execution routes (`run()` for streaming tools, this for settled media invocations) share the
+ * internal admission+wrapping step so they cannot drift.
+ *
+ * The wrapped invocation is what the inner executor spawns: `cmd` is the wrapper binary
+ * (`bwrap`/`sandbox-exec`), `args` are the rest of the generated argv, and the caller's own argv is
+ * already inside that generated command. The adapter therefore must not re-append the original args.
+ *
+ * THE ENVIRONMENT SPLITS IN TWO, AND ONLY ONE HALF INHERITS FROM THE HOST. The host-env allow-list is
+ * what decides which HOST variables a child may inherit from `process.env`; it is the adapter's
+ * decision, taken at construction. The caller's `env` is its own EXPLICIT values, applied last, and
+ * may add names or override allow-listed ones. The wrap composes the two into
+ * `{ ...hostEnv, ...(invocation.env ?? {}) }` and sets `extendEnv: false`, so the executor hands the
+ * child EXACTLY those variables. This is load-bearing: execa's default `extendEnv: true` would merge
+ * the full `process.env` back in, which would silently hand the model every host secret whenever it
+ * ran `env` — the exact leak the allow-list exists to prevent. So the invariant this adapter
+ * enforces is the contract's: `env` may add or override, but NOTHING from the host beyond the
+ * allow-list reaches the child, and `env` is never a reason to inherit more from the host.
+ *
+ * REFUSES rather than degrades in the same places `run()` does: the network gate throws
+ * `E_SANDBOX_NETWORK_GRANT_UNSUPPORTED` before anything runs, and an unavailable platform throws
+ * `E_SANDBOX_UNSUPPORTED_ENV` (surfaced by `srtEnforcer`'s construction). After the enforcer is
+ * disposed the process-global session is gone, so a wrap still generates argv but the child is
+ * refused by the OS — the same honest failure mode `run()` presents. Prefer disposing the
+ * executor alongside the enforcer.
+ *
+ * POSIX-only, like the session it wraps: there is no `process.kill(-pid, signal)` equivalent on
+ * Windows, which is why `srtEnforcer` never constructs there.
+ *
+ * @param enforcer - The live enforcer whose session, shell, policy mapping and env allow-list this
+ * wrapper reuses. Construct it with {@link srtEnforcer} and dispose it when the executor goes away.
+ * @param opts - The per-invocation policy and the DEFAULT working directory (the invocation's own
+ * `cwd` wins); the same directory is used for the SRT profile and for the returned invocation.
+ * @returns A {@link BinarySandbox} whose `wrap` returns the sandboxed argv the inner executor runs.
+ */
+export const srtBinarySandbox = (
+  enforcer: SandboxPolicyEnforcer,
+  opts: SrtBinarySandboxOptions = {}
+): BinarySandbox => ({
+  async wrap(invocation) {
+    // The factory can only reuse state it can actually reach. A BYO enforcer of the same interface
+    // has no SRT session behind it, so wrapping through one would either do nothing (and read as
+    // sandboxed) or throw somewhere unhelpful; refuse at the seam that knows the answer.
+    const carrier = enforcer as SrtCarrier
+    if (typeof carrier.wrapInvocation !== 'function')
+      throw new E_INVALID_SANDBOX_CONFIG([
+        'srtBinarySandbox requires an enforcer constructed by srtEnforcer: this adapter only ' +
+          "forwards to the enforcer's own SRT session, and the supplied enforcer exposes none",
+      ])
+    const policyForCall = opts.policy ?? carrier.sessionPolicy
+    if (!policyForCall)
+      throw new E_INVALID_SANDBOX_CONFIG([
+        'srtBinarySandbox requires a policy: the supplied enforcer was adopted (it holds no ' +
+          'ADK policy of its own), so name the session policy explicitly in the wrap options',
+      ])
+    // ONE effective directory for both the SRT profile and the spawn — never two that can drift.
+    // Precedence is the documented one: the invocation's own cwd wins, then this factory's default,
+    // then the current process directory (what execa would spawn in with no cwd set at all).
+    const cwd = invocation.cwd ?? opts.cwd ?? process.cwd()
+    const wrapped = await carrier.wrapInvocation(
+      [invocation.cmd, ...invocation.args],
+      policyForCall,
+      invocation.signal,
+      cwd,
+      undefined
+    )
+    return {
+      ...invocation,
+      cmd: wrapped.argv[0]!,
+      args: wrapped.argv.slice(1),
+      // THE SAME directory the profile was generated for: SRT's profile is derived from this and
+      // the executor then spawns in it, so the two cannot disagree.
+      cwd,
+      // `wrapped.env` is `admitAndWrap`'s host-env allow-list (never SRT's unchanged host
+      // environment); the caller's explicit values are applied last, exactly as in `run()`.
+      env: { ...wrapped.env, ...(invocation.env ?? {}) },
+      // The executor must not merge `process.env` back in — see the factory docs above.
+      extendEnv: false,
+    }
+  },
+})
 
 export { mapPolicy }

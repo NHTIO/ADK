@@ -1,17 +1,28 @@
-import { quoteShellArgs } from './escape'
 import { emitBypass, type SandboxEventSink } from './observability'
 import type { BinaryExecutor, BinaryInvocation } from '../media/contracts'
 
 /**
- * A small command-wrapper seam used by {@link sandboxedExecutor}.  The wrapper returns the
- * invocation that the inner executor should receive; it must not execute the command itself.
+ * A command wrapper that REWRITES an invocation into the one the inner executor should run.
+ *
+ * @remarks
+ * The wrapper's job is to own quoting: it returns the argv that actually gets spawned, which for a
+ * sandbox is the wrapper binary (bwrap, sandbox-exec, …) followed by everything that binary needs.
+ * That is why {@link sandboxedExecutor} does NOT quote for it — quoting is a property of the
+ * wrapper being used (a shell `-c` string, an argv vector, a container `exec` line), so an adapter
+ * that quoted first would hand every implementor the wrong representation.
+ *
+ * A `wrap` implementation must NOT execute anything: it only computes and returns the invocation.
  */
-/** Command wrapping contract used by the executor adapter. */
 export interface BinarySandbox {
-  /** Wrap an invocation without executing it. */
-  wrap(
-    invocation: BinaryInvocation & { command: string }
-  ): Promise<BinaryInvocation & { command: string }>
+  /**
+   * Return the invocation the inner executor should run instead. Its `cmd` and `args` ARE the
+   * wrapped argv, so the caller's original `args` are never appended.
+   *
+   * @param invocation - The command, args, working directory, environment, and limits to wrap.
+   * @returns The replacement invocation, carrying through whatever the caller asked for that the
+   * wrapper does not itself decide (`cwd`, `timeoutMs`, `signal`, the kill controls).
+   */
+  wrap(invocation: BinaryInvocation): Promise<BinaryInvocation>
 }
 
 /** Configuration for the sandboxed binary executor. */
@@ -33,20 +44,26 @@ export interface SandboxedExecutorOptions {
  * adapter does not raise that bound (and never sets `maxBuffer: Infinity`). The streaming path is
  * {@link createRunShellCommandTool}, which uses the policy-enforcer stream contract instead.
  *
+ * The adapter hands the invocation to {@link BinarySandbox.wrap} verbatim and runs what comes
+ * back: `inner.exec(await sandbox.wrap(invocation))`. The returned `cmd`/`args` are the complete
+ * wrapped argv, so the original `args` are not re-appended — a wrapper that wants them in the
+ * wrapped command puts them there itself. Quoting is therefore the wrapper's job, not this
+ * adapter's.
+ *
  * Bypass is an audit-only opt-out. Its predicate receives `cmd` only, never argv: callers must
  * allow only binaries safe with hostile arguments and must never allow an interpreter. Non-zero
  * exits remain data and are never thrown. Removing this wrapper call restores the inner executor.
+ *
+ * @param options - The wrapper, the inner executor, and the optional audit hooks.
+ * @returns A `BinaryExecutor` whose non-bypassed invocations go through `options.sandbox.wrap`.
  */
-/** Create a BinaryExecutor that wraps invocations unless an explicitly audited bypass applies. */
 export const sandboxedExecutor = (options: SandboxedExecutorOptions): BinaryExecutor => ({
   async exec(invocation) {
     if (options.bypass?.(invocation.cmd)) {
       options.onSandbox?.({ kind: 'bypass', command: invocation.cmd, loud: true })
       return options.inner.exec(invocation)
     }
-    const command = await quoteShellArgs([invocation.cmd, ...invocation.args])
-    const wrapped = await options.sandbox.wrap({ ...invocation, command })
-    return options.inner.exec({ ...wrapped, cmd: wrapped.command })
+    return options.inner.exec(await options.sandbox.wrap(invocation))
   },
 })
 

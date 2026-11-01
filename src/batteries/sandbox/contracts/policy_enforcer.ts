@@ -25,14 +25,20 @@ export interface SandboxPolicyEnforcer {
     correlationId: string
     cwd: string
     /**
-     * An ADDITIVE per-call overlay on the child's environment, applied LAST.
+     * The caller's own EXPLICIT environment values, applied LAST.
      *
      * @remarks
-     * NOT the host-inheritance control. What a child inherits from the host is the ADAPTER's decision
-     * (the Node/SRT one denies by default and takes an allow-list at construction); this field only
-     * adds to whatever that produced, and an adapter MUST NOT let it silently widen what the deployment
-     * allowed. Leaving these semantics unstated is how the Node adapter came to spread the entire
-     * `process.env` into every child while this field sat unused.
+     * NOT the host-inheritance control. What a child inherits from the host is the ADAPTER's
+     * decision, expressed as an allow-list the adapter owns (the Node/SRT one denies by default and
+     * takes that allow-list at construction). This field is the other half of the picture: the
+     * values the caller names itself. They may add names, or override inherited ones, and because
+     * they are applied last they also win a collision with an allow-listed name.
+     *
+     * An adapter MUST NOT let `env` — or anything else — cause host variables BEYOND its allow-list
+     * to reach the child. Concretely, it must not merge the rest of `process.env` back in on top,
+     * and it must not treat the presence of `env` as a trigger to inherit more widely. Leaving these
+     * semantics unstated is how the Node adapter came to spread the entire `process.env` into every
+     * child while this field sat unused.
      */
     env?: Record<string, string>
     /**

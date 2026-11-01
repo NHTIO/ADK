@@ -69,10 +69,85 @@ export interface BinaryInvocation {
   cmd: string
   /** Arguments, exec-style (no shell interpolation). */
   args: string[]
-  /** Wall-clock timeout in milliseconds. */
+  /**
+   * Working directory for the process. Omitted means the executor's own default.
+   *
+   * @remarks
+   * Exec-style, like `args`: the executor passes it to the process launcher and never interprets
+   * it as shell text. A sandbox wrapper that rewrites the invocation carries the caller's `cwd`
+   * through unchanged — the profile it generates is what decides whether that directory is
+   * reachable at all.
+   */
+  cwd?: string
+  /**
+   * The caller's own EXPLICIT environment values, applied last.
+   *
+   * @remarks
+   * The same semantics as `SandboxPolicyEnforcer.run`'s `env`: these are the caller's own values —
+   * not a host-inheritance control — and a sandbox decides host inheritance separately through its
+   * allow-list. They are applied last, so they may add names or override inherited ones, and an
+   * adapter must not let them (or anything else) pull host variables beyond its allow-list into the
+   * child. They do not replace the executor's environment — unless the invocation clears
+   * {@link BinaryInvocation.extendEnv}, in which case this object IS the whole environment.
+   */
+  env?: Record<string, string>
+  /**
+   * Whether {@link BinaryInvocation.env} extends the executor's own environment (`true`, the
+   * default) or replaces it entirely (`false`).
+   *
+   * @remarks
+   * This field exists for sandboxes. A sandbox decides what a child may inherit from the host
+   * (usually an allow-list, on the explicit grounds that anything inherited is readable back into
+   * the model's context by running `env`), so it must be able to say "this is the entire
+   * environment". An executor that always merged its own ambient environment back in would
+   * silently defeat that allow-list — execa's `extendEnv: true` default does exactly this — which
+   * is why the SRT wrapper sets it to `false` and the bundled executor maps it to
+   * `extendEnv: false`. Leave it unset for an ordinary, unsandboxed invocation.
+   */
+  extendEnv?: boolean
+  /**
+   * Wall-clock timeout in milliseconds.
+   *
+   * @remarks
+   * `0`, `Infinity`, and finite values above 2,147,483,647 disable the deadline.
+   * Negative values and `NaN` reject the invocation before spawning.
+   */
   timeoutMs?: number
   /** Abort signal to cancel the invocation. */
   signal?: AbortSignal
+  /**
+   * The signal used to terminate the invocation when {@link BinaryInvocation.signal} aborts or
+   * {@link BinaryInvocation.timeoutMs} elapses. `'SIGTERM'` by default.
+   *
+   * @remarks
+   * Typed as `string` (not `NodeJS.Signals`) so that this contract stays browser-safe: it is a
+   * plain signal NAME, and an executor that runs somewhere without POSIX signals decides what to
+   * do with it. With the bundled executor's default `detached: true`, it signals the whole process
+   * group; with `detached: false`, it signals only the direct child.
+   */
+  killSignal?: string
+  /**
+   * Milliseconds to wait after {@link BinaryInvocation.killSignal} before escalating to `SIGKILL`;
+   * `false` and `Infinity` disable escalation and never send `SIGKILL`.
+   *
+   * @remarks
+   * Settlement follows {@link BinaryInvocation.settleEscalation}: `'wait'` holds `exec()` until the
+   * escalation completes, `'cancel'` stops escalation when `exec()` returns, and `'poll'` may send
+   * `SIGKILL` after return. Omitted means the executor's default. Negative values and `NaN` reject
+   * before spawning.
+   */
+  forceKillAfterDelay?: number | false
+  /**
+   * How escalation behaves when an abort or executor-owned timeout fires and the invocation settles
+   * while escalation is armed. Defaults to `'wait'`. `'wait'` delays settlement until the target is
+   * empty or SIGKILL is sent (nothing survives, at the cost of latency up to the escalation delay);
+   * `'cancel'` returns fastest but descendants may survive; `'poll'` returns fastest and may kill
+   * survivors later, with a narrow process-group reuse risk after return. A normal exit never waits
+   * or polls. Applies only with finite escalation and a known pid; `detached: false` cancels at
+   * settlement in every mode. Wait also has a narrow numeric PGID-reuse risk between probes,
+   * bounded to before return. The value is a browser-safe string union.
+   */
+  settleEscalation?: 'wait' | 'cancel' | 'poll'
 }
 
 /** The settled result of a {@link BinaryExecutor.exec} call. */
@@ -85,6 +160,14 @@ export interface BinaryExecResult {
   stderr: string
   /** `true` when the invocation failed (non-zero exit, spawn failure, timeout, abort). */
   failed: boolean
+  /**
+   * The signal that terminated the process, when one did.
+   *
+   * @remarks
+   * Omitted on a normal exit, so a consumer must treat absence as "exited on its own". An executor
+   * that cannot surface it simply leaves it off.
+   */
+  signalCode?: string
 }
 
 /**
@@ -96,7 +179,15 @@ export interface BinaryExecutor {
    * Run one invocation to completion and report the result. Implementations must not throw on
    * non-zero exits — report via `failed`/`exitCode` so callers map failures to readable errors.
    *
-   * @param invocation - The command, args, and limits to run.
+   * @remarks
+   * When `invocation.signal` aborts or `invocation.timeoutMs` elapses, an implementation MUST
+   * terminate the process it started and settle, rather than leaving it running with this promise
+   * pending. A binary that spawns children of its own is the caller's hazard: the bundled executor
+   * spawns the child as its own process-group leader and signals the WHOLE group
+   * ({@link BinaryInvocation.killSignal}, escalating to `SIGKILL` per
+   * {@link BinaryInvocation.forceKillAfterDelay}) so a wrapper cannot outlive the invocation.
+   *
+   * @param invocation - The command, args, working directory, environment, and limits to run.
    * @returns The settled result.
    */
   exec(invocation: BinaryInvocation): Promise<BinaryExecResult>

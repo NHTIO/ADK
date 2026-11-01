@@ -234,10 +234,58 @@ describe('sandboxedExecutor', () => {
     const inner: BinaryExecutor = {
       exec: vi.fn(async () => ({ exitCode: 3, stdout: 'o', stderr: 'e', failed: true })),
     }
-    const sandbox: BinarySandbox = { wrap: vi.fn(async (x) => ({ ...x, command: 'wrapped' })) }
+    const sandbox: BinarySandbox = {
+      wrap: vi.fn(async () => ({ cmd: 'wrapped', args: ['sh', '-c', 'echo hi'] })),
+    }
     await expect(
       sandboxedExecutor({ sandbox, inner }).exec({ cmd: 'echo', args: [] })
     ).resolves.toMatchObject({ exitCode: 3 })
     expect(sandbox.wrap).toHaveBeenCalledOnce()
+  })
+
+  it('hands the wrapper the invocation verbatim and runs its cmd/args as the complete argv', async () => {
+    // The contract decision: `wrap` RETURNS the cmd+args to run. The adapter must not quote, must
+    // not keep the caller's cmd, and must not append the caller's args a second time — the old
+    // adapter did all three, running the whole quoted command line as a binary name.
+    const inner: BinaryExecutor = {
+      exec: vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '', failed: false })),
+    }
+    const sandbox: BinarySandbox = {
+      wrap: vi.fn(async () => ({ cmd: '/usr/bin/bwrap', args: ['--', 'ffmpeg', '-i', 'in.mp4'] })),
+    }
+    const invocation = {
+      cmd: 'ffmpeg',
+      args: ['-i', 'in.mp4'],
+      cwd: '/workspace',
+      timeoutMs: 1234,
+      env: { FOO: 'bar' },
+      extendEnv: false,
+      killSignal: 'SIGINT',
+      forceKillAfterDelay: 250,
+    }
+    await sandboxedExecutor({ sandbox, inner }).exec(invocation)
+
+    expect(sandbox.wrap).toHaveBeenCalledWith(invocation)
+    expect(inner.exec).toHaveBeenCalledWith({
+      cmd: '/usr/bin/bwrap',
+      args: ['--', 'ffmpeg', '-i', 'in.mp4'],
+    })
+    // The original argv is not re-appended to the wrapped one.
+    const passed = vi.mocked(inner.exec).mock.calls[0]![0]
+    expect(passed.args.join(' ')).toBe('-- ffmpeg -i in.mp4')
+    expect(passed.cmd).not.toContain(' ')
+  })
+
+  it('does not quote the wrapped command itself', async () => {
+    // Quoting is the wrapper's job. A wrapper that wants a shell string quotes it; an adapter that
+    // pre-quoted would hand every implementor the wrong representation, and this fake's argv is
+    // unquoted on purpose so a stray quote would be visible.
+    const inner: BinaryExecutor = {
+      exec: vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '', failed: false })),
+    }
+    const wrapped = { cmd: 'sh', args: ['-c', 'printf \'%s\' "a b"', 'x y'] }
+    const sandbox: BinarySandbox = { wrap: async () => wrapped }
+    await sandboxedExecutor({ sandbox, inner }).exec({ cmd: 'ignored', args: [] })
+    expect(inner.exec).toHaveBeenCalledWith(wrapped)
   })
 })

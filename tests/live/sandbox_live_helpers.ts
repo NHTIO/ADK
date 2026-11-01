@@ -15,6 +15,8 @@ import {
   DANGEROUS_DIRECTORIES,
 } from '../../src/batteries/sandbox/node/fs_node'
 import type { SandboxPolicy } from '../../src/batteries/sandbox/types'
+import type { SrtEnforcerOptions } from '../../src/batteries/sandbox/node/srt_enforcer'
+type ExtraEnforcerOptions = Omit<SrtEnforcerOptions, 'policy'>
 
 export { canUnshareUserNamespace, sandboxRuntimeGate, sandboxRuntimeGateReason }
 export const RUN = process.env.TEST_SANDBOX_LIVE === '1' && sandboxRuntimeGate
@@ -32,8 +34,19 @@ export async function makeFile(path: string, text = 'x'): Promise<void> {
   await writeFile(path, text)
 }
 
-export async function makeEnforcer(policy: SandboxPolicy) {
-  return srtEnforcer({ policy })
+export async function makeEnforcer(
+  policy: SandboxPolicy,
+  /**
+   * Extra {@link SrtEnforcerOptions} passthrough, e.g. `enableWeakerNestedSandbox`.
+   *
+   * @remarks
+   * Opt-in flags stay explicit at the call site: a suite that needs a weaker sandbox boundary in
+   * order to run at all (nested-userns hosts under `sudo`) must SAY so in its own source rather
+   * than have the shared helper weaken every suite silently.
+   */
+  options?: ExtraEnforcerOptions
+) {
+  return srtEnforcer({ policy, ...options })
 }
 
 export async function run(

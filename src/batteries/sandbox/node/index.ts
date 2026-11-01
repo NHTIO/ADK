@@ -31,5 +31,11 @@ export * from './fs_node'
 // must not be part of the published surface — a consumer calling it could make a live ADK-owned session
 // look foreign to the next construction. It stays reachable for a direct module import, which is how
 // the tests use it.
-export { srtEnforcer, mapPolicy, type SrtEnforcerOptions } from './srt_enforcer'
+export {
+  srtEnforcer,
+  srtBinarySandbox,
+  mapPolicy,
+  type SrtEnforcerOptions,
+  type SrtBinarySandboxOptions,
+} from './srt_enforcer'
 export * from './search_ripgrep'
