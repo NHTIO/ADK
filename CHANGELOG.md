@@ -19,6 +19,8 @@ upgrading.
 
 ### Fixed
 
+- **`PineconeVectorStore.dropCollection` now deletes the namespace itself** (closes issue #51), reclaiming the namespace slot instead of leaving an empty namespace behind. The namespace deletion is conditional on the index being serverless — pod-based indexes keep the previous vectors-only drop, because `deleteNamespace` is unsupported there — and a strong-consistency settle timeout on serverless can no longer skip the reclaim, since the namespace is deleted before the settle. Namespace-absence is tolerated only for structured 404-style signals, so unrelated errors surface instead of being swallowed.
+
 - **`@nhtio/adk/batteries/media/engines/execa_executor` — oversized escalation delays no longer busy-loop.** Deadline timers are capped at Node's maximum timer delay and re-armed against the monotonic deadline; `forceKillAfterDelay: Infinity` disables escalation.
 
 ### Added

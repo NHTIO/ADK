@@ -12,8 +12,8 @@ d('PineconeVectorStore (integration)', () => {
   // Track every store the harness spins up so we can reclaim its namespace afterward.
   // Each makeStore() uses a fresh namespacePrefix for isolation; without cleanup these
   // accumulate against Pinecone's serverless 100-namespace-per-index cap and eventually
-  // fail upserts ("max namespaces allowed ... (100)"). Pinecone auto-removes a namespace
-  // once it's empty, so dropping the collection (delete all vectors) reclaims it.
+  // fail upserts ("max namespaces allowed ... (100)"). Empty namespaces persist, so
+  // dropping the collection must explicitly delete the namespace itself.
   const created: Array<{ vs: any; ns: string }> = []
 
   const makeStore = async () => {
@@ -45,7 +45,7 @@ d('PineconeVectorStore (integration)', () => {
   }
 
   afterAll(async () => {
-    // Reclaim each store's namespace (drop the collection → empties it → Pinecone frees it).
+    // Reclaim each store's namespace (drop the collection explicitly deletes the namespace).
     // Still best-effort — a failed cleanup must not fail the suite, since the tests themselves may
     // already have failed for an unrelated reason and masking that would be worse. But a leak is
     // now reported LOUDLY and in aggregate rather than as a single `console.warn` per store buried
@@ -64,6 +64,38 @@ d('PineconeVectorStore (integration)', () => {
       } catch {
         /* ignore */
       }
+    }
+    try {
+      const { Pinecone } = await import('@pinecone-database/pinecone')
+      // listNamespaces() is the documented namespace listing (serverless-only in SDK 7.2.0) and
+      // is paginated; describeIndexStats() is not guaranteed to list zero-vector namespaces. The
+      // check stays BEST-EFFORT — any listing failure is reported loudly, never thrown — but it
+      // must not be quiet, because silent misses are how this index reached its namespace cap.
+      const pc = new Pinecone({ apiKey: apiKey! }).index(index!)
+      const prefixes = created.map(({ ns }) => `${ns}__`)
+      const found: string[] = []
+      let token: string | undefined
+      do {
+        const page: {
+          namespaces?: Array<{ name?: string }>
+          pagination?: { next?: string }
+        } = await pc.listNamespaces({
+          // Paginate explicitly: the API returns pages and stops at a default limit.
+          limit: 99,
+          ...(token ? { paginationToken: token } : {}),
+        })
+        for (const namespace of page.namespaces ?? []) {
+          if (namespace.name && prefixes.some((p) => namespace.name!.startsWith(p))) {
+            found.push(namespace.name)
+          }
+        }
+        token = page.pagination?.next
+      } while (token)
+      for (const namespace of found) {
+        leaked.push(`${namespace}: still present via listNamespaces after cleanup`)
+      }
+    } catch (err) {
+      leaked.push(`Could not verify namespace cleanup: ${String(err)}`)
     }
     if (leaked.length > 0) {
       console.error(
