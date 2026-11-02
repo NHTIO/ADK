@@ -27,10 +27,194 @@ export type FunctionNode =
   | TSESTree.FunctionExpression
   | TSESTree.ArrowFunctionExpression
 
+/**
+ * Node types that wrap another expression without changing the value it denotes.
+ *
+ * @remarks
+ * A rule that reads an argument (or a property value) expecting an object literal must look
+ * THROUGH one of these first. `createSkillManager({ sources } as SkillManagerConfig)` is the same
+ * object literal as `createSkillManager({ sources })`, and a rule that tests only for a bare
+ * `ObjectExpression` is silenced by the assertion — a TypeScript expression is not a semantic
+ * change, so it must not be a lint bypass.
+ *
+ * `ParenthesizedExpression` is listed defensively: TypeScript-ESTree erases parentheses while
+ * converting, so it never reaches a rule today — but a parser that preserves them must not be able
+ * to defeat a rule either.
+ */
+const TRANSPARENT_WRAPPER_TYPES: ReadonlySet<string> = new Set([
+  'TSAsExpression', // value as Type
+  'TSSatisfiesExpression', // value satisfies Type
+  'TSTypeAssertion', // <Type>value
+  'TSNonNullExpression', // value!
+  'ChainExpression', // value?.prop
+  'ParenthesizedExpression', // (value)
+])
+
+/**
+ * Strips every transparent expression wrapper (`as X`, `satisfies X`, `<X>`, `!`, `?.`, parens)
+ * from `node` and returns the node that actually carries the value.
+ *
+ * @remarks
+ * Every rule in this plugin (and the identical copies carried by the sandbox and skills battery
+ * lint modules — a battery may not import this untagged module, see CONTRIBUTING's barrel rule)
+ * unwraps an argument or property value with this before testing its node type, so a wrapped
+ * literal is inspected exactly like a bare one.
+ */
+export const unwrapExpression = (node: TSESTree.Node): TSESTree.Node => {
+  let current = node
+  while (TRANSPARENT_WRAPPER_TYPES.has(current.type)) {
+    // Membership in the set guarantees this node shape carries the wrapped value on `expression`.
+    current = (current as unknown as { expression: TSESTree.Node }).expression
+  }
+  return current
+}
+
 export const isFunctionNode = (node: TSESTree.Node): node is FunctionNode =>
   node.type === 'FunctionDeclaration' ||
   node.type === 'FunctionExpression' ||
   node.type === 'ArrowFunctionExpression'
+
+/** This package: the specifier root the factory/class-name rule imports come from. */
+const ADK_PACKAGE = '@nhtio/adk'
+
+/** One import statement binding: what a local callee identifier denotes. */
+interface NameBinding {
+  /** The local identifier the file references the value through (an alias when aliased). */
+  local: string
+  /** The exported name the binding denotes (`'default'` for a default import). */
+  exported: string
+  /** True when the specifier is `import * as X` — the local names the module, not a member. */
+  namespace: boolean
+  /** True when the statement's module specifier is `@nhtio/adk` or a `@nhtio/adk/…` subpath. */
+  fromAdk: boolean
+}
+
+/** The import bindings of one file, keyed by local identifier. See {@link collectImportBindings}. */
+export type ImportBindings = ReadonlyMap<string, NameBinding>
+
+/**
+ * Collects the file's import bindings, so {@link resolveCalleeName} can map a local callee name to
+ * the export it denotes.
+ *
+ * @remarks
+ * Call once at the top of a rule's `Program()` visitor and keep the result in the rule's closure —
+ * ESLint walks the AST depth-first, so a call can lexically precede its own import statement. A
+ * later import of the same local name overwrites the earlier one; imports in one scope cannot
+ * legally collide, so this only ever resolves a genuine redeclaration.
+ */
+export const collectImportBindings = (ast: TSESTree.Program): ImportBindings => {
+  const bindings = new Map<string, NameBinding>()
+  for (const statement of ast.body) {
+    if (statement.type !== 'ImportDeclaration') continue
+    const source = typeof statement.source.value === 'string' ? statement.source.value : ''
+    const fromAdk = source === ADK_PACKAGE || source.startsWith(`${ADK_PACKAGE}/`)
+    for (const specifier of statement.specifiers) {
+      if (specifier.type === 'ImportSpecifier' && specifier.imported.type === 'Identifier') {
+        bindings.set(specifier.local.name, {
+          local: specifier.local.name,
+          exported: specifier.imported.name,
+          namespace: false,
+          fromAdk,
+        })
+      } else if (specifier.type === 'ImportDefaultSpecifier') {
+        bindings.set(specifier.local.name, {
+          local: specifier.local.name,
+          exported: 'default',
+          namespace: false,
+          fromAdk,
+        })
+      } else if (specifier.type === 'ImportNamespaceSpecifier') {
+        bindings.set(specifier.local.name, {
+          local: specifier.local.name,
+          exported: '*',
+          namespace: true,
+          fromAdk,
+        })
+      }
+    }
+  }
+  return bindings
+}
+
+/**
+ * A resolved callee name: the EXPORTED symbol a rule should match on, plus the binding shape it
+ * arrived through.
+ *
+ * @remarks
+ * A local identifier is not the match: `import { createSkillManager as csm }` means the file's
+ * `csm(…)` call names the export `createSkillManager`, and `import * as ns from '@nhtio/adk/…'`
+ * makes `ns.createSkillManager(…)` name it too. Rules that gate on a factory/class name resolve the
+ * callee through this record BEFORE matching on any name.
+ */
+export interface ResolvedCalleeName {
+  /** The exported name to match on (the `imported` specifier, or the last member segment). */
+  name: string
+  /** How the callee is bound in this file. */
+  kind: 'plain' | 'aliased' | 'namespace'
+  /** The local identifier the file references the export through. */
+  local: string
+  /** True when the value binding came from an import statement in this file (any module). */
+  imported: boolean
+  /** True when that import is from this package's public subpaths (`@nhtio/adk` or `@nhtio/adk/…`). */
+  fromAdk: boolean
+}
+
+/**
+ * Resolves a callee expression to the exported name it denotes, through the file's import bindings.
+ *
+ * @remarks
+ * Three shapes resolve: a bare identifier (`createSkillManager(…)` — `plain` or `aliased` depending
+ * on the specifier), a member expression off a namespace import (`ns.createSkillManager(…)`), and
+ * the optional-chain spellings of either (the value is the same call). A local object the file built
+ * itself (`const ns = { createSkillManager }`) is deliberately NOT resolved — the name does not come
+ * from an import binding — and neither is a computed or two-level member chain. Those return `null`.
+ *
+ * `fromAdk` is true only for a real import from `@nhtio/adk` or a `@nhtio/adk/…` subpath. A bare
+ * identifier the file never imports at all resolves with `imported: false, fromAdk: false` — the
+ * "snippet, re-export, or global" case, which the adk rules treat conservatively as a match per their
+ * own binding policies. An import of the name from a foreign module resolves with `imported: true,
+ * fromAdk: false` — "provably not ours", a different answer from "unknown", and the policies keep
+ * the two apart.
+ */
+export const resolveCalleeName = (
+  bindings: ImportBindings,
+  callee: TSESTree.Node
+): ResolvedCalleeName | null => {
+  // Strip wrappers so `ns.createSkillManager(…)` and the optional-chain spellings resolve like the
+  // bare forms — a TS wrapper on the callee changes no binding.
+  const bare = unwrapExpression(callee)
+  if (bare.type === 'MemberExpression') {
+    const object = unwrapExpression(bare.object)
+    const prop = unwrapExpression(bare.property)
+    if (bare.computed || object.type !== 'Identifier' || prop.type !== 'Identifier') return null
+    const nsBinding = bindings.get(object.name)
+    // The namespace object must be a namespace import: a local `const ns = {...}` may carry the name
+    // by coincidence and does not inherit the export's contract, and a member off a plain import
+    // (`createException.call(…)`) is not the export either.
+    if (!nsBinding || !nsBinding.namespace) return null
+    return {
+      name: prop.name,
+      kind: 'namespace',
+      local: prop.name,
+      imported: true,
+      fromAdk: nsBinding.fromAdk,
+    }
+  }
+  if (bare.type !== 'Identifier') return null
+  const binding = bindings.get(bare.name)
+  if (!binding || binding.namespace) {
+    // An identifier the file never binds by import — or one that names a namespace module, which can
+    // only ever resolve through a member arm: the "snippet / global / not resolved" case.
+    return { name: bare.name, kind: 'plain', local: bare.name, imported: false, fromAdk: false }
+  }
+  return {
+    name: binding.exported,
+    kind: binding.local === binding.exported ? 'plain' : 'aliased',
+    local: binding.local,
+    imported: true,
+    fromAdk: binding.fromAdk,
+  }
+}
 
 // Provider SDK constructor names whose presence inside a handler/middleware indicates a primary
 // model call. Conservative, well-known set — keeps false positives low.

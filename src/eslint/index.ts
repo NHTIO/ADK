@@ -22,7 +22,9 @@
  * ```
  */
 
+import { default as toolNameProviderSafe } from './rules/tool_name_provider_safe'
 import { default as noModelInToolHandler } from './rules/no_model_in_tool_handler'
+import { default as createExceptionArgsArray } from './rules/create_exception_args_array'
 import { default as requireValidatorAnyRequired } from './rules/require_validator_any_required'
 import { default as requireStringEmptyDisposition } from './rules/require_string_empty_disposition'
 import { default as thoughtPayloadRequiresReplayTag } from './rules/thought_payload_requires_replay_tag'
@@ -41,6 +43,8 @@ export const rules = {
   'thought-payload-requires-replay-tag': thoughtPayloadRequiresReplayTag,
   'token-encoding-requires-context-window': tokenEncodingRequiresContextWindow,
   'artifact-tool-forbids-artifact-constructor': artifactToolForbidsArtifactConstructor,
+  'tool-name-provider-safe': toolNameProviderSafe,
+  'create-exception-args-array': createExceptionArgsArray,
 } satisfies FlatConfig.Plugin['rules']
 
 /**

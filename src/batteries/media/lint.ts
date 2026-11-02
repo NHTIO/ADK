@@ -26,7 +26,9 @@
 
 import { createRequire } from 'node:module'
 import { ESLintUtils } from '@typescript-eslint/utils'
+import { collectImportBindings, resolveCalleeName } from '../../eslint/rules'
 import type { TSESTree } from '@typescript-eslint/utils'
+import type { ImportBindings } from '../../eslint/rules'
 import type { FlatConfig } from '@typescript-eslint/utils/ts-eslint'
 
 const createRule = ESLintUtils.RuleCreator(
@@ -369,11 +371,19 @@ const noShadowedEngine = createRule({
   },
   defaultOptions: [],
   create(context) {
+    let bindings: ImportBindings = new Map()
     return {
+      Program(node: TSESTree.Program): void {
+        bindings = collectImportBindings(node)
+      },
       CallExpression(node: TSESTree.CallExpression) {
-        if (node.callee.type !== 'Identifier' || node.callee.name !== 'createMediaPipeline') {
-          return
-        }
+        const resolved = resolveCalleeName(bindings, node.callee)
+        // The same binding policy as the other name-matched factories: an aliased or
+        // namespace-spelled callee still names the `createMediaPipeline` export, and so does a
+        // never-imported name (a snippet or a re-export shim); a same-named import from a foreign
+        // module does not.
+        if (!resolved || resolved.name !== 'createMediaPipeline') return
+        if (resolved.imported && !resolved.fromAdk) return
         const config = node.arguments[0]
         if (!config || config.type !== 'ObjectExpression') return
         const engines = propOf(config, 'engines')

@@ -58,6 +58,15 @@ ruleTester.run('no-shadowed-engine', rules['no-shadowed-engine'], {
     },
     // Single engine: nothing to shadow.
     { code: `createMediaPipeline({ engines: [jimpEngine()] })` },
+    // a same-named factory imported from a FOREIGN module is not the battery's pipeline — the
+    // export name resolves through the file's import bindings, and `acme-media` is not this package
+    {
+      code: `import { createMediaPipeline } from 'acme-media'
+createMediaPipeline({ engines: [
+        { id: 'broad', converts: [{ from: ['application/pdf'], to: ['txt'], convert: async () => ({ outputs: [] }) }] },
+        { id: 'narrow', converts: [{ from: ['application/pdf'], to: ['txt'], convert: async () => ({ outputs: [] }) }] },
+      ] })`,
+    },
   ],
   invalid: [
     // A literal engine entirely covered by an earlier bundled factory: sharp's image/*
@@ -80,6 +89,24 @@ ruleTester.run('no-shadowed-engine', rules['no-shadowed-engine'], {
     // Literal inline engine shadowed by an earlier broader literal.
     {
       code: `createMediaPipeline({ engines: [
+        { id: 'broad', converts: [{ from: ['application/pdf'], to: ['txt', 'html'], convert: async () => ({ outputs: [] }) }] },
+        { id: 'narrow', converts: [{ from: ['application/pdf'], to: ['txt'], convert: async () => ({ outputs: [] }) }] },
+      ] })`,
+      errors: [{ messageId: 'shadowed' }],
+    },
+    // the callee is resolved through the file's imports: an ALIASED factory names the same export
+    {
+      code: `import { createMediaPipeline as mkPipeline } from '@nhtio/adk/batteries/media'
+mkPipeline({ engines: [
+        { id: 'broad', converts: [{ from: ['application/pdf'], to: ['txt', 'html'], convert: async () => ({ outputs: [] }) }] },
+        { id: 'narrow', converts: [{ from: ['application/pdf'], to: ['txt'], convert: async () => ({ outputs: [] }) }] },
+      ] })`,
+      errors: [{ messageId: 'shadowed' }],
+    },
+    // ... and so does a namespace import
+    {
+      code: `import * as media from '@nhtio/adk/batteries/media'
+media.createMediaPipeline({ engines: [
         { id: 'broad', converts: [{ from: ['application/pdf'], to: ['txt', 'html'], convert: async () => ({ outputs: [] }) }] },
         { id: 'narrow', converts: [{ from: ['application/pdf'], to: ['txt'], convert: async () => ({ outputs: [] }) }] },
       ] })`,

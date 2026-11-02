@@ -25,6 +25,47 @@ upgrading.
 
 ### Added
 
+### Fixed
+
+- **`@nhtio/adk/batteries/media/engines/execa_executor` — oversized escalation delays no longer busy-loop.** Deadline timers are capped at Node's maximum timer delay and re-armed against the monotonic deadline; `forceKillAfterDelay: Infinity` disables escalation.
+
+### Added
+
+- **Footgun lint rules and build guards (closes issue #29).** Eight new report-only ESLint rules plus
+  three internal build guards, covering the mistakes that compile cleanly and then fail at the wire,
+  at construction time, or silently at runtime:
+  - **Core plugin** (`@nhtio/adk/eslint`, namespace `adk`, `error` in `recommended`):
+    `adk/tool-name-provider-safe` (a string-literal `Tool` name outside
+    `/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/` — providers reject it at the wire, e.g. Gemini rejects a
+    leading digit or `-`; matched on this package's `Tool`, aliased or namespace-imported, never on
+    another library's identically-named class) and `adk/create-exception-args-array`
+    (`new E_X(<non-array>)` where `E_X` is a `const`/`let` `createException<[non-empty tuple]>` — in
+    the same file, through any spelling of the factory, or — under type-aware linting — an IMPORTED
+    exception class resolved by its constructor's args-tuple shape; the value is silently read as
+    `ExceptionOptions`, the payload is dropped and the message prints a literal `%s`).
+  - **New `@nhtio/adk/batteries/sandbox/lint`** (namespace `adk-sandbox`):
+    `no-network-disabled` (`warn` — `network: { disabled: true }` omits SRT's network
+    configuration, which means UNRESTRICTED network, not network-off; deny-all is `network: {}`),
+    `filesystem-read-default-allow` (`warn` — reads are deny-then-allow, so an `allowRead` list with
+    no broad `denyRead: ['/']` before it re-permits nothing and the whole host stays readable; a
+    `denyRead`-only policy is deliberately not reported) and `require-gate` (`error` —
+    `createRunShellCommandTool` / `createEvaluateJavascriptTool` throw
+    `E_SANDBOX_GATE_REQUIRED` at construction without a gate).
+  - **New `@nhtio/adk/batteries/skills/lint`** (namespace `adk-skills`): `require-gate` (`error` —
+    `createSkillManager` throws `E_INVALID_SKILLS_CONFIG` without one) and `no-unsafe-opt-in`
+    (`warn` — one finding per enabled `unsafe` control, naming the boundary it removes:
+    `isolatedToolsInProcess`, `scriptsPermissivePolicy`, `ungatedSkillTools`).
+  - **Build guards** (`tests/unit/build/*.node.spec.ts`): battery-module reachability (every
+    `src/batteries/**/*.ts` file must be `@module`-tagged or transitively imported by a tagged file;
+    the six current orphans — the standalone claude-code wrapper cluster and a deprecated
+    media/patch re-export shim — are an explicit commented allow-list, so any NEW orphan fails) and
+    the `@module` leaf-basename collision invariant (the 17 pre-existing duplicate leaves are
+    harmless under the tree-mirrored `dtsComplex` emit, so the guard instead asserts that no two
+    entries compute the same `types` output path, that the mirrored layout itself is still in place,
+    and that `getEntries` still rejects duplicate keys).
+  All rules are report-only (no autofix), conservative about spreads, non-literal arguments and
+  dynamic values, and documented in `docs/developer-tools/eslint-rules` (split into per-battery
+  sub-pages).
 - **`@nhtio/adk/batteries/sandbox/node` — `srtBinarySandbox(enforcer, opts?)`, the concrete
   `BinarySandbox` implementor for the SRT enforcer** (closes issue #37, closes issue #20). The sandbox
   battery could refuse and narrate invocations, but there was no bundled way to actually wrap a
