@@ -2,9 +2,9 @@ import { Tool } from '@nhtio/adk/forge'
 import { validator } from '@nhtio/validation'
 import { classifySandboxPathRejection } from './paths'
 import { isError, isInstanceOf } from '@nhtio/adk/guards'
+import { E_TURN_GATE_ABORTED } from '@nhtio/adk/exceptions'
 import { SpooledArtifact } from '@nhtio/adk/spooled_artifact'
-import { runToolGate, type ToolGateFn } from '../tools/_shared'
-import { E_TURN_GATE_ABORTED } from '../../lib/exceptions/runtime'
+import { runToolGate, type ToolGateFn } from '@nhtio/adk/batteries/tools/_shared'
 import { defaultSandboxNarrator, type SandboxNarrator, type SandboxOutcome } from './narrator'
 import {
   E_SANDBOX_GATE_REQUIRED,

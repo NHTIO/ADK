@@ -17,10 +17,9 @@
 
 import { isError } from '@nhtio/adk/guards'
 import { validateOptions } from './validation'
-import { resampleTo } from '../../../../lib/utils/audio'
-import { emitLifecycle } from '../../../llm/chat_common/lifecycle'
+import { resampleTo } from '@nhtio/adk/common'
 import { isPcmInput, toBytes, defaultDecodeAudio } from '../../_shared'
-import { withModelSource } from '../../../llm/transformers_js/model_source'
+import { emitLifecycle, withModelSource } from '@nhtio/adk/batteries/llm/transformers_js'
 import {
   E_INVALID_TRANSFORMERS_JS_STT_OPTIONS,
   E_TRANSFORMERS_JS_STT_ENGINE_ERROR,

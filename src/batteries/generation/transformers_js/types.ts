@@ -42,8 +42,8 @@
  *   surfaced as an override so a caller need not special-case parsing `processor.num_image_tokens`.
  */
 
-import type { BatteryLifecycleHooks } from '../../llm/chat_common'
 import type { BaseGenerationAdapterOptions, GenerateOptions } from '../openai/types'
+import type { BatteryLifecycleHooks } from '@nhtio/adk/batteries/llm/transformers_js'
 
 // Re-export the shared base shapes so consumers can import everything generation-related from this
 // battery's barrel without reaching into the OpenAI battery.
@@ -62,7 +62,7 @@ export type {
   BatteryLifecycleReport,
   BatteryLifecycleCallback,
   BatteryLifecycleHooks,
-} from '../../llm/chat_common'
+} from '@nhtio/adk/batteries/llm/transformers_js'
 
 /** Quantization/precision dtype forwarded to `from_pretrained()` — a local alias, never a re-export of the externalized peer's `DataType`. */
 export type TransformersJsGenerationDataType = string

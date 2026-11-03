@@ -1,6 +1,6 @@
 import { isError } from '@nhtio/adk/guards'
 import { Middleware } from '@nhtio/middleware'
-import { normalizeSandboxPath } from '../sandbox/paths'
+import { normalizeSandboxPath } from '@nhtio/adk/batteries/sandbox'
 import { E_INVALID_DEV_PIPELINE_CONFIG, E_DEV_STEP_FAILED } from './exceptions'
 import { extensionOf, isPattern, pathMatches, validatePattern } from './matcher'
 import type {

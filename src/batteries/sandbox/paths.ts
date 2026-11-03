@@ -1,4 +1,4 @@
-import { isInstanceOf } from '../../lib/utils/guards'
+import { isInstanceOf } from '@nhtio/adk/guards'
 import { E_INVALID_SANDBOX_CONFIG, E_SANDBOX_PATH_ESCAPE } from './exceptions'
 import type { SandboxFileSystem } from './contracts/file_system'
 import type { PathTranslator } from './contracts/path_translator'

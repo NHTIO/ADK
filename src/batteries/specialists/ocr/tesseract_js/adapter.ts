@@ -24,7 +24,7 @@
 import { toBytes } from '../../_shared'
 import { validateOptions } from './validation'
 import { isError, isInstanceOf } from '@nhtio/adk/guards'
-import { emitLifecycle } from '../../../llm/chat_common/lifecycle'
+import { emitLifecycle } from '@nhtio/adk/batteries/llm/transformers_js'
 import { E_INVALID_TESSERACT_JS_OCR_OPTIONS, E_TESSERACT_JS_OCR_ENGINE_ERROR } from './exceptions'
 import type { SpecialistImageInput } from '../../_shared'
 import type {

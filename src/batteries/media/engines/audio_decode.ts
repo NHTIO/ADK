@@ -20,7 +20,7 @@
  */
 
 import { isError } from '@nhtio/adk/guards'
-import { downmixToMono } from '../../../lib/utils/audio'
+import { downmixToMono } from '@nhtio/adk/common'
 import { pcmToBytes, PCM_MIME, EMPTY_MIME } from '../contracts'
 import { E_INVALID_MEDIA_PIPELINE_CONFIG } from '../exceptions'
 import type { MediaEngine, ConvertRequest, ConvertResult } from '../contracts'

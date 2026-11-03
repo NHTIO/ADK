@@ -13,8 +13,8 @@
  * direct re-exports of the externalized peer.
  */
 
-import type { BatteryLifecycleHooks } from '../../llm/chat_common'
 import type { BaseEmbeddingsAdapterOptions } from '../openai/types'
+import type { BatteryLifecycleHooks } from '@nhtio/adk/batteries/llm/transformers_js'
 import type {
   FeatureExtractionPipeline,
   DataType as TransformersDataType,
@@ -33,7 +33,7 @@ export type {
   BatteryLifecycleReport,
   BatteryLifecycleCallback,
   BatteryLifecycleHooks,
-} from '../../llm/chat_common'
+} from '@nhtio/adk/batteries/llm/transformers_js'
 
 /** The transformers.js feature-extraction pipeline this battery drives. */
 export type TransformersJsEmbeddingsPipeline = FeatureExtractionPipeline

@@ -1,2 +1,2 @@
-/** @deprecated Shared structured-patch primitives now live in {@link ../../../lib/patch}. */
-export * from '../../../lib/patch'
+/** @deprecated Shared structured-patch primitives now live in `@nhtio/adk/lib/patch`. */
+export * from '@nhtio/adk/lib/patch'

@@ -13,7 +13,7 @@
  */
 
 import type { DecodeAudioFn } from '../../_shared'
-import type { BatteryLifecycleHooks } from '../../../llm/chat_common'
+import type { BatteryLifecycleHooks } from '@nhtio/adk/batteries/llm/transformers_js'
 import type {
   AutomaticSpeechRecognitionPipeline,
   DataType as TransformersDataType,
@@ -28,7 +28,7 @@ export type {
   BatteryLifecycleReport,
   BatteryLifecycleCallback,
   BatteryLifecycleHooks,
-} from '../../../llm/chat_common'
+} from '@nhtio/adk/batteries/llm/transformers_js'
 
 /** A single recognized speech segment with its time bounds and text. */
 export interface SttSegment {

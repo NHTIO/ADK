@@ -11,7 +11,7 @@
  */
 
 import type * as TesseractNS from 'tesseract.js'
-import type { BatteryLifecycleHooks } from '../../../llm/chat_common'
+import type { BatteryLifecycleHooks } from '@nhtio/adk/batteries/llm/transformers_js'
 
 // Re-export the shared lifecycle/boot-progress contract so consumers import it from this barrel.
 export type {
@@ -20,7 +20,7 @@ export type {
   BatteryLifecycleReport,
   BatteryLifecycleCallback,
   BatteryLifecycleHooks,
-} from '../../../llm/chat_common'
+} from '@nhtio/adk/batteries/llm/transformers_js'
 
 /** The `tesseract.js` module namespace this adapter drives. Local alias of the peer's own type. */
 export type TesseractJsModule = typeof TesseractNS

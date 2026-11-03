@@ -1,6 +1,6 @@
 import { v6 as uuidv6 } from 'uuid'
-import { Retrievable, SpooledMarkdownArtifact } from '@nhtio/adk/common'
-import { autoSpoolRetrievable } from '../../lib/utils/retrievable_spool'
+import { Retrievable, SpooledMarkdownArtifact, autoSpoolRetrievable } from '@nhtio/adk/common'
+
 import type { SkillDescriptor } from './types'
 import type { SkillLoadChannel, SkillRef } from './contracts'
 import type { DispatchContext, TurnContext } from '@nhtio/adk/types'

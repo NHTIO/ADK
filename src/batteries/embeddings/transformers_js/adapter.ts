@@ -24,8 +24,7 @@ import { isError } from '@nhtio/adk/guards'
 import { poolAndNormalize } from './pooling'
 import { validateOptions } from './validation'
 import { applyEmbeddingPrefix } from '../openai/helpers'
-import { emitLifecycle } from '../../llm/chat_common/lifecycle'
-import { withModelSource } from '../../llm/transformers_js/model_source'
+import { emitLifecycle, withModelSource } from '@nhtio/adk/batteries/llm/transformers_js'
 import {
   E_INVALID_TRANSFORMERS_JS_EMBEDDINGS_OPTIONS,
   E_TRANSFORMERS_JS_EMBEDDINGS_ENGINE_ERROR,

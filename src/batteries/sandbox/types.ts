@@ -1,6 +1,6 @@
 import { passesSchema } from './validation'
+import { isObject } from '@nhtio/adk/guards'
 import { validator } from '@nhtio/validation'
-import { isObject } from '../../lib/utils/guards'
 import { isRejectedSandboxPath, normalizeSandboxPath } from './paths'
 
 /**

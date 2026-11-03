@@ -1,4 +1,4 @@
-import { createException } from '../../lib/utils/exceptions'
+import { createException } from '@nhtio/adk/factories'
 /** Invalid sandbox configuration. */
 export const E_INVALID_SANDBOX_CONFIG = createException<[string]>(
   'E_INVALID_SANDBOX_CONFIG',

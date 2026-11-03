@@ -54,15 +54,14 @@ import { NodeRef, ParamRef } from './encoding'
 import { rawPlan, rawOps, rawDiff } from './raw'
 import { planOutline, planRead } from './outline'
 import { freezePlan, collectIssues } from './validation'
+import { isObject, isInstanceOf } from '@nhtio/adk/guards'
 import { Tool, SpooledJsonArtifact } from '@nhtio/adk/common'
 import { approvePlan, computeAuthoritySet } from './approval'
-import { isObject, isInstanceOf } from '../../lib/utils/guards'
-import { runToolGate } from '@nhtio/adk/batteries/tools/_shared'
 import { validateTemplate, instantiateTemplate } from './templates'
+import { ToolGateFn, runToolGate } from '@nhtio/adk/batteries/tools/_shared'
 import type { PlanStore } from './store'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { InvocableTools, PredicateEvaluator } from './types'
-import type { ToolGateFn } from '@nhtio/adk/batteries/tools/_shared'
 import type {
   PlanTemplate,
   PlanOp,

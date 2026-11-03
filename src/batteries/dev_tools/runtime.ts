@@ -1,25 +1,26 @@
 /** Runtime helpers for the development-tools pipeline. */
 import { isError, isInstanceOf } from '@nhtio/adk/guards'
-// KNOWN DEVIATION from "Batteries — barrel imports only": no barrel re-exports these two, and
-// `common` is value classes, so neither belongs there. Media reaches them the same way. The
-// documented fix is to add the re-export to a barrel; that is a public-surface decision and is
-// tracked separately rather than smuggled in here.
-import { isTextual } from '@nhtio/adk/lib/mime/is_textual'
-import { decodeText } from '@nhtio/adk/lib/text/decode_text'
-import { resolveMime } from '../sandbox/defaults/extension_mime'
+import { isTextual, decodeText } from '@nhtio/adk/common'
 import { globMatches, isPattern, validatePattern } from './matcher'
-import { applyOperations, normalizeWorkspacePath } from '../../lib/patch'
 import { E_DEV_BAD_ARG, E_DEV_STEP_FAILED, E_DEV_WORKSPACE_BOUNDS } from './exceptions'
+import {
+  MimeResolver,
+  PathTranslator,
+  SandboxFileSystem,
+  resolveMime,
+} from '@nhtio/adk/batteries/sandbox'
+import {
+  ParsedApplyPatch,
+  WorkspaceFile,
+  applyOperations,
+  normalizeWorkspacePath,
+} from '@nhtio/adk/lib/patch'
 import {
   classifySandboxPathRejection,
   createExistingSymlinkGuard,
   normalizeSandboxPath,
-} from '../sandbox/paths'
-import type { FsNode } from '../sandbox/node/fs_node'
-import type { ParsedApplyPatch, WorkspaceFile } from '../../lib/patch'
-import type { MimeResolver } from '../sandbox/contracts/mime_resolver'
-import type { SandboxFileSystem } from '../sandbox/contracts/file_system'
-import type { PathTranslator } from '../sandbox/contracts/path_translator'
+} from '@nhtio/adk/batteries/sandbox'
+import type { FsNode } from '@nhtio/adk/batteries/sandbox/node'
 import type { DevFileAccess, DevInvocation, FileChangeSummary } from './types'
 import type {
   Diagnostic,

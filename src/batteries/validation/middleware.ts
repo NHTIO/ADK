@@ -2,10 +2,9 @@ import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
 import { getOrderingProfile } from './profiles'
 import { isInstanceOf, isError } from '@nhtio/adk/guards'
-import { Message, Thought, ToolCall } from '@nhtio/adk/common'
 import { FAMILY_RECIPES, resolveFamilyRecipe } from './profiles/families'
-import { ENCODE_METHOD, DECODE_METHOD } from '../../lib/utils/encoder_symbols'
 import { createOrderingRepairError, createOrderingViolationError } from './exceptions'
+import { DECODE_METHOD, ENCODE_METHOD, Message, Thought, ToolCall } from '@nhtio/adk/common'
 import {
   buildOrderingTimeline,
   evaluateOrderingProfile,

@@ -17,11 +17,8 @@
 
 import { argOf } from '../runtime'
 import { isObject } from '@nhtio/adk/guards'
+import { resampleTo } from '@nhtio/adk/common'
 import { E_MEDIA_STEP_FAILED } from '../exceptions'
-// Accepted-shared-runtime tier (see CONTRIBUTING.md → Design Decisions → #13 Battery design):
-// pure, class-free resample primitive shared with the specialists `_shared` battery — no core
-// class coupling, so this deep relative reach is accepted as-is, not re-exported through a shim.
-import { resampleTo } from '../../../lib/utils/audio'
 import { PCM_MIME, pcmToBytes, bytesToPcm } from '../contracts'
 import type { ImageAnnotation, MutateRequest } from '../contracts'
 import type { StepImpl, StepContext, StepResult } from '../runtime'

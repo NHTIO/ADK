@@ -52,7 +52,7 @@
  */
 
 import { loadOnce } from '../predicates'
-import { isObject, isError } from '../../../lib/utils/guards'
+import { isObject, isError } from '@nhtio/adk/guards'
 import type {
   EncodableValue,
   PredicateEvaluator,

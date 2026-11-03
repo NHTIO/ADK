@@ -19,7 +19,7 @@
  * domains (whose bases require `model`).
  */
 
-import type { GeneratedMediaOutput } from '../../llm/chat_common/types'
+import type { GeneratedMediaOutput } from '@nhtio/adk/batteries/llm/transformers_js'
 
 /**
  * One synthesized clip returned from `synthesize`. Re-exported type-only from the LLM Chat

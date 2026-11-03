@@ -26,9 +26,8 @@
 
 import { createRequire } from 'node:module'
 import { ESLintUtils } from '@typescript-eslint/utils'
-import { collectImportBindings, resolveCalleeName } from '../../eslint/rules'
+import { ImportBindings, collectImportBindings, resolveCalleeName } from '@nhtio/adk/eslint'
 import type { TSESTree } from '@typescript-eslint/utils'
-import type { ImportBindings } from '../../eslint/rules'
 import type { FlatConfig } from '@typescript-eslint/utils/ts-eslint'
 
 const createRule = ESLintUtils.RuleCreator(

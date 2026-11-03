@@ -4,20 +4,32 @@
  * @module @nhtio/adk/batteries/dev-tools
  */
 import { DEV_ARG_SPECS } from './arg_specs'
+import { runOnion } from '@nhtio/adk/common'
 import { validator } from '@nhtio/validation'
 import { buildDevRegistry } from './registry'
-import { narratingPath } from '../sandbox/tools'
-import { createFsNode } from '../sandbox/node/fs_node'
-import { runOnion } from '../../lib/middleware/run_onion'
+import { createFsNode } from '@nhtio/adk/batteries/sandbox/node'
 import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
-import { E_LLM_EXECUTION_GATE_NOT_SUPPORTED } from '../../exceptions'
+import { E_LLM_EXECUTION_GATE_NOT_SUPPORTED } from '@nhtio/adk/exceptions'
 import { extensionOf, globMatches, patternsOverlap, validatePattern } from './matcher'
-import { applyUpdateHunks, isStructuredPatch, parseStructuredPatch } from '../../lib/patch'
 import {
   classifySandboxPathRejection,
   createExistingSymlinkGuard,
   normalizeSandboxPath,
-} from '../sandbox/paths'
+} from '@nhtio/adk/batteries/sandbox'
+import {
+  MimeResolver,
+  PathTranslator,
+  SandboxFileSystem,
+  SandboxHandle,
+  narratingPath,
+} from '@nhtio/adk/batteries/sandbox'
+import {
+  ParsedApplyPatch,
+  ParsedHunk,
+  applyUpdateHunks,
+  isStructuredPatch,
+  parseStructuredPatch,
+} from '@nhtio/adk/lib/patch'
 import {
   E_DEV_BAD_ARG,
   E_DEV_ENGINE_REQUIRED,
@@ -40,12 +52,7 @@ import {
   snapshotInPlaceEnvelope,
   stampDiagnostics,
 } from './runtime'
-import type { SandboxHandle } from '../sandbox/manager'
-import type { EngineResolver } from '../media/contracts'
-import type { ParsedApplyPatch, ParsedHunk } from '../../lib/patch'
-import type { MimeResolver } from '../sandbox/contracts/mime_resolver'
-import type { SandboxFileSystem } from '../sandbox/contracts/file_system'
-import type { PathTranslator } from '../sandbox/contracts/path_translator'
+import type { EngineResolver } from '@nhtio/adk/batteries/media'
 import type {
   DevChain,
   DevOp,

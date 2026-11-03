@@ -36,7 +36,7 @@
 
 import { foldOps } from './ops'
 import { PlanStore } from './store'
-import { isObject } from '../../lib/utils/guards'
+import { isObject } from '@nhtio/adk/guards'
 import { incoming, outgoing, nodeById } from './plan'
 import type {
   NodeId,

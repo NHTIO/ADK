@@ -21,7 +21,7 @@ import { foldOps, branchKey } from './ops'
 import { NodeRef as NodeRefClass } from './encoding'
 import { effectiveToolMethods } from './artifact_methods'
 import { joinPromptParts, decodeOutputSchema } from './reason'
-import { isInstanceOf, isObject, isError } from '../../lib/utils/guards'
+import { isInstanceOf, isObject, isError } from '@nhtio/adk/guards'
 import {
   nodeById,
   outgoing,

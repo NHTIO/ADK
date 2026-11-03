@@ -22,7 +22,7 @@
  */
 
 import { readPath } from '../plan'
-import { isObject, isInstanceOf } from '../../../lib/utils/guards'
+import { isObject, isInstanceOf } from '@nhtio/adk/guards'
 import {
   parseStructuredPredicate,
   isPredicateLeaf,

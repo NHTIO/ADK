@@ -1,4 +1,4 @@
-import { createException } from '../../../lib/utils/exceptions'
+import { createException } from '@nhtio/adk/factories'
 
 /** SES lockdown was unavailable or did not harden the guest realm. */
 export const E_SES_LOCKDOWN_REQUIRED = createException<[string]>(

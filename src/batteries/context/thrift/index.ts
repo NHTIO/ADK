@@ -67,7 +67,7 @@
  *
  * ```ts
  * import { subtractToFit, type WorkingSet } from '@nhtio/adk/batteries/context/thrift'
- * import { Tokenizable } from '@nhtio/adk'
+ * import { Tokenizable } from '@nhtio/adk/common'
  *
  * const ws: WorkingSet = {
  *   systemPrompt: mySystemPrompt, // a Tokenizable, or a plain string

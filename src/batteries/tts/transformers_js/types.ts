@@ -20,8 +20,8 @@
  * (WAV, Node-safe).
  */
 
-import type { BatteryLifecycleHooks } from '../../llm/chat_common'
 import type { BaseTtsAdapterOptions, SynthesizeOptions } from '../_shared'
+import type { BatteryLifecycleHooks } from '@nhtio/adk/batteries/llm/transformers_js'
 import type {
   TextToAudioPipeline,
   DataType as TransformersDataType,
@@ -44,7 +44,7 @@ export type {
   BatteryLifecycleReport,
   BatteryLifecycleCallback,
   BatteryLifecycleHooks,
-} from '../../llm/chat_common'
+} from '@nhtio/adk/batteries/llm/transformers_js'
 
 /**
  * A speaker-embedding reference for models that require one (e.g. SpeechT5).

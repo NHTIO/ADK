@@ -11,8 +11,8 @@ import {
 } from '@nhtio/adk/batteries/sandbox'
 import type { SkillRecord } from './manager'
 import type { SkillScriptParam } from './contracts'
-import type { GuestRuntimeLike } from '../sandbox/js/ses_contracts'
 import type { SkillIsolatedTool, SkillIsolationConfig } from './types'
+import type { GuestRuntimeLike } from '@nhtio/adk/batteries/sandbox/js'
 
 const parameterShape = (params: readonly SkillScriptParam[] | undefined) => {
   const shape: Record<string, ReturnType<typeof validator.any>> = {}

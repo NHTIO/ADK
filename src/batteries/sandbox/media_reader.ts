@@ -1,8 +1,7 @@
-import { Media } from '../../common'
 import { E_SANDBOX_FAILED, E_SANDBOX_NOT_INITIALIZED } from './exceptions'
+import { Media, MediaKind, MediaReader, MediaTrustTier } from '@nhtio/adk/common'
 import type { SandboxEpoch } from './types'
 import type { SandboxFileSystem } from './contracts/file_system'
-import type { MediaKind, MediaReader, MediaTrustTier } from '../../common'
 
 /** The capability needed to decide whether a sandbox handle is still alive. */
 export type SandboxEpochIsLive = (epoch: SandboxEpoch) => boolean

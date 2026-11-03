@@ -9,8 +9,7 @@
  * rejected so typos fail loud.
  */
 
-import { isError } from '@nhtio/adk/guards'
-import { isInstanceOf } from '../../../lib/utils/guards'
+import { isError, isInstanceOf } from '@nhtio/adk/guards'
 import { validator, ValidationError } from '@nhtio/validation'
 import { E_INVALID_TRANSFORMERS_JS_TTS_OPTIONS } from './exceptions'
 import type { TransformersJsTtsAdapterOptions } from './types'

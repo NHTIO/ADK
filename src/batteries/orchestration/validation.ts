@@ -36,9 +36,9 @@
 
 import { foldOps } from './ops'
 import { NodeRef } from './encoding'
-import { passesSchema } from '../../lib/utils/validation'
+import { passesSchema } from '@nhtio/adk/exceptions'
 import { effectiveToolMethods } from './artifact_methods'
-import { isError, isInstanceOf, isObject } from '../../lib/utils/guards'
+import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
 import {
   entryNodes,
   findCycle,

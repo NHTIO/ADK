@@ -64,11 +64,11 @@ import { DateTime } from 'luxon'
 import { sha256 } from 'js-sha256'
 import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
+import { canonicalStringify } from '@nhtio/adk/common'
 import { default as Anthropic } from '@anthropic-ai/sdk'
 import { countAnthropicMessagesTokens } from './count_tokens'
 import { resolveToolCallParser } from '../chat_common/tool_parsers'
 import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
-import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import { translateAnthropicError, anthropicErrorHeaders } from './error_translation'
 import { looksLikeSpooledArtifact, normalizeToolName } from '../chat_common/helpers'
@@ -77,7 +77,7 @@ import {
   sleepWithJitter,
   parseRetryAfter,
   linkAbortSignals,
-} from '../../../lib/utils/retry'
+} from '@nhtio/adk/common'
 import {
   Tokenizable,
   ToolCall,
@@ -123,9 +123,8 @@ import {
   fingerprintAnthropicMessagesPrefix,
 } from './helpers'
 import type { Tool, Memory } from '@nhtio/adk/common'
-import type { DispatchContext } from '@nhtio/adk/types'
-import type { TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
 import type { AnthropicMessagesCountTokensRequestInput } from './count_tokens'
+import type { DispatchContext, TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
 import type {
   DispatchExecutorFn,
   DispatchExecutorHelpers,

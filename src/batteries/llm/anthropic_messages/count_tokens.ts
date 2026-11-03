@@ -4,17 +4,16 @@
  * @module @nhtio/adk/batteries/llm/anthropic_messages/count_tokens
  */
 
-import { isObject } from '@nhtio/adk/guards'
 import { validateOptions } from './validation'
 import { default as Anthropic } from '@anthropic-ai/sdk'
-import { DispatchContext, isDispatchContext } from '@nhtio/adk'
+import { isObject, isDispatchContext } from '@nhtio/adk/guards'
 import { translateAnthropicError, anthropicErrorHeaders } from './error_translation'
 import {
   computeBackoff,
   sleepWithJitter,
   parseRetryAfter,
   linkAbortSignals,
-} from '../../../lib/utils/retry'
+} from '@nhtio/adk/common'
 import {
   E_ANTHROPIC_MESSAGES_CONTEXT_OVERFLOW,
   E_ANTHROPIC_MESSAGES_HTTP_ERROR,
@@ -46,7 +45,7 @@ import {
   anthropicToolsFromTools,
 } from './helpers'
 import type { ToolCall } from '@nhtio/adk/common'
-import type { DispatchExecutorLogChannel } from '@nhtio/adk'
+import type { DispatchContext, DispatchExecutorLogChannel } from '@nhtio/adk/types'
 import type {
   AnthropicMessageCountTokensParams,
   AnthropicMessagesAdapterOptions,

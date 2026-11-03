@@ -108,6 +108,7 @@ export type {
   FormatFamily,
 } from './verbs'
 export { PCM_MIME, EMPTY_MIME, pcmToBytes, bytesToPcm, implementsMediaEngine } from './contracts'
+export type { BinaryExecutor, BinaryInvocation } from './contracts'
 export type {
   MediaEngine,
   EngineResolver,

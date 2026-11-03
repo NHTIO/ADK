@@ -28,7 +28,7 @@
  */
 
 import { foldOps } from './ops'
-import { isObject } from '../../lib/utils/guards'
+import { isObject } from '@nhtio/adk/guards'
 import type { PlanStore } from './store'
 import type { ArgValue, PlanDiff, PlanEdge, PlanNode, PlanOp, RawPlanView } from './types'
 

@@ -1,6 +1,6 @@
-import type { OpenGateFn } from '../../index'
 import type { NextFn } from '@nhtio/middleware'
-import type { WorkspaceFile } from '../../lib/patch'
+import type { OpenGateFn } from '@nhtio/adk/types'
+import type { WorkspaceFile } from '@nhtio/adk/lib/patch'
 
 /** A synchronous declaration-only capability probe. */
 export interface DevCapabilityProbe {

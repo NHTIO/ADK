@@ -1,5 +1,5 @@
 import { E_ORCH_CELL_UNAVAILABLE } from './exceptions'
-import { isInstanceOf, isObject } from '../../lib/utils/guards'
+import { isInstanceOf, isObject } from '@nhtio/adk/guards'
 import type { EncodableValue } from './types'
 
 // ── the structured predicate IR ─────────────────────────────────────────────

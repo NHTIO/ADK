@@ -38,3 +38,15 @@ export { BaseException } from './lib/classes/base_exception'
  * @primaryExport
  */
 export type { ExceptionOptions, CreatedException } from './lib/utils/exceptions'
+
+// ── Battery-facing helpers (issue #52) ──────────────────────────────────────
+
+/**
+ * @internal
+ *
+ * Returns `true` when `value` conforms to the {@link @nhtio/adk!BaseException} shape, including
+ * across module or realm boundaries where `instanceof` answers `false`. The duck-type counterpart
+ * of {@link @nhtio/adk!isBaseException}: batteries that re-throw a named sandbox/orchestration
+ * error need the structural test, since they see errors created through a different barrel copy.
+ */
+export { isException } from './lib/utils/exceptions'

@@ -81,7 +81,7 @@ import {
   SpooledJsonArtifact,
   SpooledMarkdownArtifact,
   Media,
-} from '@nhtio/adk'
+} from '@nhtio/adk/common'
 import type { LocatorValue } from '@nhtio/adk/common'
 
 /**

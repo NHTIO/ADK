@@ -23,17 +23,27 @@ import { DateTime } from 'luxon'
 import { sha256 } from 'js-sha256'
 import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
+import { canonicalStringify } from '@nhtio/adk/common'
 import { normalizeToolName } from '../chat_common/helpers'
 import { isError, isObject, isInstanceOf } from '@nhtio/adk/guards'
 import { resolveToolCallParser } from '../chat_common/tool_parsers'
-import { canonicalStringify } from '../../../lib/utils/canonical_json'
-import { ArtifactTool, Media, Message, Thought, Tokenizable, ToolCall } from '@nhtio/adk/common'
 import {
   computeBackoff,
   sleepWithJitter,
   parseRetryAfter,
   linkAbortSignals,
-} from '../../../lib/utils/retry'
+} from '@nhtio/adk/common'
+import {
+  ArtifactTool,
+  Media,
+  Memory,
+  Message,
+  SpooledArtifact,
+  Thought,
+  Tokenizable,
+  Tool,
+  ToolCall,
+} from '@nhtio/adk/common'
 import {
   DEFAULT_GEMINI_BUCKET_ORDER,
   buildGeminiRequest,
@@ -65,10 +75,13 @@ import {
   renderTrustedContent,
   renderUntrustedContent,
 } from '../chat_common/helpers'
-import type { DispatchContext } from '@nhtio/adk/types'
-import type { Memory, SpooledArtifact, Tool } from '@nhtio/adk/common'
-import type { TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
-import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/types'
+import type {
+  DispatchContext,
+  DispatchExecutorFn,
+  DispatchExecutorHelpers,
+  TokenEncoding,
+  TokenEncodingId,
+} from '@nhtio/adk/types'
 import type {
   ChatCompletionsRetryConfig,
   GeminiGenerateContentAdapterOptions,

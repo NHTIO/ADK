@@ -74,7 +74,7 @@
  * ```ts
  * import { assembleCompactedTurns, type SummarizeFn } from '@nhtio/adk/batteries/context/compact'
  * import { groupHistoryIntoTurns } from '@nhtio/adk/batteries/context/thrift'
- * import { Tokenizable } from '@nhtio/adk'
+ * import { Tokenizable } from '@nhtio/adk/common'
  *
  * // A stub SummarizeFn — see the contract's TSDoc for the real DispatchRunner recipe.
  * const summarize: SummarizeFn = async ({ system, text }) => {

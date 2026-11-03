@@ -19,8 +19,8 @@
 import { toBytes } from '../_shared'
 import { isError } from '@nhtio/adk/guards'
 import { validateOptions } from './validation'
-import { decodeBase64 } from '../../../lib/helpers/base64'
-import { computeBackoff, sleepWithJitter, parseRetryAfter } from '../../../lib/utils/retry'
+import { decodeBase64 } from '@nhtio/adk/common'
+import { computeBackoff, sleepWithJitter, parseRetryAfter } from '@nhtio/adk/common'
 import {
   E_OPENAI_GENERATION_HTTP_ERROR,
   E_OPENAI_GENERATION_REQUEST_TIMEOUT,

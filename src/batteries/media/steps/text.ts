@@ -11,18 +11,17 @@
 import { argOf } from '../runtime'
 import { isError } from '@nhtio/adk/guards'
 import { E_MEDIA_STEP_FAILED } from '../exceptions'
-import { isTextual } from '@nhtio/adk/lib/mime/is_textual'
-import { decodeText } from '@nhtio/adk/lib/text/decode_text'
+import { isTextual, decodeText } from '@nhtio/adk/common'
 import { familyOf, replaceExtension, MIME } from '../formats'
 import {
   isStructuredPatch,
   parseStructuredPatch,
   applyOperations,
   normalizeWorkspacePath,
-} from '../../../lib/patch'
+} from '@nhtio/adk/lib/patch'
 import type { RegExpRef, MediaRef, MediaArgScalar } from '../plan'
 import type { StepImpl, StepResult, StepPayload } from '../runtime'
-import type { ParsedApplyPatch, WorkspaceFile } from '../../../lib/patch'
+import type { ParsedApplyPatch, WorkspaceFile } from '@nhtio/adk/lib/patch'
 
 /** One text chunk with its position in the source. */
 export interface Chunk {
@@ -104,8 +103,6 @@ export const splitFixed = (text: string, chunkSize: number, overlap: number): Ch
 }
 
 const encoder = new TextEncoder()
-
-export { decodeText } from '@nhtio/adk/lib/text/decode_text'
 
 const textPayload = (source: StepPayload, text: string, suffix: string): StepPayload => ({
   bytes: encoder.encode(text),

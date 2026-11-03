@@ -55,7 +55,7 @@
  */
 
 import { foldOps } from './ops'
-import { isObject } from '../../lib/utils/guards'
+import { isObject } from '@nhtio/adk/guards'
 import { entryNodes, reachableFrom } from './plan'
 import type { PlanStore, TransitionResult } from './store'
 import type {

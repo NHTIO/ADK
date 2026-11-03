@@ -1,4 +1,4 @@
-import { createException } from '../../factories'
+import { createException } from '@nhtio/adk/factories'
 
 /** Fatal configuration error for a development-tools pipeline. */
 export const E_INVALID_DEV_PIPELINE_CONFIG = createException<[string]>(

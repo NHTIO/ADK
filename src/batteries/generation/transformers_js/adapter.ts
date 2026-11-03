@@ -51,8 +51,7 @@
 import { isError } from '@nhtio/adk/guards'
 import { validateOptions } from './validation'
 import { rawImageToEncodedBytes } from './helpers'
-import { emitLifecycle } from '../../llm/chat_common/lifecycle'
-import { withModelSource } from '../../llm/transformers_js/model_source'
+import { emitLifecycle, withModelSource } from '@nhtio/adk/batteries/llm/transformers_js'
 import {
   E_INVALID_TRANSFORMERS_JS_GENERATION_OPTIONS,
   E_TRANSFORMERS_JS_GENERATION_ENGINE_ERROR,

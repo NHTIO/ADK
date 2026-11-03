@@ -22,9 +22,9 @@ import { sha256 } from 'js-sha256'
 import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
 import { deCollideToolCallIds } from '../chat_common'
+import { canonicalStringify } from '@nhtio/adk/common'
 import { isError, isObject, isInstanceOf } from '@nhtio/adk/guards'
 import { createNdjsonLineReader, encodeWrapperCommand } from './wire'
-import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import {
   Tokenizable,
@@ -70,11 +70,9 @@ import {
   renderArtifactHandleBody,
   looksLikeSpooledArtifact,
 } from './helpers'
-import type { Tool } from '@nhtio/adk/common'
-import type { SpoolStore } from '@nhtio/adk/common'
-import type { DispatchContext } from '@nhtio/adk/types'
-import type { TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
+import type { SpoolStore, Tool } from '@nhtio/adk/common'
 import type { WrapperEvent, WrapperCommand, WrapperBridgedTool } from './wire'
+import type { DispatchContext, TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
 import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
 import type {
   ClaudeCodeCliAdapterOptions,

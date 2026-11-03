@@ -1,4 +1,4 @@
-import { createException } from '../../factories'
+import { createException } from '@nhtio/adk/factories'
 
 /** A required orchestration encoder is not configured. */
 export const E_ORCH_ENCODER_REQUIRED = createException<[string]>(

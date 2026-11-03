@@ -1,13 +1,13 @@
 /** @module @nhtio/adk/batteries/sandbox/tools */
 import { validator } from '@nhtio/validation'
-import { isInstanceOf } from '../../../guards'
+import { isInstanceOf } from '@nhtio/adk/guards'
 import { createSandboxMedia } from '../media_reader'
 import { defaultSandboxNarrator } from '../narrator'
 import { classifySandboxPathRejection } from '../paths'
 import { resolveMime } from '../defaults/extension_mime'
 import { createModelPath, createModelWriteRoot } from '../types'
 import { defaultArtifactMinter } from '../defaults/default_minter'
-import { E_TURN_GATE_ABORTED, E_TURN_GATE_TIMEOUT } from '../../../lib/exceptions/runtime'
+import { E_TURN_GATE_ABORTED, E_TURN_GATE_TIMEOUT } from '@nhtio/adk/exceptions'
 import { E_SANDBOX_FAILED, E_SANDBOX_GATE_REQUIRED, E_SANDBOX_REFUSED } from '../exceptions'
 import {
   Tool,
@@ -15,18 +15,18 @@ import {
   SpooledArtifact,
   SpooledJsonArtifact,
   SpooledMarkdownArtifact,
-} from '../../../common'
+} from '@nhtio/adk/common'
 import type { DerivedRules } from '../types'
 import type { SandboxHandle } from '../manager'
 import type { SandboxOutcome } from '../narrator'
+import type { Tool as AdkTool } from '@nhtio/adk/forge'
+import type { DispatchContext } from '@nhtio/adk/types'
 import type { SandboxSearch } from '../contracts/search'
 import type { MimeResolver } from '../contracts/mime_resolver'
-import type { Tool as AdkTool } from '../../../lib/classes/tool'
-import type { MediaTrustTier, MediaKind } from '../../../common'
 import type { SandboxFileSystem } from '../contracts/file_system'
+import type { MediaTrustTier, MediaKind } from '@nhtio/adk/common'
 import type { PathTranslator } from '../contracts/path_translator'
 import type { ArtifactMinter } from '../contracts/artifact_minter'
-import type { DispatchContext } from '../../../lib/contracts/dispatch_context'
 
 type GateVerdict = { approved: true } | { approved: false; note?: string }
 type Gate = (

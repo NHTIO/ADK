@@ -8,6 +8,7 @@ This folder hosts custom ESLint rules that enforce policies documented in [../CO
 | --- | --- |
 | `adk/no-src-lib-import-from-functional-tests` | Functional tests must import from public barrels (`@nhtio/adk/*`), not from `src/lib/**`. |
 | `adk/no-node-builtin-from-cross-or-browser-spec` | `*.cross.spec.ts` and `*.browser.spec.ts` must not import from `node:*`. |
+| `adk/no-relative-import-from-battery` | Inside `src/batteries/<battery>/`, a relative specifier may resolve only within that same battery directory; anything crossing the boundary (a sibling battery, `src/lib/**`, the harness root barrels) must go through a public `@nhtio/adk/...` barrel. `src/batteries/index.ts` (the aggregator) is exempt. [CONTRIBUTING §1](../CONTRIBUTING.md#1-batteries--barrel-imports-only). |
 | `adk/use-is-instance-of` | Bare `value instanceof Class` is cross-realm fragile; use `isInstanceOf(value, 'Class', Class)` from `src/lib/utils/guards.ts`. |
 | `adk/prefer-is-object` | Inline `typeof x === 'object' && x !== null` must use `isObject(x)` from `src/lib/utils/guards.ts`. |
 | `adk/prefer-is-error` | Bare `value instanceof Error` must use `isError(value)` from `src/lib/utils/guards.ts`. |

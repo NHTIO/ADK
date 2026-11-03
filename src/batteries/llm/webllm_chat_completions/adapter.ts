@@ -51,10 +51,10 @@ import { DateTime } from 'luxon'
 import { sha256 } from 'js-sha256'
 import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
+import { canonicalStringify } from '@nhtio/adk/common'
 import { emitLifecycle } from '../chat_common/lifecycle'
 import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
 import { resolveToolCallParser } from '../chat_common/tool_parsers'
-import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import { looksLikeSpooledArtifact, normalizeToolName } from '../chat_common/helpers'
 import {
@@ -95,9 +95,8 @@ import {
   extractReasoningFields,
 } from './helpers'
 import type { Tool, Memory } from '@nhtio/adk/common'
-import type { DispatchContext } from '@nhtio/adk/types'
 import type { BatteryLifecyclePhase } from '../chat_common/lifecycle'
-import type { TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
+import type { DispatchContext, TokenEncoding, TokenEncodingId } from '@nhtio/adk/types'
 import type { DispatchExecutorFn, DispatchExecutorHelpers } from '@nhtio/adk/dispatch_runner'
 import type {
   WebLLMChatCompletionsAdapterOptions,

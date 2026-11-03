@@ -11,7 +11,7 @@
  * of the externalized peer.
  */
 
-import type { BatteryLifecycleHooks } from '../../../llm/chat_common'
+import type { BatteryLifecycleHooks } from '@nhtio/adk/batteries/llm/transformers_js'
 import type {
   DataType as TransformersDataType,
   DeviceType as TransformersDeviceType,
@@ -25,7 +25,7 @@ export type {
   BatteryLifecycleReport,
   BatteryLifecycleCallback,
   BatteryLifecycleHooks,
-} from '../../../llm/chat_common'
+} from '@nhtio/adk/batteries/llm/transformers_js'
 
 /** Quantization/precision dtype: `'auto'|'fp32'|'fp16'|'q8'|'q4'|…`. */
 export type TransformersJsCaptionDataType = TransformersDataType

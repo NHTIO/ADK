@@ -82,7 +82,7 @@
  */
 
 import { loadOnce } from '../../predicates'
-import { isInstanceOf, isObject } from '../../../../lib/utils/guards'
+import { isInstanceOf, isObject } from '@nhtio/adk/guards'
 import type {
   BranchNodeDefinition,
   NodeOutput,

@@ -14,8 +14,8 @@
 import { MIME } from '../formats'
 import { argOf } from '../runtime'
 import { isError } from '@nhtio/adk/guards'
+import { isTextual } from '@nhtio/adk/common'
 import { E_MEDIA_STEP_FAILED } from '../exceptions'
-import { isTextual } from '@nhtio/adk/lib/mime/is_textual'
 import type { StepImpl, StepPayload } from '../runtime'
 
 const fail = (verb: string, message: string): never => {

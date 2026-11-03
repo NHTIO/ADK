@@ -6,7 +6,7 @@
  * fallback predicates here; doing so would make the handle's security posture depend on two
  * subtly different implementations.
  */
-import { isException } from '../../lib/utils/exceptions'
+import { isException } from '@nhtio/adk/factories'
 import {
   E_SANDBOX_DEPENDENCY_MISSING,
   E_SANDBOX_FAILED,

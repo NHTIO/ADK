@@ -55,6 +55,31 @@ export const plugin: FlatConfig.Plugin = {
   rules,
 }
 
+/**
+ * @internal
+ *
+ * Shared AST-shape helper used by the battery lint plugins (`@nhtio/adk/batteries/{media,sandbox,skills}/lint`),
+ * re-exported so each battery imports it through this published subpath instead of keeping a
+ * private duplicate of the walk.
+ */
+export { unwrapExpression } from './rules/common'
+
+/**
+ * @internal
+ *
+ * The per-file import-binding map returned by `collectImportBindings`. Re-exported so the battery
+ * lint plugins can type their resolver state without reaching into `@nhtio/adk/eslint/rules`.
+ */
+export type { ImportBindings, ResolvedCalleeName } from './rules/common'
+
+/**
+ * @internal
+ *
+ * Collects a file's import bindings so a battery lint rule can resolve a callee through any alias
+ * or namespace spelling. The one shared resolver, rather than a private copy per battery.
+ */
+export { collectImportBindings, resolveCalleeName } from './rules/common'
+
 /** Every rule enabled at `error`, keyed `adk/<id>` (assumes the plugin is registered as `adk`). */
 const recommendedRules: NonNullable<FlatConfig.Config['rules']> = Object.fromEntries(
   Object.keys(rules).map((id) => [`adk/${id}`, 'error'])

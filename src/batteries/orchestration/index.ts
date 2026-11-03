@@ -84,7 +84,7 @@ import { rawPlan, rawOps, rawDiff } from './raw'
 import { forgeOrchestrationTools } from './forge'
 import { registerOrchestrationEncodables } from './encoding'
 import { validateTemplate, instantiateTemplate } from './templates'
-import { isObject, isError, isInstanceOf } from '../../lib/utils/guards'
+import { isObject, isError, isInstanceOf } from '@nhtio/adk/guards'
 import { E_ORCH_ENCODER_REQUIRED, E_ORCH_CELL_UNAVAILABLE } from './exceptions'
 import type {
   CreateOrchestration,

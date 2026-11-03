@@ -37,7 +37,7 @@
  */
 
 import { NodeRef as NodeRefClass } from './encoding'
-import { isObject, isInstanceOf } from '../../lib/utils/guards'
+import { isObject, isInstanceOf } from '@nhtio/adk/guards'
 import { outgoing, incoming, nodeById, entryNodes } from './plan'
 import type {
   ArgValue,

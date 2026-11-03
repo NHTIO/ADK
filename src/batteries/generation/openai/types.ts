@@ -13,7 +13,7 @@
  */
 
 import type { GenerationImageInput } from '../_shared'
-import type { GeneratedMediaOutput } from '../../llm/chat_common/types'
+import type { GeneratedMediaOutput } from '@nhtio/adk/batteries/llm/transformers_js'
 
 /**
  * A single piece of generated media (an image today) returned from `generate`/`edit`. Re-exported

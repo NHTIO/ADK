@@ -4,8 +4,8 @@
 
 import { Message, Tool } from '@nhtio/adk/common'
 import { inMemoryMediaReader } from '@nhtio/adk/common'
+import { isObject, isInstanceOf } from '@nhtio/adk/guards'
 import { DispatchRunner } from '@nhtio/adk/dispatch_runner'
-import { isObject, isInstanceOf } from '../../lib/utils/guards'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import { wrapInstruction, stripInstructionTags, validateReasonerOutput } from './reason'
 import type { Schema } from '@nhtio/validation'

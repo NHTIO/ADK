@@ -19,11 +19,7 @@
 import { isError } from '@nhtio/adk/guards'
 import { validateOptions } from './validation'
 import { applyEmbeddingPrefix } from '../openai/helpers'
-// Accepted-shared-runtime tier (see CONTRIBUTING.md → Design Decisions → #13 Battery design):
-// pure, class-free retry primitives shared with the Chat Completions LLM batteries. No core class
-// coupling — same tier as guards/createException — so this deep relative reach is accepted as-is,
-// not re-exported through a shim.
-import { computeBackoff, sleepWithJitter, parseRetryAfter } from '../../../lib/utils/retry'
+import { computeBackoff, sleepWithJitter, parseRetryAfter } from '@nhtio/adk/common'
 import {
   E_OLLAMA_EMBEDDINGS_HTTP_ERROR,
   E_OLLAMA_EMBEDDINGS_REQUEST_TIMEOUT,

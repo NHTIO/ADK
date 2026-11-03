@@ -9,7 +9,7 @@ import {
   classifySandboxPathRejection,
   createExistingSymlinkGuard,
   normalizeSandboxPath,
-} from '../sandbox/paths'
+} from '@nhtio/adk/batteries/sandbox'
 import {
   E_SKILL_MANIFEST_INVALID,
   E_SKILL_NOT_LOADED,
@@ -22,9 +22,9 @@ import {
   E_SKILL_WORKSPACE_FAILED,
 } from './exceptions'
 import type { SkillRecord } from './manager'
-import type { SandboxPolicy } from '../sandbox/types'
 import type { DispatchContext } from '@nhtio/adk/types'
 import type { SkillScriptConfig, SkillWorkspace } from './types'
+import type { SandboxPolicy } from '@nhtio/adk/batteries/sandbox'
 import type { SkillScriptParam, SkillScriptSpec } from './contracts'
 
 const generatedName = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/

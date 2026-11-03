@@ -25,9 +25,38 @@ upgrading.
 
 ### Added
 
-### Fixed
+- **`adk/no-relative-import-from-battery`, the project-local lint rule enforcing the battery
+  barrel rule** (closes issue #52). Inside `src/batteries/<battery>/`, a relative specifier — in an
+  `import`, a named/star/`export type` re-export, a dynamic `import()` or a `require()` — may
+  resolve only within that same battery directory; anything crossing the boundary (a sibling
+  battery, `src/lib/**`, the harness root barrels) must go through a public `@nhtio/adk/...` barrel
+  exactly as an external consumer would. The `src/batteries/index.ts` aggregator is exempt. Ships
+  in `eslint-rules/` (report-only, like the other project-local rules), wired into
+  `@nhtio/adk`-scoped flat config at `error` over `src/batteries/**`, and listed in CONTRIBUTING §1
+  and `eslint-rules/README.md`, which now document six rules.
+- **`@internal` helpers the batteries share with the harness are now exported (marked `@internal`,
+  therefore NOT covered by the semver-stability promise)** (closes issue #52). From
+  `@nhtio/adk/common`: `canonicalStringify`, `resampleTo`, `downmixToMono`, `autoSpoolRetrievable`,
+  the `ENCODE_METHOD`/`DECODE_METHOD` encoder keys, `isTextual`, `decodeText`, `runOnion`, and —
+  new in this follow-up — the retry helpers `computeBackoff`, `sleepWithJitter`, `parseRetryAfter`,
+  `linkAbortSignals` and the `BackoffConfig` type. From `@nhtio/adk/exceptions`: `passesSchema`, `validateOrThrow`,
+  `asyncValidateOrThrow`. From `@nhtio/adk/factories`: `isException`. From `@nhtio/adk/eslint`:
+  `unwrapExpression`, `collectImportBindings`, `resolveCalleeName` and the `ImportBindings` /
+  `ResolvedCalleeName` types.
 
-- **`@nhtio/adk/batteries/media/engines/execa_executor` — oversized escalation delays no longer busy-loop.** Deadline timers are capped at Node's maximum timer delay and re-armed against the monotonic deadline; `forceKillAfterDelay: Infinity` disables escalation.
+### Changed
+
+- **All bundled batteries now import harness internals only through published barrels** (closes
+  issue #52). Every relative specifier under `src/batteries/**` that crossed its own battery
+  directory, and every `@nhtio/adk/lib/...` deep import whose target was not a published entry, now
+  resolves through `@nhtio/adk/common`, `.../guards`, `.../types`, `.../exceptions`,
+  `.../factories`, `.../eslint` or the batteries' own public subpaths — the same surface an
+  external consumer gets, so a consumer-side patch of a barrel is picked up by every battery, and a
+  battery can truthfully claim to depend only on the published package. Intra-battery imports stay
+  relative. The remaining `@nhtio/adk/lib/...` battery imports (`lib/patch`, `lib/utils/retry`,
+  `lib/helpers/bignum`) are published `@module` entries and stay.
+
+All rules report-only; the rewrites need an import the rule cannot add.
 
 ### Added
 

@@ -114,3 +114,29 @@ export {
  * @primaryExport
  */
 export { E_CONTEXT_RESOLVER_MISSING } from './batteries/context/exceptions'
+
+/**
+ * @internal
+ *
+ * Schema helpers shared by the batteries that validate their own option surface. Re-exported here
+ * because `@nhtio/adk/exceptions` is the barrel that already carries the harness's validation
+ * failure class ({@link @nhtio/adk!ValidationException}) and its `E_*` codes, and battery code
+ * that guards an internal shape needs the schema helpers next to them rather than through the
+ * private `lib/utils/...` path.
+ */
+export { passesSchema } from './lib/utils/validation'
+
+/**
+ * @internal
+ *
+ * Validates `value` against `schema`, returning the validated value or throwing
+ * {@link @nhtio/adk!ValidationException}. Collects every field error.
+ */
+export { validateOrThrow } from './lib/utils/validation'
+
+/**
+ * @internal
+ *
+ * Async counterpart of {@link validateOrThrow}, for schemas carrying async custom validators.
+ */
+export { asyncValidateOrThrow } from './lib/utils/validation'

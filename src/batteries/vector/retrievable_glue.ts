@@ -2,7 +2,7 @@
  * @module @nhtio/adk/batteries/vector/retrievable
  */
 
-import { Retrievable } from '@nhtio/adk'
+import { Retrievable } from '@nhtio/adk/common'
 import type { VectorFilter } from './filters'
 import type { CallableVectorStore } from './contract'
 import type { VectorMatch, VectorMetadata } from './types'
@@ -13,7 +13,7 @@ import type {
   RetrievableStoreFn,
   RetrievableMutateFn,
   RetrievableDeleteFn,
-} from '@nhtio/adk'
+} from '@nhtio/adk/types'
 
 /** Configuration for wiring a vector store to the ADK's retrievable lifecycle callbacks. */
 export interface VectorRetrievableGlueOptions {

@@ -20,7 +20,7 @@
  * path (or want to avoid the peer entirely) inject their own {@link DecodeAudioFn}.
  */
 
-import { downmixToMono } from '../../../lib/utils/audio'
+import { downmixToMono } from '@nhtio/adk/common'
 import { isError, isObject, isInstanceOf } from '@nhtio/adk/guards'
 
 /**

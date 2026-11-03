@@ -4,8 +4,8 @@
 import { toBytes } from '../_shared'
 import { isError } from '@nhtio/adk/guards'
 import { validateOptions } from './validation'
-import { emitLifecycle } from '../../llm/chat_common/lifecycle'
-import { decodeBase64, encodeBase64 } from '../../../lib/helpers/base64'
+import { decodeBase64, encodeBase64 } from '@nhtio/adk/common'
+import { emitLifecycle } from '@nhtio/adk/batteries/llm/transformers_js'
 import {
   DEFAULT_PROTOCOL,
   buildEditCommand,

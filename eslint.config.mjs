@@ -62,6 +62,16 @@ export default [
     },
   },
   {
+    // Batteries — barrel imports only (CONTRIBUTING §1). Inside `src/batteries/<battery>/`, a
+    // relative specifier is fine for files in the SAME battery, but anything crossing the battery
+    // directory boundary (a sibling battery, `src/lib/…`, `src/common.ts`, …) must go through a
+    // published barrel (`@nhtio/adk/...`). The aggregator `src/batteries/index.ts` is exempt.
+    files: ['src/batteries/**/*.{ts,tsx,mts}'],
+    rules: {
+      'adk/no-relative-import-from-battery': 'error',
+    },
+  },
+  {
     // Cross-env specs (*.cross.spec.ts) run in BOTH the node and browser projects. They must
     // not import from `node:*` — if they need filesystem / streams / etc., they belong in a
     // `*.node.spec.ts`. Browser-only specs (*.browser.spec.ts) are also forbidden from

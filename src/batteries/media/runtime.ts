@@ -19,7 +19,7 @@
  */
 
 import { VERB_INDEX } from './verbs'
-import { runOnion } from '@nhtio/adk/lib/middleware/run_onion'
+import { runOnion } from '@nhtio/adk/common'
 import { isError, isObject, isInstanceOf } from '@nhtio/adk/guards'
 import { E_MEDIA_STEP_FAILED, E_MEDIA_STEP_UNAVAILABLE } from './exceptions'
 import type { NextFn } from '@nhtio/middleware'

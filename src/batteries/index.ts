@@ -25,12 +25,12 @@
  * that bundle.
  */
 
-export * from './llm'
-export * from './tools'
-export * from './embeddings'
-export * from './specialists'
-export * from './generation'
-export * from './tts'
-export * from './vector'
-export * from './context'
-export * from './isolation'
+export * from '@nhtio/adk/batteries/llm'
+export * from '@nhtio/adk/batteries/tools'
+export * from '@nhtio/adk/batteries/embeddings'
+export * from '@nhtio/adk/batteries/specialists'
+export * from '@nhtio/adk/batteries/generation'
+export * from '@nhtio/adk/batteries/tts'
+export * from '@nhtio/adk/batteries/vector'
+export * from '@nhtio/adk/batteries/context'
+export * from '@nhtio/adk/batteries/isolation'

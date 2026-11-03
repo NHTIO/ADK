@@ -14,8 +14,8 @@
  *    `tool_response` / `Preface` shapes.
  */
 
-import { Media } from '@nhtio/adk'
-import { SpooledArtifact } from '@nhtio/adk'
+import { Media } from '@nhtio/adk/common'
+import { SpooledArtifact } from '@nhtio/adk/common'
 import { E_UNSUPPORTED_MEDIA_MODALITY } from './exceptions'
 import {
   neutraliseDeveloperRulesTag,
@@ -39,9 +39,16 @@ import {
   renderThought,
   filterThoughts,
 } from '../openai_chat_completions/helpers'
-import type { Tokenizable } from '@nhtio/adk'
-import type { ArtifactTool, Tool } from '@nhtio/adk'
-import type { Message, Memory, Retrievable, Thought, ToolCall, ToolRegistry } from '@nhtio/adk'
+import type { Tokenizable } from '@nhtio/adk/common'
+import type { ArtifactTool, Tool } from '@nhtio/adk/common'
+import type {
+  Message,
+  Memory,
+  Retrievable,
+  Thought,
+  ToolCall,
+  ToolRegistry,
+} from '@nhtio/adk/common'
 import type {
   LiteRtMessage,
   LiteRtMessageContentItem,

@@ -1,5 +1,5 @@
 import { emitBypass, type SandboxEventSink } from './observability'
-import type { BinaryExecutor, BinaryInvocation } from '../media/contracts'
+import type { BinaryExecutor, BinaryInvocation } from '@nhtio/adk/batteries/media'
 
 /**
  * A command wrapper that REWRITES an invocation into the one the inner executor should run.

@@ -25,9 +25,13 @@
  */
 
 import { ESLintUtils } from '@typescript-eslint/utils'
-import { collectImportBindings, resolveCalleeName } from '../../eslint/rules'
+import {
+  ImportBindings,
+  collectImportBindings,
+  resolveCalleeName,
+  unwrapExpression,
+} from '@nhtio/adk/eslint'
 import type { TSESTree } from '@typescript-eslint/utils'
-import type { ImportBindings } from '../../eslint/rules'
 import type { FlatConfig } from '@typescript-eslint/utils/ts-eslint'
 
 const createRule = ESLintUtils.RuleCreator(
@@ -48,35 +52,6 @@ const propertyNamed = (
   obj.properties.find(
     (p): p is TSESTree.Property => p.type === 'Property' && literalKey(p) === name
   )
-
-/**
- * Node types that wrap an expression without changing the value it denotes.
- *
- * @remarks
- * Kept identical to `unwrapExpression` in `src/eslint/rules/common.ts`. This battery's lint module
- * cannot import that module (it is untagged, and CONTRIBUTING's barrel rule forbids a battery
- * reaching past a public subpath), so the two copies must be edited together.
- */
-const TRANSPARENT_WRAPPER_TYPES: ReadonlySet<string> = new Set([
-  'TSAsExpression',
-  'TSSatisfiesExpression',
-  'TSTypeAssertion',
-  'TSNonNullExpression',
-  'ChainExpression',
-  'ParenthesizedExpression',
-])
-
-/**
- * Strips every transparent expression wrapper (`as X`, `satisfies X`, `<X>`, `!`, `?.`, parens)
- * from `node` and returns the node that actually carries the value.
- */
-const unwrapExpression = (node: TSESTree.Node): TSESTree.Node => {
-  let current = node
-  while (TRANSPARENT_WRAPPER_TYPES.has(current.type)) {
-    current = (current as unknown as { expression: TSESTree.Node }).expression
-  }
-  return current
-}
 
 const isNotCallableValue = (node: TSESTree.Node): boolean => {
   const bare = unwrapExpression(node)

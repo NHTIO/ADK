@@ -30,9 +30,9 @@ import { DateTime } from 'luxon'
 import { sha256 } from 'js-sha256'
 import { v6 as uuidv6 } from 'uuid'
 import { validateOptions } from './validation'
+import { canonicalStringify } from '@nhtio/adk/common'
 import { isError, isInstanceOf, isObject } from '@nhtio/adk/guards'
 import { resolveToolCallParser } from '../chat_common/tool_parsers'
-import { canonicalStringify } from '../../../lib/utils/canonical_json'
 import { InMemorySpoolStore } from '@nhtio/adk/batteries/storage/in_memory'
 import { looksLikeSpooledArtifact, normalizeToolName } from '../chat_common/helpers'
 import {
@@ -40,7 +40,7 @@ import {
   sleepWithJitter,
   parseRetryAfter,
   linkAbortSignals,
-} from '../../../lib/utils/retry'
+} from '@nhtio/adk/common'
 import {
   Tokenizable,
   ToolCall,

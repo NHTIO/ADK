@@ -4,7 +4,7 @@
  */
 
 import type { ProtocolConfig } from './protocol'
-import type { BatteryLifecycleHooks } from '../../llm/chat_common/lifecycle'
+import type { BatteryLifecycleHooks } from '@nhtio/adk/batteries/llm/transformers_js'
 import type {
   BaseGenerationAdapterOptions,
   EditOptions,

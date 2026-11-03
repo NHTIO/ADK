@@ -28,3 +28,14 @@ export { default as createExceptionArgsArray } from './create_exception_args_arr
  */
 export { collectImportBindings, resolveCalleeName } from './common'
 export type { ImportBindings, ResolvedCalleeName } from './common'
+
+// ── AST shape tests shared with the repo-local battery lint rules (issue #52) ──
+
+/**
+ * @internal
+ *
+ * Unwraps parenthesized expressions, TS `as`/`satisfies` wrappers, non-null assertions, and
+ * outer type arguments so an argument-inspecting rule reads the object literal underneath. The
+ * battery lint rules duplicate this walk today; re-exported here so they share the one copy.
+ */
+export { unwrapExpression } from './common'

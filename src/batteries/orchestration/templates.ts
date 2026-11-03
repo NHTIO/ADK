@@ -48,7 +48,7 @@
 
 import { ParamRef } from './encoding'
 import { DEFAULT_PLAN_BOUNDS } from './types'
-import { isInstanceOf, isObject } from '../../lib/utils/guards'
+import { isInstanceOf, isObject } from '@nhtio/adk/guards'
 import type { PlanStore } from './store'
 import type {
   CallNodeDefinition,

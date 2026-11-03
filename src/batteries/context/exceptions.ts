@@ -39,7 +39,7 @@ import { createException } from '@nhtio/adk/factories'
  *
  * @example
  * ```ts
- * import { isInstanceOf } from '@nhtio/adk'
+ * import { isInstanceOf } from '@nhtio/adk/guards'
  *
  * try {
  *   subtractToFit(ws, contextWindow, relevantToolNames, {} as never)

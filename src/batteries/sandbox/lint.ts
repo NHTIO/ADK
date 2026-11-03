@@ -25,9 +25,13 @@
  */
 
 import { ESLintUtils } from '@typescript-eslint/utils'
-import { collectImportBindings, resolveCalleeName } from '../../eslint/rules'
+import {
+  ImportBindings,
+  collectImportBindings,
+  resolveCalleeName,
+  unwrapExpression,
+} from '@nhtio/adk/eslint'
 import type { TSESTree } from '@typescript-eslint/utils'
-import type { ImportBindings } from '../../eslint/rules'
 import type { FlatConfig } from '@typescript-eslint/utils/ts-eslint'
 
 const createRule = ESLintUtils.RuleCreator(
@@ -68,9 +72,9 @@ const isNotCallableValue = (node: TSESTree.Node): boolean => {
  * Node types that wrap an expression without changing the value it denotes.
  *
  * @remarks
- * Kept identical to `unwrapExpression` in `src/eslint/rules/common.ts`. This battery's lint module
- * cannot import that module (it is untagged, and CONTRIBUTING's barrel rule forbids a battery
- * reaching past a public subpath), so the two copies must be edited together.
+ * `unwrapExpression` itself now comes from `@nhtio/adk/eslint` (one shared walk, no private
+ * duplicate); this module still needs the set to walk OUT through wrappers when reading a type
+ * annotation, which `unwrapExpression` does not cover.
  */
 const TRANSPARENT_WRAPPER_TYPES: ReadonlySet<string> = new Set([
   'TSAsExpression',
@@ -80,18 +84,6 @@ const TRANSPARENT_WRAPPER_TYPES: ReadonlySet<string> = new Set([
   'ChainExpression',
   'ParenthesizedExpression',
 ])
-
-/**
- * Strips every transparent expression wrapper (`as X`, `satisfies X`, `<X>`, `!`, `?.`, parens)
- * from `node` and returns the node that actually carries the value.
- */
-const unwrapExpression = (node: TSESTree.Node): TSESTree.Node => {
-  let current = node
-  while (TRANSPARENT_WRAPPER_TYPES.has(current.type)) {
-    current = (current as unknown as { expression: TSESTree.Node }).expression
-  }
-  return current
-}
 
 /** Whether an object literal is annotated as (or satisfies) `SandboxPolicy`. */
 const annotatedSandboxPolicy = (node: TSESTree.ObjectExpression): boolean => {

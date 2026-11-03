@@ -1,12 +1,15 @@
+import {
+  GuestLimits,
+  PathTranslator,
+  SandboxFileSystem,
+  SandboxHandle,
+  SandboxPolicy,
+} from '@nhtio/adk/batteries/sandbox'
 import type { SkillOutputKind } from './output'
-import type { SandboxHandle } from '../sandbox/manager'
-import type { GuestLimits, SandboxPolicy } from '../sandbox/types'
 import type { SpooledArtifactConstructor } from '@nhtio/adk/forge'
 import type { ToolGateFn } from '@nhtio/adk/batteries/tools/_shared'
-import type { SandboxFileSystem } from '../sandbox/contracts/file_system'
-import type { PathTranslator } from '../sandbox/contracts/path_translator'
 import type { Tool, Retrievable, RetrievableTrustTier } from '@nhtio/adk/common'
-import type { GuestGlobal, GuestRuntimeLike } from '../sandbox/js/ses_contracts'
+import type { GuestGlobal, GuestRuntimeLike } from '@nhtio/adk/batteries/sandbox/js'
 import type {
   SkillRef,
   SkillSource,

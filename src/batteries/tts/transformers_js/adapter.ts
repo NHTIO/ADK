@@ -17,8 +17,7 @@
 
 import { isError } from '@nhtio/adk/guards'
 import { validateOptions } from './validation'
-import { emitLifecycle } from '../../llm/chat_common/lifecycle'
-import { withModelSource } from '../../llm/transformers_js/model_source'
+import { emitLifecycle, withModelSource } from '@nhtio/adk/batteries/llm/transformers_js'
 import {
   E_INVALID_TRANSFORMERS_JS_TTS_OPTIONS,
   E_TRANSFORMERS_JS_TTS_ENGINE_ERROR,

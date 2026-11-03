@@ -2,6 +2,8 @@
  * The structured apply_patch envelope: parser and applier for the
  * `*** Begin Patch` multi-file dialect.
  *
+ * @module @nhtio/adk/lib/patch
+ *
  * @remarks
  * Shared structured-patch primitives for workspace-shaped batteries. This dialect derives from the
  * GitHub Copilot apply_patch format — one of the most robust and battle-tested patch formats
@@ -16,33 +18,49 @@
 
 /** One parsed `@@` hunk: the context+removal lines and their replacement. */
 export interface ParsedHunk {
+  /** The lines the hunk expects to find in the source, in order (context + removals). */
   oldLines: string[]
+  /** The lines the hunk writes in their place, in order (context + additions). */
   newLines: string[]
+  /** How many lines the hunk adds. */
   added: number
+  /** How many lines the hunk removes. */
   removed: number
 }
 
 /** `*** Add File:` — create a new file from `+` lines. */
 export interface AddOperation {
+  /** Discriminant for an add operation. */
   type: 'add'
+  /** Workspace-relative path of the file to create. */
   path: string
+  /** The new file's content. */
   content: string
+  /** How many lines the new file contributes. */
   added: number
 }
 
 /** `*** Delete File:` — remove a file. */
 export interface DeleteOperation {
+  /** Discriminant for a delete operation. */
   type: 'delete'
+  /** Workspace-relative path of the file to remove. */
   path: string
 }
 
 /** `*** Update File:` (+ optional `*** Move to:`) — apply hunks, optionally rename. */
 export interface UpdateOperation {
+  /** Discriminant for an update operation. */
   type: 'update'
+  /** Workspace-relative path of the file to update. */
   path: string
+  /** When set, the workspace-relative path the file is moved to after updating. */
   movePath?: string
+  /** The hunks to apply, in order. */
   hunks: ParsedHunk[]
+  /** How many lines the operation adds across all hunks. */
   added: number
+  /** How many lines the operation removes across all hunks. */
   removed: number
 }
 
@@ -51,8 +69,11 @@ export type PatchOperation = AddOperation | DeleteOperation | UpdateOperation
 
 /** The parsed envelope: ordered operations plus totals. */
 export interface ParsedApplyPatch {
+  /** The operations, in the order they appeared in the envelope. */
   operations: PatchOperation[]
+  /** Total lines added across every operation. */
   added: number
+  /** Total lines removed across every operation. */
   removed: number
 }
 
@@ -323,7 +344,9 @@ export const applyUpdateHunks = (inputText: string, hunks: ParsedHunk[]): string
 
 /** One file in the virtual workspace a structured patch operates over. */
 export interface WorkspaceFile {
+  /** The file's current text. */
   text: string
+  /** The file's MIME type, used to choose a text family for added/updated files. */
   mimeType: string
 }
 

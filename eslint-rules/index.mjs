@@ -1,6 +1,7 @@
 import { default as preferIsError } from './rules/prefer-is-error.mjs'
 import { default as preferIsObject } from './rules/prefer-is-object.mjs'
 import { default as useIsInstanceOf } from './rules/use-is-instance-of.mjs'
+import { default as noRelativeFromBattery } from './rules/no-relative-import-from-battery.mjs'
 import { default as requireValidatorAnyRequired } from './rules/require-validator-any-required.mjs'
 import { default as requireStringEmptyDisposition } from './rules/require-string-empty-disposition.mjs'
 import { default as noSrcLibFromFunctional } from './rules/no-src-lib-import-from-functional-tests.mjs'
@@ -11,6 +12,7 @@ const plugin = {
   rules: {
     'no-src-lib-import-from-functional-tests': noSrcLibFromFunctional,
     'no-node-builtin-from-cross-or-browser-spec': noNodeBuiltinFromCrossOrBrowser,
+    'no-relative-import-from-battery': noRelativeFromBattery,
     'use-is-instance-of': useIsInstanceOf,
     'prefer-is-object': preferIsObject,
     'prefer-is-error': preferIsError,
